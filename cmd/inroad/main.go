@@ -426,13 +426,14 @@ func run() error {
 	// already holds the plain name in this file. It is the CONTENT LIBRARY the
 	// warmup send job draws its synthetic conversations from.
 	//
-	// All THREE assertions are comma-ok and their failure is a returned error, not
+	// All FIVE assertions are comma-ok and their failure is a returned error, not
 	// a panic and not a silent nil: inprocess.New returns coreapi.Client, and
 	// several of these methods are deliberately NOT on that interface, so a
 	// signature drifting out from under this is exactly how #216 nearly shipped a
 	// listener that registered no handlers. The compile-time assertions in
-	// internal/coreapi/inprocess/jobsource_test.go, outcomesource_test.go and
-	// inboxsendsource_test.go catch it at build; these catch it at startup.
+	// internal/coreapi/inprocess/jobsource_test.go, outcomesource_test.go,
+	// inboxsendsource_test.go and remotewiring_test.go catch it at build; these
+	// catch it at startup.
 	coreClient := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL,
 		googleOAuth, msOAuth, cfg.WarmupSecret, warmuplib.NewStaticLibrary(),
 		inprocess.WithMetrics(mtx),
@@ -456,12 +457,26 @@ func run() error {
 			"err", "the in-process coreapi client does not satisfy remote.InboxSendWriter")
 		return errors.New("inroad: in-process coreapi client does not satisfy remote.InboxSendWriter")
 	}
+	fleetInbound, ok := coreClient.(remote.InboundWriter)
+	if !ok {
+		logger.Error("fleet listener init failed",
+			"err", "the in-process coreapi client does not satisfy remote.InboundWriter")
+		return errors.New("inroad: in-process coreapi client does not satisfy remote.InboundWriter")
+	}
+	fleetWorkers, ok := coreClient.(remote.FleetWriter)
+	if !ok {
+		logger.Error("fleet listener init failed",
+			"err", "the in-process coreapi client does not satisfy remote.FleetWriter")
+		return errors.New("inroad: in-process coreapi client does not satisfy remote.FleetWriter")
+	}
 	stopFleet, err := startFleetListener(ctx, cfg, fleetDeps{
 		credentials: inprocess.NewCredentialOpener(queries, keyring, googleOAuth, msOAuth),
 		suppression: suppStore,
 		jobs:        fleetJobs,
 		outcomes:    fleetOutcomes,
 		inboxSends:  fleetInboxSends,
+		inbound:     fleetInbound,
+		fleet:       fleetWorkers,
 	}, logger)
 	if err != nil {
 		logger.Error("fleet listener init failed", "err", err)

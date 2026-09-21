@@ -69,6 +69,55 @@ type JobReader interface {
 	GetTestSendContent(ctx context.Context, workspaceID, campaignID, stepID string) (coreapi.TestSendContent, error)
 	ResolveSenderTransport(ctx context.Context, workspaceID, mailboxID string) (coreapi.SenderTransport, error)
 	FindSendByMessageID(ctx context.Context, workspaceID, messageID string) (coreapi.SendRef, error)
+	// NextWarmupDue joined in slice 4. It belongs with the reads rather than
+	// with that slice's inbound-mail group because that is what it is: pure
+	// policy over the warmup ramp for one named mailbox, workspace-pinned, no
+	// row written.
+	NextWarmupDue(ctx context.Context, mailboxID, workspaceID string) (due time.Time, sendNow bool, err error)
+}
+
+// InboundWriter is the control plane's side of the INBOUND MAIL path (slice 4)
+// — everything an inbox poll learns from a message it has just read, plus the
+// cursor that says it is done with it.
+//
+// Defined HERE, at the consumer, with the EXACT signatures the in-process
+// client already has, so cmd/inroad satisfies it by type assertion on the
+// client it already built. One interface rather than ten, for the reason
+// JobReader is one rather than eight: one decision behind it, one implementor,
+// and ten things to wire would be ten things to forget.
+//
+// Reading them as a group is also the point. These ten are what was LEFT after
+// slices 1–3b, and they are why the pool could not go until now: a poller that
+// can fetch its job and record its outcomes but cannot advance its own cursor
+// re-reads the same window forever.
+type InboundWriter interface {
+	SetInboxCursor(ctx context.Context, mailboxID, workspaceID string, lastSeenUID, uidValidity uint32) error
+	SetInboxCursorString(ctx context.Context, mailboxID, workspaceID, cursor string) error
+	StoreInboundMessage(ctx context.Context, in coreapi.InboxMessageInput) error
+	CaptureCRMReply(ctx context.Context, in coreapi.CRMReplyInput) error
+	IngestComplaint(ctx context.Context, in coreapi.ComplaintInput) error
+	ResolveReplyLabel(ctx context.Context, workspaceID, key string) (coreapi.ReplyLabel, bool, error)
+	RecordWarmupReceipt(ctx context.Context, in coreapi.WarmupReceiptInput) (coreapi.WarmupEngagePlan, error)
+	FindWarmupSendByMessageID(ctx context.Context, workspaceID, toMailboxID, messageID string) (coreapi.WarmupSendRef, bool, error)
+	RecordWarmupTokenFailure(ctx context.Context, workspaceID, recipientMailbox, fingerprint, reasonCode string) error
+	RecordWarmupHardBounce(ctx context.Context, workspaceID, messageID, observerMailbox string) (matched bool, err error)
+}
+
+// FleetWriter is the control plane's side of the WORKER INFRASTRUCTURE path
+// (slice 4): the four calls whose subject is a worker rather than a tenant row.
+//
+// Same definition-at-the-consumer rule as the four interfaces above. It is a
+// separate interface from InboundWriter rather than one more group on it
+// because the two answer to different rules — three of these carry no
+// workspace, and could not honestly carry one (docs/security.md invariant 24),
+// while every method on InboundWriter is workspace-pinned. Merging them would
+// make "every method here is tenant-scoped" untrue of the merged thing, which
+// is exactly the kind of statement that stops being checked once it is false.
+type FleetWriter interface {
+	UpsertWorkerHeartbeat(ctx context.Context, workerID, egressIP, idFamily string) error
+	RecordWorkerProviderSignals(ctx context.Context, in coreapi.WorkerProviderSignals) error
+	AssignMailboxWorker(ctx context.Context, mailboxID, workspaceID string) (queueName string, err error)
+	RecordDeadLetter(ctx context.Context, in coreapi.DeadLetterInput) error
 }
 
 // OutcomeWriter is the control plane's side of the claim and outcome path. Like
@@ -148,18 +197,24 @@ type InboxSendWriter interface {
 // parameter list so a later slice adds a field instead of a fifth positional
 // argument, and so cmd/inroad's fleetDeps maps onto it one-to-one.
 //
-// All FOUR are REQUIRED. A handler serving part of the transport would start,
+// All SIX are REQUIRED. A handler serving part of the transport would start,
 // register its routes, and fail every call to the rest at the first send — and
-// the operator who enabled the flag would have no signal until then.
+// since slice 4 a role=send worker has no pool to fall back to, so "part of the
+// transport" is not a degraded worker, it is a worker that cannot work.
 type Deps struct {
 	// Suppression answers one suppression question (slice 1).
 	Suppression SuppressionReader
-	// Jobs answers the per-message job reads (slice 2).
+	// Jobs answers the per-message job reads (slice 2, plus NextWarmupDue in
+	// slice 4).
 	Jobs JobReader
 	// Outcomes accepts the claim and outcome writes (slice 3).
 	Outcomes OutcomeWriter
 	// InboxSends serves the manual reply/compose protocol (slice 3b).
 	InboxSends InboxSendWriter
+	// Inbound accepts what an inbox poll learned, and its cursor (slice 4).
+	Inbound InboundWriter
+	// Fleet accepts the worker-infrastructure calls (slice 4).
+	Fleet FleetWriter
 }
 
 // NewHandler returns the CONTROL plane's coreapi transport handler: the server
@@ -188,6 +243,12 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 	if d.InboxSends == nil {
 		return nil, errors.New("coreapi remote: handler needs an inbox send writer")
 	}
+	if d.Inbound == nil {
+		return nil, errors.New("coreapi remote: handler needs an inbound writer")
+	}
+	if d.Fleet == nil {
+		return nil, errors.New("coreapi remote: handler needs a fleet writer")
+	}
 	if len(token) < credbroker.MinTokenLen {
 		return nil, credbroker.ErrWeakToken
 	}
@@ -196,7 +257,7 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 	}
 	h := &handler{
 		suppression: d.Suppression, jobs: d.Jobs, outcomes: d.Outcomes,
-		inboxSends: d.InboxSends, logger: logger,
+		inboxSends: d.InboxSends, inbound: d.Inbound, fleet: d.Fleet, logger: logger,
 	}
 	authed := credbroker.RequireToken(token, logger)
 	mux := http.NewServeMux()
@@ -246,6 +307,25 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 		PathInboxPendingComposeSent:    h.markPendingInboxComposeSent,
 		PathInboxPendingComposeRelease: h.releasePendingInboxCompose,
 		PathInboxPendingComposeFail:    h.failPendingInboxCompose,
+
+		// The inbound-mail routes and the last job read (slice 4).
+		PathInboxCursorUID:        h.setInboxCursorUID,
+		PathInboxCursorString:     h.setInboxCursorString,
+		PathInboxMessageStore:     h.storeInboundMessage,
+		PathCRMReplyCapture:       h.captureCRMReply,
+		PathComplaintIngest:       h.ingestComplaint,
+		PathReplyLabelResolve:     h.resolveReplyLabel,
+		PathWarmupReceipt:         h.recordWarmupReceipt,
+		PathWarmupSendByMessageID: h.warmupSendByMessageID,
+		PathWarmupTokenFailure:    h.recordWarmupTokenFailure,
+		PathWarmupHardBounce:      h.recordWarmupHardBounce,
+		PathWarmupNextDue:         h.warmupNextDue,
+
+		// The worker-infrastructure routes (slice 4).
+		PathWorkerHeartbeat:       h.upsertWorkerHeartbeat,
+		PathWorkerProviderSignals: h.recordWorkerProviderSignals,
+		PathMailboxWorkerAssign:   h.assignMailboxWorker,
+		PathDeadLetterRecord:      h.recordDeadLetter,
 	} {
 		mux.Handle("POST "+path, authed(fn))
 	}
@@ -257,6 +337,8 @@ type handler struct {
 	jobs        JobReader
 	outcomes    OutcomeWriter
 	inboxSends  InboxSendWriter
+	inbound     InboundWriter
+	fleet       FleetWriter
 	logger      *slog.Logger
 }
 

@@ -2,13 +2,16 @@
 // asks the control plane over HTTP instead of reaching into Postgres itself.
 //
 // Why it exists. internal/coreapi is documented as the control⇄execution
-// boundary "in-process now, HTTP later", and the plane split is only half
-// built: since #207 a role=send worker holds no master key, so the ciphertext
-// it can read it cannot decrypt — but cmd/worker still opens a pgxpool, so it
-// can still READ every workspace's contacts, message bodies and reply text.
-// Until that pool is gone the split is an operational lever, not a containment
-// boundary, and a worker cannot run on a host the operator does not control.
-// This package is the first of the slices that make it true.
+// boundary "in-process now, HTTP later". When this package was started the
+// split was half built: since #207 a role=send worker held no master key, so
+// the ciphertext it could read it could not decrypt — but cmd/worker still
+// opened a pgxpool, so it could still READ every workspace's contacts, message
+// bodies and reply text. Until that pool was gone the split was an operational
+// lever, not a containment boundary, and a worker could not run on a host the
+// operator does not control.
+//
+// The pool is now gone on role=send (slice 4, below), and this package is what
+// replaced it: "HTTP later" has arrived.
 //
 // Scope, deliberately, slice by slice.
 //
@@ -21,8 +24,7 @@
 // "what is the work, and what do I need to do it". Still nothing that CLAIMS,
 // marks, finalizes, advances or fails — those carry the idempotency risk, and
 // keeping them separate is what stops the dangerous work sitting behind the
-// boring work's review. The pool is still opened for them and for every
-// periodic sweep; it goes when nothing needs it.
+// boring work's review. (jobs.go has grown a ninth, NextWarmupDue, in slice 4.)
 //
 // Slice 3 (outcomes.go, outcomehandler.go) is that dangerous work: the claim
 // and outcome path for the three engines a role=send worker runs — the sequence
@@ -67,10 +69,33 @@
 // where the honest answer is "the reply is dropped until the lease expires, and
 // that is the correct trade".
 //
-// It is also the ONE place a tenant's own CORRESPONDENCE crosses this wire,
+// It is also the FIRST place a tenant's own CORRESPONDENCE crosses this wire,
 // which is unavoidable (a worker cannot send a reply it has not been given the
 // text of) and comes with a rule rather than a mitigation: no route logs a body,
 // a subject or a recipient, on either side.
+//
+// Slice 4 (inbound.go, inboundhandler.go, fleet.go, fleethandler.go,
+// controlplane.go) is the one that REMOVES THE POOL, and everything before it
+// was plumbing until it landed: cmd/worker still called db.ConnectSized for
+// every role, so a role=send host held a pgxpool whatever this package carried.
+//
+// It moves the fifteen methods that were left — the ten inbound-mail calls an
+// inbox poll makes, NextWarmupDue, and four worker-infrastructure calls. None
+// could be deferred to a later slice: a poller that can fetch its job and
+// record its outcomes but cannot advance its own cursor re-reads the same
+// window forever.
+//
+// It also completes the TYPE. *Client now satisfies coreapi.Client whole, with
+// the six cross-tenant sweeps refusing as ErrControlPlaneOnly rather than
+// answering, so cmd/worker hands a role=send worker this type instead of an
+// inprocess client over a nil pool. That distinction is the security property:
+// a type with no *pgxpool.Pool field cannot dereference one, and a depguard
+// rule (coreapi-remote-no-db) keeps the package that way.
+//
+// StoreInboundMessage is the SECOND place correspondence crosses, after slice
+// 3b's record route, for a related but distinct reason — the poller holds the
+// mailbox connection, so the control plane can only write the thread's history
+// from what the poller read. The logging rule above extends to it unchanged.
 //
 // No credential crosses this wire, in EITHER direction. A job response carries
 // a mailbox's host, port, username and TLS policy and no secret at all; the
@@ -304,17 +329,21 @@ type callBudget struct {
 }
 
 // Client is the EXECUTION plane's coreapi transport: it asks the control plane
-// rather than querying Postgres. A process wired with this for a given method
-// needs no pool, no credentials and no schema knowledge to answer it — only the
-// fleet URL and the fleet token.
+// rather than querying Postgres. A process wired with this needs no pool, no
+// credentials and no schema knowledge — only the fleet URL and the fleet token.
 //
-// What it does NOT do yet, stated plainly because the opposite is easy to
-// assume from the package existing: it does not remove the worker's database
-// access. cmd/worker still opens a pgxpool for every method this transport has
-// not yet taken over — after slice 3b that is the inbox poll cursor, the
-// inbound-message store, the warmup receipt, and every periodic sweep. The
-// containment claim becomes true when the pool is gone (slice 4), not when this
-// type is constructed.
+// Since slice 4 it is a COMPLETE coreapi.Client (see controlplane.go), and
+// cmd/worker hands it to a role=send worker as the whole thing rather than
+// installing it into an in-process client. The struct below has no
+// *pgxpool.Pool field and the package may not import one, which is what makes
+// "a fleet host cannot read the tenant database" a property of the type.
+//
+// What it does NOT contain, stated plainly because the stronger claim is easy
+// to assume: a live compromised holder of this client can still obtain any
+// mailbox's credential through the broker below, and fetch any job whose id it
+// can name. It cannot enumerate anything — no route here accepts a filter, a
+// pattern, a limit or a cursor. docs/security.md invariant 80 is the full
+// statement.
 type Client struct {
 	baseURL string
 	token   string
@@ -486,6 +515,8 @@ func (c *Client) post(ctx context.Context, b callBudget, path string, in, out an
 		return notFound(path, io.LimitReader(resp.Body, maxResponseBytes))
 	case http.StatusConflict:
 		return conflict(path, io.LimitReader(resp.Body, maxResponseBytes))
+	case http.StatusUnprocessableEntity:
+		return unprocessable(path, io.LimitReader(resp.Body, maxResponseBytes))
 	default:
 		// The status only. The control plane's error text is not ours to relay
 		// into a worker's logs, and relaying it is how an upstream string
@@ -543,4 +574,23 @@ func conflict(path string, body io.Reader) error {
 	default:
 		return fmt.Errorf("coreapi remote: %s: control plane returned 409 with no known reason", path)
 	}
+}
+
+// unprocessable is the third status that can carry a sentinel: the row is not
+// gone and no state forbids the write — the INPUT will never be accepted, so a
+// retry is pointless and, on the complaint route, actively harmful.
+//
+// Same rule as the two above, and it matters here more than on either: an
+// unrecognised 422 stays a PLAIN error, which the poller retries. Guessing
+// ErrInvalidComplaint from a bare 422 would let an intermediary's response
+// convince a worker that a real abuse report was permanently invalid, and the
+// report would be dropped rather than retried. The safe direction on this route
+// is the retry.
+func unprocessable(path string, body io.Reader) error {
+	var e errorResponse
+	_ = json.NewDecoder(body).Decode(&e)
+	if e.Code == codeInvalidComplaint {
+		return fmt.Errorf("coreapi remote: %s: %w", path, coreapi.ErrInvalidComplaint)
+	}
+	return fmt.Errorf("coreapi remote: %s: control plane returned 422 with no known reason", path)
 }

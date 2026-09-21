@@ -15,6 +15,7 @@ import (
 	// across Alpine, a developer's machine, and CI.
 	_ "time/tzdata"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/inroad/inroad/internal/app/webhook"
@@ -104,11 +105,16 @@ func run() error {
 	// one.
 	logger.Info("worker identity", "worker_id", cfg.WorkerID, "id_family", cfg.WorkerIDFamily)
 
-	// Where this worker's coreapi reads come from (INROAD_FLEET_COREAPI_REMOTE,
-	// off by default). Resolved here, beside ParseRole and before anything
-	// connects, for the same reason: a configuration that cannot work should
-	// fail with no DB attempt behind it. resolveCoreAPIMode refuses the
-	// combinations that cannot work — see cmd/worker/coreapi.go.
+	// Where this worker's coreapi calls come from, and — since slice 4 —
+	// whether it opens a database connection AT ALL. role=send reads remotely
+	// and holds no pool; role=control and role=all keep theirs.
+	//
+	// Resolved here, beside ParseRole and before anything connects, for the
+	// same reason: a configuration that cannot work should fail with no DB
+	// attempt behind it. This is also where a role=send worker given
+	// INROAD_DATABASE_URL is refused — see ErrSendRoleHoldsDatabaseURL, which
+	// is shaped exactly like F2's ErrSendRoleHoldsMasterKey next door, and for
+	// the same reason.
 	//
 	// Only the DECISION happens here. The client itself is built after the
 	// credential broker below, because a coreapi job response carries no
@@ -156,20 +162,39 @@ func run() error {
 		metricsWG.Wait()
 	}()
 
-	pool, err := db.ConnectSized(context.Background(), cfg.DatabaseURL, db.PoolSize{Max: cfg.DBMaxConns, Min: cfg.DBMinConns})
-	if err != nil {
-		logger.Error("db connect failed", "err", err)
-		return err
-	}
-	defer pool.Close()
+	// THE DATABASE CONNECTION, AND THE ROLE THAT DOES NOT OPEN ONE.
+	//
+	// A remote-coreapi worker (role=send) opens NO pool: not a lazy one, not a
+	// nil one handed to inprocess.New, none at all. Everything below that would
+	// have used it is skipped, and the coreapi client it gets is a
+	// *remote.Client, a type with no *pgxpool.Pool field. That is what makes
+	// "a compromised send host cannot read the tenant database" a fact about
+	// the build rather than a claim about reachability.
+	//
+	// role=control and role=all are UNCHANGED and keep everything: the sweeps
+	// they run are cross-tenant scans that have no remote transport by design,
+	// and role=all is the single-process self-host topology every compose file,
+	// Helm chart and Terraform config runs.
+	var pool *pgxpool.Pool
+	var queries *gen.Queries
+	if coreMode != coreAPIRemote {
+		pool, err = db.ConnectSized(context.Background(), cfg.DatabaseURL, db.PoolSize{Max: cfg.DBMaxConns, Min: cfg.DBMinConns})
+		if err != nil {
+			logger.Error("db connect failed", "err", err)
+			return err
+		}
+		defer pool.Close()
+		queries = gen.New(pool)
 
-	// pgx pool saturation, read on scrape. This is how an operator watches the
-	// connection budget (INROAD_DB_MAX_CONNS) being approached BEFORE
-	// pool.Acquire starts blocking — the worker is the replica that exhausts it
-	// first, since concurrency is per-process.
-	if err := mtx.RegisterPool(pool); err != nil {
-		logger.Error("register pool metrics failed", "err", err)
-		return err
+		// pgx pool saturation, read on scrape. This is how an operator watches
+		// the connection budget (INROAD_DB_MAX_CONNS) being approached BEFORE
+		// pool.Acquire starts blocking — the worker is the replica that
+		// exhausts it first, since concurrency is per-process. There is nothing
+		// to register when there is no pool.
+		if err := mtx.RegisterPool(pool); err != nil {
+			logger.Error("register pool metrics failed", "err", err)
+			return err
+		}
 	}
 
 	// Decide where this worker's decrypted credentials come from, and build it.
@@ -178,7 +203,13 @@ func run() error {
 	// self-host topology (RoleAll) still builds the keyring exactly as before.
 	// resolveCredentialMode owns the whole decision and refuses the unsafe
 	// combinations — see cmd/worker/credentials.go.
-	creds, err := buildCredentialWiring(cfg, role, gen.New(pool), logger)
+	//
+	// queries is NIL on a fleet host, and that is safe rather than lucky:
+	// buildCredentialWiring only touches it on the credentialsLocal branch (to
+	// build a keyring), which requires INROAD_MASTER_KEY, which a role=send
+	// worker is refused. That branch checks for itself
+	// (ErrKeyringNeedsQueries) rather than trusting this comment.
+	creds, err := buildCredentialWiring(cfg, role, queries, logger)
 	if err != nil {
 		logger.Error("credential source unusable", "err", err)
 		return err
@@ -199,62 +230,72 @@ func run() error {
 		return err
 	}
 
-	// The worker package depends only on coreapi.Client; the DB-backed
-	// implementation is wired here at the composition root.
-	googleOAuth := mail.GoogleOAuth{
-		ClientID:     cfg.GoogleClientID,
-		ClientSecret: cfg.GoogleClientSecret,
-		RedirectURL:  cfg.GoogleRedirectURL,
-	}
-	msOAuth := mail.MicrosoftOAuth{
-		ClientID:     cfg.MSClientID,
-		ClientSecret: cfg.MSClientSecret,
-		RedirectURL:  cfg.MSRedirectURL,
-		Tenant:       cfg.MSTenant,
-	}
-	// Realtime fan-out. The worker is a SEPARATE PROCESS from the API, so an
-	// in-process channel reaches no browser: every worker-originated event goes
-	// through Redis, and this hub is that path. It publishes only — the worker
-	// holds no sockets, so nothing here subscribes.
-	realtimeRedis := redis.NewClient(redisconn.MustOptions(cfg.RedisAddr))
-	defer func() { _ = realtimeRedis.Close() }()
-	realtimeHub := platformrealtime.New(realtimeRedis)
-	defer func() { _ = realtimeHub.Close() }()
-
 	// Created before the coreapi client so the webhook emitter (which enqueues
 	// webhook:deliver tasks) can be wired into it. Closed on return.
 	enq := queue.NewClient(cfg.RedisAddr)
 	defer enq.Close()
 
-	// The outbound-webhook emitter: reply.received / email.bounced /
-	// contact.unsubscribed fan out to a workspace's registered endpoints from the
-	// inbox poller's coreapi writes.
-	webhookEmitter := webhook.NewServiceEmitter(
-		webhook.NewService(webhook.NewPgStore(gen.New(pool)), keyring, enq, cfg.WebhookAllowPrivate))
+	// THE COREAPI CLIENT.
+	//
+	// On a remote (role=send) worker it IS the transport: no pool, no keyring,
+	// no realtime hub, no webhook emitter, no in-process client at all. Every
+	// one of those exists to serve a write the control plane now performs
+	// itself — it builds its coreapi client WITH all of them (cmd/inroad), so a
+	// fleet deployment's realtime events and outbound webhooks fire from there,
+	// which is where the rows they describe are written.
+	//
+	// Everything else takes the branch below, unchanged.
+	core := coreWiring.coreClient()
+	if core == nil {
+		// The OAuth configs refresh a mailbox's access token at job-build time,
+		// which only the in-process build does — a fleet worker never refreshes
+		// a token (docs/security.md invariant 9), so they are built here rather
+		// than beside the rest of the wiring.
+		googleOAuth := mail.GoogleOAuth{
+			ClientID:     cfg.GoogleClientID,
+			ClientSecret: cfg.GoogleClientSecret,
+			RedirectURL:  cfg.GoogleRedirectURL,
+		}
+		msOAuth := mail.MicrosoftOAuth{
+			ClientID:     cfg.MSClientID,
+			ClientSecret: cfg.MSClientSecret,
+			RedirectURL:  cfg.MSRedirectURL,
+			Tenant:       cfg.MSTenant,
+		}
+		// Realtime fan-out. The worker is a SEPARATE PROCESS from the API, so
+		// an in-process channel reaches no browser: every worker-originated
+		// event goes through Redis, and this hub is that path. It publishes
+		// only — the worker holds no sockets, so nothing here subscribes.
+		realtimeRedis := redis.NewClient(redisconn.MustOptions(cfg.RedisAddr))
+		defer func() { _ = realtimeRedis.Close() }()
+		realtimeHub := platformrealtime.New(realtimeRedis)
+		defer func() { _ = realtimeHub.Close() }()
 
-	coreOpts := []inprocess.Option{
-		// The claim-before-send outcome counter (won/reclaimed/lost/…) is
-		// emitted from inside the claim, which is the only place every outcome
-		// is already distinguished.
-		inprocess.WithMetrics(mtx),
-		// Enables PublishRealtime. Omitting it would leave every publish a no-op
-		// and browsers on their polling fallback — correct, but the point of the
-		// slice is that an inbound reply reaches an open tab without one.
-		inprocess.WithRealtime(realtimeHub),
-		// Enables outbound webhook fan-out for the three catalog events.
-		inprocess.WithWebhooks(webhookEmitter),
+		// The outbound-webhook emitter: reply.received / email.bounced /
+		// contact.unsubscribed fan out to a workspace's registered endpoints
+		// from the inbox poller's coreapi writes.
+		webhookEmitter := webhook.NewServiceEmitter(
+			webhook.NewService(webhook.NewPgStore(queries), keyring, enq, cfg.WebhookAllowPrivate))
+
+		coreOpts := []inprocess.Option{
+			// The claim-before-send outcome counter (won/reclaimed/lost/…) is
+			// emitted from inside the claim, which is the only place every
+			// outcome is already distinguished.
+			inprocess.WithMetrics(mtx),
+			// Enables PublishRealtime. Omitting it would leave every publish a
+			// no-op and browsers on their polling fallback — correct, but an
+			// inbound reply should reach an open tab without one.
+			inprocess.WithRealtime(realtimeHub),
+			// Enables outbound webhook fan-out for the three catalog events.
+			inprocess.WithWebhooks(webhookEmitter),
+		}
+		// Empty unless this worker brokers. When present it REPLACES the (nil)
+		// keyring-backed opener, so every credential this process needs is
+		// opened by the control plane and none of them by this host. A
+		// role=control worker may broker while keeping its pool.
+		coreOpts = append(coreOpts, creds.coreOptions()...)
+		core = inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(), coreOpts...)
 	}
-	// Empty unless this worker brokers. When present it REPLACES the (nil)
-	// keyring-backed opener, so every credential this process needs is opened
-	// by the control plane and none of them by this host.
-	coreOpts = append(coreOpts, creds.coreOptions()...)
-	// Empty unless this worker reads remotely. When present it REPLACES the
-	// pool-backed sources for the methods the remote transport has taken over —
-	// after slice 2, the suppression check and the eight per-message job reads.
-	// The pool above is still opened, because everything else still needs it
-	// (see internal/coreapi/remote).
-	coreOpts = append(coreOpts, coreWiring.coreOptions()...)
-	core := inprocess.New(pool, keyring, cfg.JWTSecret, cfg.PublicURL, googleOAuth, msOAuth, cfg.WarmupSecret, warmup.NewStaticLibrary(), coreOpts...)
 
 	// Resolve the optional worker egress IP once. When set, every outbound dial
 	// this worker makes to a mailbox provider binds its SOURCE address to it

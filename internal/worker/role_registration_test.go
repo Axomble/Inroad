@@ -19,69 +19,13 @@ import (
 	"testing"
 
 	"github.com/hibiken/asynq"
-
-	"github.com/inroad/inroad/internal/platform/queue"
 )
 
-// scheduledTasks are the periodic reconciles plus the breaker: control-role
-// only. Keep in sync with cmd/worker/scheduler.go sweepRegistrars().
-var scheduledTasks = []string{
-	queue.TaskMaintenanceCleanup,
-	queue.TaskDomainAuthSweep,
-	queue.TaskRecipientESPSweep,
-	queue.TaskFleetRotate,
-	queue.TaskWarmupSweep,
-	queue.TaskSweepEnrollments,
-	queue.TaskInboxSweep,
-	queue.TaskInboxPendingSendSweep,
-	queue.TaskDeliverabilityEvaluate,
-}
-
-// perMessageTasks are the handlers a fleet host runs. Together with
-// scheduledTasks above this is EVERY Task* constant in platform/queue: an
-// unlisted constant is a handler whose role nothing asserts, which is how the
-// drain-only inbox:reply_send below went uncovered.
-var perMessageTasks = []string{
-	queue.TaskWarmupTick,
-	queue.TaskWarmupEngage,
-	queue.TaskTestSend,
-	queue.TaskSequenceAdvance,
-	queue.TaskInboxPoll,
-	// Deprecated and drain-only — nothing enqueues it any more — but
-	// inbox.RegisterPerMessage still registers it behind ReplyCore so tasks
-	// already in Redis at cutover get delivered. That makes it per-message work
-	// like any other: a control host must not claim it, and a send host must
-	// still drain it. Delete this line with the constant, its handler and
-	// ReplyCore, not before.
-	//nolint:staticcheck // SA1019: asserting the DRAIN registration's role is the point.
-	queue.TaskInboxReplySend,
-	queue.TaskInboxPendingReplySend,
-	queue.TaskInboxPendingComposeSend,
-	queue.TaskWebhookDeliver,
-}
-
-// registered reports whether mux routes taskType. asynq's ServeMux answers that
-// without running anything: Handler returns the matched pattern, or an empty
-// one alongside its NotFoundHandler for a type nothing claims. That is the real
-// routing table, resolved by asynq's own longest-prefix rules — the same lookup
-// ProcessTask does one line before it invokes.
-//
-// It asks instead of dispatching, which is the one place this test departs from
-// TestRegisterWiresTheDeliverabilityBreaker below. There, dispatching is the
-// point: one task, fixtures seeded for it, an effect asserted afterwards. Here
-// the mux carries every handler at once over the shared integration database
-// and the assertion is only "is it routed", so dispatching all fifteen buys
-// nothing and costs a great deal. Measured, not assumed: dispatching
-// maintenance:cleanup purged 72 idempotency keys, 20 dead letters and 3 worker
-// assignments belonging to other packages' tests, which run concurrently under
-// `go test -p 4`, and domainauth:sweep then panicked in dnsauth.lookup because
-// the nil Resolver these Deps carry meets whatever sending domains the rest of
-// the suite has left in the database.
-func registered(t *testing.T, mux *asynq.ServeMux, taskType string) bool {
-	t.Helper()
-	_, pattern := mux.Handler(asynq.NewTask(taskType, nil))
-	return pattern != ""
-}
+// scheduledTasks, perMessageTasks and registered() moved to roletasks_test.go,
+// which carries NO build tag, so the same three lists and the same routing
+// question serve this file and the poolless role=send test beside it. Keeping
+// two copies of "which tasks belong to which role" is how one of them stops
+// being true.
 
 func TestSendRoleRegistersNoScheduledWork(t *testing.T) {
 	pool := registrationPool(t)

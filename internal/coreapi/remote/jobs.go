@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -255,6 +256,35 @@ func (c *Client) FindSendByMessageID(ctx context.Context, workspaceID, messageID
 		return coreapi.SendRef{}, err
 	}
 	return out.Send, nil
+}
+
+// NextWarmupDue answers when this mailbox should send its next warmup email and
+// whether one is due right now. The ninth per-message job read, added in slice 4
+// because the pool could not go without it — it is the only thing that schedules
+// the next tick, so a fleet worker without it sends one warmup per mailbox and
+// then stops.
+//
+// It sits with the READS rather than the writes because that is what it is:
+// pure policy over warmup_daily_stats and the participant, workspace-pinned, no
+// row written. It uses the CHECK budget rather than the job budget for the same
+// reason — it opens no credential, so none of the job budget's OAuth-refresh
+// headroom applies.
+//
+// FAIL CLOSED: the zero time and sendNow=FALSE alongside the error. False is
+// the safe value in both directions — the caller returns the error and asynq
+// retries, and a guessed `true` would be a warmup send scheduled by a worker
+// that never heard back from the ramp policy.
+func (c *Client) NextWarmupDue(ctx context.Context, mailboxID, workspaceID string) (time.Time, bool, error) {
+	if err := parseIDs(workspaceID, mailboxID); err != nil {
+		return time.Time{}, false, err
+	}
+	var out warmupNextDueResponse
+	if err := c.post(ctx, c.check, PathWarmupNextDue, mailboxRequest{
+		WorkspaceID: workspaceID, MailboxID: mailboxID,
+	}, &out); err != nil {
+		return time.Time{}, false, err
+	}
+	return out.Due, out.SendNow, nil
 }
 
 // credentialledJob fetches one job and brokers the credential it needs.

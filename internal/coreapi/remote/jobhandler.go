@@ -182,6 +182,27 @@ func (h *handler) sendByMessageID(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, sendRefResponse{Send: send})
 }
 
+// warmupNextDue answers when this mailbox's next warmup is due and whether one
+// is due now. The ninth job read, added in slice 4: nothing else schedules the
+// next tick, so a fleet worker without it sends one warmup per mailbox and then
+// goes quiet.
+func (h *handler) warmupNextDue(w http.ResponseWriter, r *http.Request) {
+	var in mailboxRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	ws, mailbox, ok := parsePair(w, in.WorkspaceID, "mailbox_id", in.MailboxID)
+	if !ok {
+		return
+	}
+	due, sendNow, err := h.jobs.NextWarmupDue(r.Context(), mailbox.String(), ws.String())
+	if err != nil {
+		h.fail(w, failRead, "warmup next due", err, "workspace_id", ws, "mailbox_id", mailbox)
+		return
+	}
+	respond(w, http.StatusOK, warmupNextDueResponse{Due: due, SendNow: sendNow})
+}
+
 // parsePair parses the workspace id and one subject id, answering 400 on
 // either. subjectField names the request field so an operator debugging a
 // worker sees which id was wrong — it is a field NAME from this package's own
@@ -213,9 +234,9 @@ var (
 // fail maps an implementation error to a status and a FIXED body, and logs the
 // real one.
 //
-// FOUR sentinels are reported as themselves, because the execution plane branches
+// FIVE sentinels are reported as themselves, because the execution plane branches
 // on them and a generic failure would change what the worker does. None of the
-// four is logged: every one is an ORDINARY answer rather than a fault, and
+// five is logged: every one is an ORDINARY answer rather than a fault, and
 // logging them would emit a line per non-campaign email in the inbox and a line
 // per undone reply.
 //
@@ -237,6 +258,15 @@ var (
 //   - coreapi.ErrInboxNoInbound is a thread with nothing to reply to. Permanent —
 //     no retry can build that reply.
 //
+// As 422 — the row is not gone and no state forbids the write; the INPUT will
+// never be accepted (slice 4):
+//
+//   - coreapi.ErrInvalidComplaint is a mail-borne abuse report the ingest
+//     refuses permanently. The poller skips it and retries everything else —
+//     and it returns BEFORE SetInboxCursor either way, so a generic 500 here
+//     would retry forever and wedge the mailbox's cursor, stopping every
+//     inbound signal for it on the strength of one unauthenticated message.
+//
 // Everything else is a 500 whose body is this package's own string. The
 // implementation's error text is never relayed: it can carry a pg message or
 // request detail, and relaying it would make this seam a probe oracle and put a
@@ -256,6 +286,8 @@ func (h *handler) fail(w http.ResponseWriter, k failKind, route string, err erro
 		respond(w, http.StatusConflict, errorResponse{Error: "not claimable", Code: codeNotClaimable})
 	case errors.Is(err, coreapi.ErrInboxNoInbound):
 		respond(w, http.StatusConflict, errorResponse{Error: "no inbound message to reply to", Code: codeNoInbound})
+	case errors.Is(err, coreapi.ErrInvalidComplaint):
+		respond(w, http.StatusUnprocessableEntity, errorResponse{Error: "complaint rejected", Code: codeInvalidComplaint})
 	default:
 		h.logger.Error(k.logMsg, append(logArgs, "route", route, "err", err)...)
 		respond(w, http.StatusInternalServerError, errorResponse{Error: k.bodyPrefix + route})

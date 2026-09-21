@@ -104,11 +104,14 @@ services:
   # A FLEET worker is the opposite case and this block is not the template for
   # it. A `role=send` host must NOT be given INROAD_MASTER_KEY (it refuses to
   # start if it is): that key unwraps every workspace's DEK, so a host you run
-  # because it is cheap would hold every credential in the installation. Set
-  # INROAD_WORKER_ROLE=send, drop INROAD_MASTER_KEY, and point the host at the
-  # control plane's credential broker with INROAD_FLEET_BROKER_URL +
-  # INROAD_FLEET_BROKER_TOKEN (the API side serves it on
-  # INROAD_FLEET_BROKER_ADDR). See docs/deploy/environment-variables.md.
+  # because it is cheap would hold every credential in the installation. It
+  # must NOT be given INROAD_DATABASE_URL either, for the same shape of reason
+  # and with the same refusal: it opens no database connection, so the value
+  # would go unused and the host would be holding tenant database credentials
+  # it has no use for. Set INROAD_WORKER_ROLE=send, drop BOTH of those, and
+  # point the host at the control plane's fleet listener with
+  # INROAD_FLEET_BROKER_URL + INROAD_FLEET_BROKER_TOKEN (the API side serves it
+  # on INROAD_FLEET_BROKER_ADDR). See docs/deploy/environment-variables.md.
   worker:
     image: ${INROAD_IMAGE_REPO:-ghcr.io/axomble/inroad}-worker:${INROAD_VERSION:-latest}
     environment:

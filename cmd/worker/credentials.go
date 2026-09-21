@@ -141,8 +141,25 @@ type credentialWiring struct {
 	broker credbroker.Opener
 }
 
+// ErrKeyringNeedsQueries refuses to build a local keyring without a database.
+//
+// It exists because q is NIL on a fleet host: since slice 4, cmd/worker opens
+// no pool on role=send, so there is no *gen.Queries to hand over. Every path
+// that would need one is already refused earlier (a local keyring requires
+// INROAD_MASTER_KEY, which resolveCredentialMode refuses on role=send), so
+// this is unreachable today — which is exactly why it is an error and not a
+// comment. keys.BuildKeyring would take the nil, build a DEK store over it,
+// and fail on the first unwrap: a mailbox that cannot be opened at send time,
+// rather than a process that refused to start.
+var ErrKeyringNeedsQueries = errors.New(
+	"a local keyring needs a database connection, and this worker has none: only role=control and role=all open a pool, and only they may hold INROAD_MASTER_KEY")
+
 // buildCredentialWiring turns the resolved mode into the concrete dependency.
 // It is the only place cmd/worker touches a key or a broker.
+//
+// q may be NIL, and only the credentialsLocal branch below reads it. A fleet
+// host passes nil because it has no pool; that branch refuses rather than
+// dereferencing it.
 func buildCredentialWiring(cfg *config.Config, role worker.Role, q *gen.Queries, logger *slog.Logger) (credentialWiring, error) {
 	mode, err := resolveCredentialMode(cfg, role)
 	if err != nil {
@@ -150,6 +167,9 @@ func buildCredentialWiring(cfg *config.Config, role worker.Role, q *gen.Queries,
 	}
 	switch mode {
 	case credentialsLocal:
+		if q == nil {
+			return credentialWiring{}, ErrKeyringNeedsQueries
+		}
 		kr, err := keys.BuildKeyring(cfg, q)
 		if err != nil {
 			return credentialWiring{}, err

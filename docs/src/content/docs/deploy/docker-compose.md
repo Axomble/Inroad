@@ -145,8 +145,8 @@ can reach it, and the same shared token:
 ```
 
 That one address serves both fleet transports: the credential broker and the
-remote `coreapi` transport (off on the worker side unless
-`INROAD_FLEET_COREAPI_REMOTE` is set — see
+remote `coreapi` transport (which a `role=send` worker uses unconditionally —
+it opens no database connection, so there is nothing to opt into; see
 [Remote coreapi](/deploy/environment-variables/#remote-coreapi-worker-side)).
 One token authenticates both, so rotating `INROAD_FLEET_BROKER_TOKEN` revokes
 both.

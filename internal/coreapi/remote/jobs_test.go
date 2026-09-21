@@ -41,6 +41,8 @@ type fakeJobs struct {
 	content   coreapi.TestSendContent
 	transport coreapi.SenderTransport
 	send      coreapi.SendRef
+	due       time.Time
+	sendNow   bool
 }
 
 func (f *fakeJobs) record(args ...string) { f.calls++; f.gotArgs = args }
@@ -85,6 +87,11 @@ func (f *fakeJobs) FindSendByMessageID(_ context.Context, workspaceID, messageID
 	return f.send, f.err
 }
 
+func (f *fakeJobs) NextWarmupDue(_ context.Context, mailboxID, workspaceID string) (time.Time, bool, error) {
+	f.record(mailboxID, workspaceID)
+	return f.due, f.sendNow, f.err
+}
+
 // fakeOpener is the credential broker's side: the channel that DOES hand out a
 // plaintext secret, which the coreapi wire deliberately does not.
 type fakeOpener struct {
@@ -123,7 +130,7 @@ func (f *fakeOpener) OpenWebhookEndpointSecret(_ context.Context, ws, endpoint u
 // wired to a fake broker — the two channels a fleet worker actually has.
 func serveJobs(t *testing.T, jobs *fakeJobs, opener *fakeOpener) (*Client, *httptest.Server) {
 	t.Helper()
-	h, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: jobs, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger())
+	h, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: jobs, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}, Inbound: &fakeInbound{}, Fleet: &fakeFleet{}}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -234,7 +241,7 @@ func TestSecretJobFieldsNeverCrossTheWire(t *testing.T) {
 	}
 
 	// Capture every response body the handler writes.
-	h, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: jobs, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger())
+	h, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: jobs, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}, Inbound: &fakeInbound{}, Fleet: &fakeFleet{}}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -831,13 +838,13 @@ func TestEveryJobRouteRequiresTheFleetToken(t *testing.T) {
 // A handler missing any half refuses to be built. Part of a transport would
 // start, register its routes, and fail every call to the rest at the first send.
 func TestAHandlerNeedsBothHalvesWired(t *testing.T) {
-	if _, err := NewHandler(Deps{Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger()); err == nil {
+	if _, err := NewHandler(Deps{Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}, Inbound: &fakeInbound{}, Fleet: &fakeFleet{}}, testToken, quietLogger()); err == nil {
 		t.Error("a handler with no suppression reader was built")
 	}
-	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger()); err == nil {
+	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}, Inbound: &fakeInbound{}, Fleet: &fakeFleet{}}, testToken, quietLogger()); err == nil {
 		t.Error("a handler with no job reader was built")
 	}
-	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}}, testToken, quietLogger()); err == nil {
+	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}, Inbound: &fakeInbound{}, Fleet: &fakeFleet{}}, testToken, quietLogger()); err == nil {
 		t.Error("a handler with no inbox send writer was built")
 	}
 }

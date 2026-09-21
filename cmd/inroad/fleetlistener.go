@@ -109,6 +109,29 @@ type fleetDeps struct {
 	// writes need it — so this is a superset, and the day a manual send starts
 	// emitting something it will already be wired.
 	inboxSends remote.InboxSendWriter
+	// inbound accepts what an inbox poll learned — the cursor, the inbound
+	// message, the CRM capture, the complaint, the warmup receipt and evidence,
+	// the label lookup. The SAME in-process client again, by the same type
+	// assertion, so a fleet poller's writes and a single-process poller's run
+	// identical SQL.
+	//
+	// Its optional wiring IS load-bearing here, unlike inboxSends. StoreInboundMessage
+	// publishes inbox.message.created to the workspace's open tabs and emits the
+	// reply.received webhook, and the receipt path touches the metrics seam. A
+	// client built without them would not fail — every one is a nil-safe no-op —
+	// it would silently stop a fleet deployment's unified inbox updating live and
+	// its reply webhooks firing, which is the failure mode nobody notices. The
+	// client passed here is built with all of it.
+	inbound remote.InboundWriter
+	// fleet accepts the four worker-infrastructure calls: the heartbeat, the
+	// provider-signal flush, the mailbox routing decision and the dead-letter
+	// capture.
+	//
+	// Three of the four touch NO tenant row, which is why they are a separate
+	// field rather than more methods on inbound — see remote.FleetWriter. The
+	// routing decision is the tenant one, and it is workspace-pinned like
+	// everything else.
+	fleet remote.FleetWriter
 }
 
 // newFleetHandler assembles the listener's router: each transport's own handler
@@ -118,7 +141,8 @@ type fleetDeps struct {
 // out here, so a route that moves cannot silently stop being mounted. Anything
 // not under one of them is a 404: this listener is not a second copy of the API.
 func newFleetHandler(d fleetDeps, token string, logger *slog.Logger) (http.Handler, error) {
-	if d.credentials == nil || d.suppression == nil || d.jobs == nil || d.outcomes == nil || d.inboxSends == nil {
+	if d.credentials == nil || d.suppression == nil || d.jobs == nil || d.outcomes == nil ||
+		d.inboxSends == nil || d.inbound == nil || d.fleet == nil {
 		return nil, errors.New("fleet listener: every transport must be wired")
 	}
 	brokerHandler, err := credbroker.NewHandler(d.credentials, token, logger)
@@ -127,6 +151,7 @@ func newFleetHandler(d fleetDeps, token string, logger *slog.Logger) (http.Handl
 	}
 	coreHandler, err := remote.NewHandler(remote.Deps{
 		Suppression: d.suppression, Jobs: d.jobs, Outcomes: d.outcomes, InboxSends: d.inboxSends,
+		Inbound: d.inbound, Fleet: d.fleet,
 	}, token, logger)
 	if err != nil {
 		return nil, err

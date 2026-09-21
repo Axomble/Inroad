@@ -15,7 +15,11 @@ weigh what it gives up — see [Architecture Principles](/architecture-principle
 
 - **Control Plane (`cmd/inroad`):** Hosts the HTTP REST API server, identity/authentication services, workspace configurations, webhooks, and database management. It directly manages PostgreSQL and Redis.
 - **Execution Plane (`cmd/worker`):** Contains background engines responsible for sending campaign emails, inbox polling, deliverability evaluation, and mailbox warmup.
-- **CoreAPI Boundary (`internal/coreapi`):** The worker *packages* reach relational data and unseal encrypted mailbox credentials only through `internal/coreapi` — one seam, so the execution plane can move to its own host without touching worker code. That much is enforced mechanically: a `depguard` rule in `.golangci.yml` fails the build if a non-test file under `internal/worker/` imports `internal/platform/db`. The *process* boundary is still partial. The worker opens its own `pgxpool` and resolves `coreapi` to an in-process function call rather than a network hop, so a compromised worker host still reads the tenant database. What it no longer holds is the KEY: a `role=send` worker builds no `crypto.Keyring`, refuses to start if it is given `INROAD_MASTER_KEY`, and obtains each mailbox credential from the control plane over an authenticated channel (`internal/platform/credbroker`) — so the ciphertext it can read, it cannot decrypt. The single-process self-host topology (`role=all`) keeps its local keyring and is unchanged. The boundary becomes a full one — a worker host that cannot read the tenant database at all — when the worker gives up its pool. `coreapi`'s remote transport now exists (`internal/coreapi/remote`, an authenticated HTTP hop on the same fleet listener as the credential broker, off by default behind `INROAD_FLEET_COREAPI_REMOTE`), and it carries the suppression check plus the eight per-message job READS — but nothing that claims, marks, finalizes or advances, and none of the periodic sweeps, so the pool is still opened for those and the containment claim is still not true. See [What is designed, not built](#what-is-designed-not-built).
+- **CoreAPI Boundary (`internal/coreapi`):** The worker *packages* reach relational data and unseal encrypted mailbox credentials only through `internal/coreapi` — one seam, so the execution plane can move to its own host without touching worker code. That much is enforced mechanically: a `depguard` rule in `.golangci.yml` fails the build if a non-test file under `internal/worker/` imports `internal/platform/db`. The *process* boundary now depends on the role, and the difference is the whole design.
+
+  A **`role=send`** worker opens no database connection at all. `cmd/worker` does not call `db.ConnectSized` on that role, builds no keyring, and resolves `coreapi` to `internal/coreapi/remote` — an authenticated HTTP hop to the control plane's fleet listener, the same listener and the same token the credential broker uses. Its `coreapi.Client` is a `*remote.Client`, a type with no `*pgxpool.Pool` field, and a second `depguard` rule denies `internal/platform/db` and `pgxpool` inside that package. The worker refuses to start if it is given `INROAD_MASTER_KEY` *or* `INROAD_DATABASE_URL`. So a compromised fleet host cannot read the tenant database: it can name one subject at a time — this enrollment, this mailbox, this address — over a seam whose wire shapes cannot express a filter, a pattern, a limit or a cursor. What it can still do is obtain the credential of any mailbox it names, and read the content of any job it can name an id for; `docs/security.md` invariant 80 states the residual exposure in full rather than leaving it to be inferred.
+
+  A **`role=control`** worker keeps its pool, and must: it runs the cross-tenant sweeps, which have no remote transport by design and answer `remote.ErrControlPlaneOnly` if one is ever attempted. **`role=all`** — the single-process self-host topology every compose file, Helm chart and Terraform config here runs — is entirely unchanged: same pool, same local keyring, same in-process client, and none of the fleet variables exist for it.
 
 ## The Sending Fleet
 
@@ -203,47 +207,70 @@ not discoverable. See [invariant 24](/security/) for why worker ids are shown
 rather than redacted, and [invariant 70](/security/) for the one field withheld
 outright.
 
-### What is designed, not built
+### The remote coreapi transport, built
 
-**The worker's own database connection.** The remote `coreapi` transport now
-exists (`internal/coreapi/remote`): an HTTP client on the execution plane, a
+**The worker's own database connection is gone on `role=send`.**
+`internal/coreapi/remote` is an HTTP client on the execution plane and a
 handler on the control plane's fleet listener, authenticated by the same shared
-token the credential broker uses, selected by `INROAD_FLEET_COREAPI_REMOTE` (off
-by default, refused on any role but `send`). It carries the suppression check
-every send makes, plus the eight **per-message job reads** — the whole question
-"what is the work, and what do I need to do it": the step send, inbox poll,
-warm-up send, warm-up engage and webhook delivery job builds, the test-send
-content load, the sender-transport resolve, and the inbound-reply lookup. Every
-one is read-only and side-effect free from the worker's point of view; it names
-one subject by id and receives a decided job.
+token the credential broker uses. It now carries every `coreapi` method a
+`role=send` worker can reach: the suppression check, the nine **per-message job
+reads**, the twenty **claim and outcome writes**, the twelve **manual
+reply/compose** calls, the ten **inbound-mail** calls an inbox poll makes, and
+the four **worker-infrastructure** calls. Each names one subject by id — no
+filter, no pattern, no limit, no cursor — which is the restriction that keeps
+the seam from being a query engine over the tenant database.
+
+The six cross-tenant sweeps are deliberately absent and answer
+`remote.ErrControlPlaneOnly`. They enumerate every workspace's rows, so a route
+for them would hand back exactly the capability the plane split removes; they
+run on `role=control`, beside the database, on infrastructure the operator
+already trusts with it.
 
 **Credentials do not travel on those routes.** A job response carries a
 mailbox's host, port, username and TLS policy and no secret at all; the worker
 obtains the decrypted password or access token from the credential broker on the
 same listener, by mailbox id. The choice is deliberate: `credbroker` already
 exists for brokering a secret to a keyless worker and is already mandatory on
-the only role allowed to read `coreapi` remotely, so inlining the secret in a
-job would have added a second plaintext channel with its own audit properties
-to keep in step. The secret fields on the `coreapi` job types are `json:"-"`, so
-their absence from the wire is structural rather than remembered.
+`role=send`, so inlining the secret in a job would have added a second plaintext
+channel with its own audit properties to keep in step. The secret fields on the
+`coreapi` job types are `json:"-"`, so their absence from the wire is structural
+rather than remembered.
 
 It fails closed throughout: a worker that cannot reach the control plane refuses
 to work, never falls back to a local read, never assumes "not suppressed", and
 never returns a half-built job — a job with an empty body or an unset gate flag
-would send the wrong mail rather than none.
+would send the wrong mail rather than none. A lost response is never a double
+send: the claim decides what the retry does, not the transport.
 
-Everything that CLAIMS, marks, finalizes or advances still goes through
-`cmd/worker`'s `pgxpool`, as do the periodic sweeps, so the containment claim is
-still not true. **It becomes true when the pool is gone**, which needs those
-methods ported — notably the send-claim protocol, which is where the real design
-work is and which is deliberately a slice of its own so that the dangerous work
-does not sit behind the boring work's review.
+**What a compromised fleet host can still reach** is stated in full in
+`docs/security.md` invariant 80 rather than left to be inferred. In short: it
+can obtain the credential of any mailbox it names, and read the content of any
+job it can name an id for. It cannot enumerate anything.
+
+### What is designed, not built
 
 **Per-mailbox credential scoping.** Every `send` worker consumes the shared
 `send` queue and may legitimately be handed any mailbox's job — only
-`warmup:tick` is routed by assignment — so the credential broker must answer for
-any mailbox the token names. Scoping needs per-mailbox routing first. Worker
-identity, which that scoping also needs, does now exist.
+`warmup:tick` and `inbox:poll` are routed by assignment — so the credential
+broker must answer for any mailbox the token names. Scoping needs per-mailbox
+routing for `sequence:advance` first, whose mailbox is not resolved until the
+job is hydrated. Worker identity, which that scoping also needs, does now
+exist.
+
+**Per-worker fleet tokens.** The fleet token is shared across the fleet, so the
+listener cannot tell which host is asking and revoking one revokes all. It is
+only worth splitting once the scoping above exists — until then, two hosts with
+identical reach would hold two secrets with identical reach.
+
+**Collapsing the `inprocess` source seams.** `inprocess` still carries
+`SuppressionSource`, `JobSource`, `OutcomeSource` and `InboxSendSource` — the
+four `With...` options that let slices 1–3b move the boundary a group at a
+time. Nothing in production installs them any more: a `role=send` worker uses
+`*remote.Client` whole, and every other role uses the local path. They are
+still exercised by the fault-injection integration tests that prove the
+never-double-send properties, so removing them means migrating those tests to
+drive `*remote.Client` directly — worth doing, and deliberately not bundled
+into the change that moved the boundary.
 
 ## System Monorepo Layout
 

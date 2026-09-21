@@ -1482,14 +1482,15 @@ write history that never happened.
     - The token is shared across the fleet, so the broker cannot tell which host
       is asking; revoking one revokes all. Per-worker identity is only useful
       once the point above is fixed.
-    - `cmd/worker` still opens its own `pgxpool`, so a live worker still reads
-      every workspace's rows — including `secret_ciphertext`, which it can no
-      longer decrypt. Removing the pool needs `coreapi` to grow a full HTTP
-      transport ("in-process now, HTTP later"). That transport now EXISTS
-      (invariant 72) but carries one method, so this sentence is still true.
 
-    Treat a `send` host as able to reach any mailbox in the installation while it
-    is running, and restrict the fleet listener to the fleet network.
+    The THIRD bullet this invariant used to carry — "`cmd/worker` still opens
+    its own `pgxpool`, so a live worker still reads every workspace's rows" — is
+    no longer true and has been removed rather than softened. Invariant 79 is
+    what replaced it, and it restates the residual exposure without that clause.
+
+    Treat a `send` host as able to obtain the CREDENTIAL of any mailbox in the
+    installation while it is running, and restrict the fleet listener to the
+    fleet network.
 
 ## Remote coreapi transport (the worker's database connection)
 72. **The fleet listener serves two transports under one token, deliberately.**
@@ -1587,28 +1588,44 @@ write history that never happened.
     that silently never sent on a fleet worker, which is worse than the
     allocation it bounds.
 
-75. **The switch is off by default and refuses what cannot work.**
-    `INROAD_FLEET_COREAPI_REMOTE` defaults false, needs an explicitly truthy
-    value to turn on, and makes a value `config.Load` cannot parse a startup
-    error rather than a silent false — the same rule as every other opt-out
-    here, so a typo can neither enable the transport nor pretend to. A
-    self-hosted installation sets none of it: `config.Load` with a cleared
-    environment yields false, `resolveCoreAPIMode` returns in-process for all
-    three roles, and the wiring installs ZERO `inprocess` options, so
-    `inprocess.New` builds the client it built before the transport existed
-    (`TestSelfHostDefaultsToTheInProcessCoreAPI`,
-    `TestTheDefaultSuppressionSourceReadsPostgres`). `cmd/worker` refuses the
-    flag on any role but `send` — a `control` or `all` worker runs beside the
-    database, and silently ignoring the setting would leave an operator
-    believing their worker had stopped reading it — and refuses it without
-    `INROAD_FLEET_BROKER_URL`, at startup, before anything connects.
+75. **The transport is decided by the ROLE, and self-host never takes it.**
+    *(Revised by slice 4; the original text described
+    `INROAD_FLEET_COREAPI_REMOTE` as the switch, and it no longer is.)*
+
+    `resolveCoreAPIMode` now derives the mode from `INROAD_WORKER_ROLE` alone:
+    `role=send` reads coreapi remotely, `role=control` and `role=all` read
+    in-process. The flag was made redundant rather than removed, because
+    `role=send` already had to set `INROAD_FLEET_BROKER_URL` (invariant 66) and
+    has no pool to read any other way — leaving it opt-in would have meant an
+    operator could configure a fleet host that still held a database
+    connection, which is the whole thing this is for.
+
+    `INROAD_FLEET_COREAPI_REMOTE` is KEPT, still parsed strictly (an
+    unrecognised value is a startup error, never a silent false), for the one
+    thing it can still catch: set TRUE on a `control` or `all` worker it is
+    refused, because an operator who set it there believes their worker stopped
+    reading the tenant database and it has not. Deleting the field would turn
+    that refusal into a silent ignore. On `role=send` it selects nothing.
+
+    A self-hosted installation is untouched, and that is asserted through the
+    real `config.Load` with a cleared environment rather than a struct literal:
+    `TestSelfHostDefaultsToTheInProcessCoreAPI` (role=all and role=control
+    resolve in-process and the wiring builds no remote client),
+    `TestADatabaseURLIsFineOnEveryOtherRole`, and
+    `TestTheDefaultSuppressionSourceReadsPostgres`.
+
+    A `role=send` worker with no `INROAD_FLEET_BROKER_URL` refuses at startup
+    (`TestASendWorkerWithNoFleetChannelRefusesToStart`) rather than falling back
+    to opening a pool, which is the one outcome that would make the boundary a
+    lie.
 
 76. **A coreapi job response carries no credential. There is ONE channel in the
     installation that hands out a plaintext secret, and it is the credential
-    broker.** The eight per-message job reads (`GetStepSendJob`,
+    broker.** The per-message job reads (`GetStepSendJob`,
     `GetInboxPollJob`, `GetWarmupSendJob`, `GetWarmupEngageJob`,
     `GetWebhookDeliveryJob`, `GetTestSendContent`, `ResolveSenderTransport`,
-    `FindSendByMessageID`) answer with everything about a piece of work EXCEPT
+    `FindSendByMessageID`, and `NextWarmupDue` since slice 4 — nine)
+    answer with everything about a piece of work EXCEPT
     its secret: a mailbox's host, port, username and TLS policy travel, the
     decrypted password or access token does not. The worker then opens that one
     secret through `credbroker` (invariants 67–69), naming the mailbox by id.
@@ -1883,6 +1900,131 @@ write history that never happened.
     broken implementations — with the lease dropped from the scan the live-lease
     case reports the nominated row, and with the scan returning nothing every
     rescue case fails.
+80. **A `role=send` worker opens no database connection, and refuses to start if
+    it is given a DSN.** This is the invariant slices 72–78 were building
+    toward, and until it existed all of them were plumbing: `cmd/worker` still
+    called `db.ConnectSized` for every role, so a fleet host — the role
+    introduced precisely because it may run on hardware we do not control —
+    held a `pgxpool` and could read every workspace's contacts, message bodies,
+    reply text and `secret_ciphertext`, the last of which it could not decrypt
+    (invariant 66) but could exfiltrate.
+
+    **What changed, structurally.** On `role=send`, `cmd/worker` opens no pool,
+    builds no `*gen.Queries`, registers no pool metrics, constructs no webhook
+    emitter and no realtime hub, and does not call `inprocess.New` at all. Its
+    `coreapi.Client` IS `*coreapi/remote.Client`, a type with no
+    `*pgxpool.Pool` field — so "this process cannot reach the tenant database"
+    is a fact about the type rather than a claim about which code paths happen
+    to be unreachable today. A `depguard` rule denies `internal/platform/db`
+    and `pgxpool` inside `internal/coreapi/remote`, so the transport cannot
+    regain database access without failing the build.
+
+    **The refusal.** `ErrSendRoleHoldsDatabaseURL` stops a `role=send` worker
+    that was handed `INROAD_DATABASE_URL`, at startup, before anything
+    connects, with a message naming the variable and saying to unset it. It is
+    shaped exactly like invariant 66's `ErrSendRoleHoldsMasterKey` and for the
+    same reason: either the operator believes this host talks to the database
+    (it does not, and nothing will use the value), or they have put production
+    database credentials in the environment of a machine that has no use for
+    them. It fires on the variable being PRESENT, not on the resolved value
+    being non-empty — `INROAD_DATABASE_URL` has a local-development default, so
+    a check on the value would pass vacuously for every worker
+    (`config.Config.DatabaseURLSet`,
+    `TestASendWorkerGivenADatabaseURLRefusesToStart`).
+
+    **What moved to make it possible.** Fifteen methods, the ones slices 1–3b
+    left behind: the ten inbound-mail calls an inbox poll makes
+    (`SetInboxCursor`, `SetInboxCursorString`, `StoreInboundMessage`,
+    `CaptureCRMReply`, `IngestComplaint`, `ResolveReplyLabel`,
+    `RecordWarmupReceipt`, `FindWarmupSendByMessageID`,
+    `RecordWarmupTokenFailure`, `RecordWarmupHardBounce`), `NextWarmupDue`, and
+    the four worker-infrastructure calls (`UpsertWorkerHeartbeat`,
+    `RecordWorkerProviderSignals`, `AssignMailboxWorker`, `RecordDeadLetter`).
+    Every one answers to invariant 73's rule — one named subject, no filter, no
+    pattern, no limit, no cursor — and every tenant-scoped one is
+    `workspace_id`-pinned by the same SQL the in-process path uses.
+
+    **`StoreInboundMessage` is the SECOND place a tenant's correspondence
+    crosses this wire**, after invariant 78's `inbox-reply/record`, and it is
+    unavoidable in the same way: the poller holds the mailbox connection now,
+    so the control plane can only write the thread's history from what the
+    poller read. `CaptureCRMReply` carries the reply's subject and the sender's
+    display name for the same reason. The rule invariant 78 set extends
+    unchanged and now covers thirteen more routes: **no route logs a body, a
+    subject, a recipient, an address, a Message-ID or a cursor value**, on
+    either side.
+
+    **The cross-tenant sweeps have no remote transport and never will.**
+    `ListDueEnrollments`, `ListActiveMailboxes`, `ListDueWarmupMailboxes`,
+    `EvaluateWarmupHealth`, `ListStaleSendingDomains` and
+    `RecordSendingDomainAuth` return `remote.ErrControlPlaneOnly` naming the
+    method. A route that answered any of them would be a route that returns
+    "rows matching X" over the tenant database, which is exactly the capability
+    invariant 73 forbids. A `role=send` worker never reaches them —
+    `worker.Register` gates `registerScheduled` on the role — and the refusal
+    exists for the day that stops being true: a nil-returning stub would report
+    "no work due" and the sweep would quietly do nothing.
+
+    **`coreapi.ErrInvalidComplaint` crosses as itself, on 422.** The poller
+    SKIPS a permanently-invalid abuse report and RETRIES everything else, and
+    `recordInboundComplaint` returns BEFORE `SetInboxCursor` either way — so
+    flattening the sentinel into a plain error would retry forever, wedge the
+    mailbox's cursor, and stop every inbound signal for it (campaign replies
+    and bounces included) on the strength of one unauthenticated inbound
+    message. An unrecognised 422 stays a plain error, because reading one as
+    "permanently invalid" would let an intermediary's response make a worker
+    drop a real abuse report
+    (`TestAnInvalidComplaintCrossesAsItselfAndAStray422DoesNot`).
+
+    **`role=control` and `role=all` are untouched**, and that is the constraint
+    this was built under rather than a side effect. `role=control` runs the
+    cross-tenant sweeps and keeps its pool, its keyring and its in-process
+    client; `role=all` is the single-process self-host topology every compose
+    file, Helm chart and Terraform config in the repository runs, and it sets
+    none of the fleet variables.
+
+81. **What a compromised `role=send` host can STILL reach, stated so the claim
+    is not overstated.** This is invariant 69's counterpart for the pool, and
+    it is written in the same spirit: a README in this repository once claimed
+    the control plane was the only holder of the wrapping key, which was false
+    and needed a correction PR.
+
+    The honest claim is: **a compromised `role=send` host cannot read the
+    tenant database.** It cannot issue a query, enumerate a table, page a
+    result set, or match a pattern, because the only thing it can do is name
+    one subject at a time over a seam whose wire shapes cannot express a
+    filter. What it CAN still do, while it is running:
+
+    - **Obtain any mailbox's decrypted credential**, by naming the mailbox id
+      to the credential broker. Unchanged by this slice, and unchanged for the
+      reasons invariant 69 gives: the fleet token is shared, and
+      `sequence:advance` stays on the shared queue, so the broker must answer
+      for any mailbox the token names. That credential is the ability to send
+      and read mail AS a customer — strictly more than a database read of the
+      same mailbox's row.
+    - **Fetch any JOB it can name an id for**, and a job carries real tenant
+      content: a step send's subject and HTML body, a pending reply's text, an
+      inbox poll's cursor. It cannot DISCOVER those ids — nothing lists
+      enrollments, mailboxes or threads — so in practice it reaches the work it
+      is handed, plus anything whose id it learns another way.
+    - **Read and write the mail of every mailbox it is handed a job for**,
+      which follows from the credential rather than from this seam.
+    - **Report false fleet telemetry**: a heartbeat under any worker id, and
+      provider-signal counters for any worker. Those tables hold no tenant data
+      (invariant 24), and the blast radius is a wrong placement decision, not a
+      tenant read.
+    - **Suppress an address or stop an enrollment it can name**, through the
+      outcome writes. Every one is workspace-pinned, so it must name a real
+      (workspace, row) pair; none of them reads anything back that it could not
+      already ask for.
+
+    What it can no longer do, which is the whole point: read another tenant's
+    contacts, message bodies or reply text that it was not handed a job for;
+    enumerate anything; or carry a copy of `secret_ciphertext` off the host.
+
+    The fleet listener remains the boundary that matters. **Restrict it to the
+    fleet network**, treat the token as equivalent to every mailbox credential
+    in the installation, and rotate it on any suspicion.
 
 ## Fleet operator read surface
 70. **The scheduled-job ledger never serves its error text.** `scheduled_job_runs`
