@@ -168,8 +168,10 @@ const appClockSkewAhead = 5 * time.Second
 // send_after is stamped from the APP clock. If the app clock is even slightly
 // ahead, a send_after of "now" is in the database's future: the task fires, the
 // guarded UPDATE matches nothing, ErrPendingNotClaimable is not retryable, and
-// the row sits 'scheduled' forever — there is no sweeper. The operator is told
-// their reply was sent and it never leaves.
+// the row is left 'scheduled' with its task spent. The stranded-send sweep would
+// rescue it minutes later, which turns "never leaves" into "arrives late" — the
+// operator was still told it had been sent, so the backdating is what makes the
+// row claimable now rather than eventually.
 //
 // The Service's clock is therefore pinned AHEAD of the database's on purpose.
 // Against the real statement, the row must still be claimable at once.
@@ -210,8 +212,8 @@ func TestImmediateReplyRowIsClaimableAgainstTheRealSQLGuard(t *testing.T) {
 	// by an app clock running ahead of it.
 	if err := svc.ClaimPendingReply(ctx, fx.ws, row.ID); err != nil {
 		t.Fatalf("ClaimPendingReply immediately after Reply: %v — the row a worker picks up the "+
-			"instant its task fires must be claimable, or the reply is stranded 'scheduled' "+
-			"forever with no sweeper to rescue it", err)
+			"instant its task fires must be claimable, or the reply sits 'scheduled' until "+
+			"the stranded-send sweep rescues it minutes later", err)
 	}
 
 	claimed, err := store.GetPendingReply(ctx, fx.ws, row.ID)

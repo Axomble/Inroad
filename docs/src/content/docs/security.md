@@ -1773,6 +1773,11 @@ write history that never happened.
     the lease expires, at which point the row — which still holds the body —
     delivers it exactly once.
 
+    **That last sentence was a promise nothing kept.** Delivery after the lease
+    needed *a task attempt to happen to land* after it, so asynq's retry
+    schedule — not the design — decided whether a human's reply was ever sent.
+    Invariant 79 is what makes it true.
+
     That trade is chosen rather than inherited. Handing the body back to "the same
     worker" on a re-claim would need an attempt id on the wire, and therefore a
     change to the coreapi signature, every fake and both handlers — and any such
@@ -1827,11 +1832,63 @@ write history that never happened.
     correspondence is a different and worse failure than leaking a state
     transition.
 
+79. **The sweep that rescues a stranded manual send can never cause a second
+    one.** `inbox:pending_send_sweep`
+    (`internal/worker/inbox.PendingSweepHandler`, the eighth periodic reconcile)
+    finds replies and composed emails no live task will deliver — a row left
+    `scheduled` because its enqueue was lost, and a row abandoned in `sending`
+    past its lease — and re-enqueues the ordinary send task for each. It closes
+    the gap invariant 78 named: delivery after a lost claim no longer depends on
+    a retry happening to land after the lease.
+
+    Three properties make a row safe to rescue, and they are independent:
+
+    - **The scan's predicate is a strict subset of `ClaimInboxPendingReply`'s own
+      guard** (`queries/inbox.sql`), and the **lease is added by the control
+      plane**, not supplied by the worker — `ListStrandedPendingInboxSends` adds
+      `PendingReplyLeaseSeconds` to the caller's grace itself. No configuration a
+      worker can express nominates a row whose lease is still live, which matters
+      because a live lease means another worker may be mid-dial and that mutual
+      exclusion is the only thing between two workers and one duplicate reply.
+    - **The sweep mutates nothing.** It does not release the row, clear
+      `claimed_at` or move `send_after`. A row it rescues was already claimable;
+      the sweep supplies the missing task, not a state change. Releasing a
+      `sending` row here would destroy the very evidence the claim guard reads.
+    - **The sweep never sends.** Its capability interface (`PendingSweepCore`) is
+      one read method — no claim, no mark, no release, no sender — so it hands
+      ids to the ordinary task whose first act is the same guarded claim. It
+      cannot produce a delivery the claim would have refused, including one
+      racing a worker that took the lease between the scan and the enqueue.
+
+    **The residual window, stated rather than glossed.** A row abandoned in
+    `sending` *after* its dial succeeded — the post-ACK
+    `MarkPendingInboxReplySent` never committed — cannot be told apart from one
+    abandoned before it, so a rescue re-sends it. That is invariant 4a's accepted
+    posture reaching a path that previously had no attempt to reach it, and the
+    same trade `sequence:sweep_stuck_enrollments` already makes for campaign
+    sends. It is taken in this direction because a reply that never leaves is
+    worse and the operator cannot see that it happened. Closing it would need a
+    pre-dial marker on the row, which is a hot-path write and a new fleet route.
+
+    **A rescue must not reuse the scheduled task's asynq id**, and this is
+    operational rather than cosmetic: asynq's uniqueness check is `EXISTS` on a
+    task key that outlives the run (24h of `Retention`, longer in the archive)
+    and `queue.Client.enqueue` treats a `TaskID` conflict as success. A rescue
+    keyed `inboxpending:<id>` would be swallowed silently — the metric and the
+    job-run ledger would both report a clean sweep that delivered nothing.
+
+    `pendingsweep_integration_test.go` asserts the pair against real Postgres: a
+    row under a live lease is left untouched, and a row past its lease is rescued
+    with **exactly one send** resulting. Both were verified against deliberately
+    broken implementations — with the lease dropped from the scan the live-lease
+    case reports the nominated row, and with the scan returning nothing every
+    rescue case fails.
+
 ## Fleet operator read surface
 70. **The scheduled-job ledger never serves its error text.** `scheduled_job_runs`
     has no `workspace_id` and cannot honestly have one — a periodic reconcile runs
     once per deployment, not once per tenant — while `error_message` stores
-    `err.Error()` from six handlers the ledger does not own, any of which may have
+    `err.Error()` from eight handlers the ledger does not own, any of which may have
     wrapped a mailbox address or a recipient. The table's own migration
     (`20260908123022`) says exactly that; an earlier version of that comment
     claiming the column is "never tenant content" was wrong and was corrected.

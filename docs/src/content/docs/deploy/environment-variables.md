@@ -362,9 +362,10 @@ plus headroom for the periodic sweepers and HTTP handlers — see
 
 ### The scheduler must be a singleton
 
-The worker binary also runs the asynq **scheduler**, which enqueues the seven
+The worker binary also runs the asynq **scheduler**, which enqueues the eight
 periodic reconcile sweeps (enrollments, inbox, warmup, domain auth, recipient ESP,
-maintenance cleanup, and the fleet rotation pass).
+maintenance cleanup, the fleet rotation pass, and the stranded manual-send sweep
+that re-drives a scheduled reply or composed email whose task was lost).
 
 asynq elects no leader. Every worker process with `INROAD_RUN_SCHEDULER=true`
 registers every periodic task independently, so **N replicas fire each sweep N
@@ -382,6 +383,14 @@ sweep scans, and you pay that scan N times per interval, silently.
   re-enqueues work whose live task was lost (rows committed but the Redis enqueue
   failed). Restore the flag on one replica and the next tick catches up.
 
+  One of those safety nets is worth naming, because what it catches is not
+  machine-scheduled work: the **stranded manual-send sweep** is the only thing
+  that re-drives a reply or composed email a *person* wrote and pressed send on
+  when its task was lost or its worker died mid-send. With no scheduler, such a
+  message sits in the operator's outbox looking in-flight and never leaves. It
+  is not lost — the body is on the row, and the next tick after you restore the
+  scheduler delivers it — but it is the one sweep whose absence a user sees.
+
 Each process logs its mode at startup at INFO, so you can tell from the logs
 which replica schedules:
 
@@ -392,7 +401,7 @@ level=INFO msg="scheduler disabled for this replica" run_scheduler=false
 
 ### Splitting control and send roles
 
-By default a worker process runs everything: the scheduler, the seven periodic
+By default a worker process runs everything: the scheduler, the eight periodic
 sweeps above, and every per-message handler (campaign sends, warmup ticks and
 engagement, inbox polls, manual replies, test sends, webhook deliveries). This
 is the self-host topology — one process, one trust domain, nothing to
@@ -403,7 +412,7 @@ halves, **and which queues it consumes follows the same split** — that second
 half used to be missing, which is why this section used to warn you off using
 it. It doesn't any more; the topology below is operable.
 
-- **`control`** — the scheduler and the seven periodic sweeps/purges. These scan
+- **`control`** — the scheduler and the eight periodic sweeps/purges. These scan
   or delete across every workspace, so this role is meant to stay on trusted
   infrastructure beside the API.
 - **`send`** — per-message work only: campaign sends, warmup ticks and

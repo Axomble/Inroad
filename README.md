@@ -161,7 +161,7 @@ keeps its local keyring.
                                     │
                        queues, and who consumes them
                 ┌───────────────────┴───────────────────────────────┐
-                │  control  → 7 reconciles + the campaign breaker   │  role=control, role=all
+                │  control  → 8 reconciles + the campaign breaker   │  role=control, role=all
                 │  send     → sends, polls, webhooks                │  role=send,    role=all
                 │  w:<id>   → one worker's warmup ticks             │  role=send,    role=all
                 │  default  → transitional drain only               │  role=send,    role=all
@@ -172,8 +172,8 @@ A queue is not decoration: asynq claims a task **before** consulting the handler
 that consumes a queue it cannot serve takes the task and fails it. `control` therefore consumes only
 `control` — that single omission is what stops a control host eating sends.
 
-`control` is a *role* queue, not a "scheduled work" queue. Seven of its eight task types are the
-periodic reconciles the scheduler fires; the eighth, `deliverability:evaluate`, is enqueued by the
+`control` is a *role* queue, not a "scheduled work" queue. Eight of its nine task types are the
+periodic reconciles the scheduler fires; the ninth, `deliverability:evaluate`, is enqueued by the
 **send** role after each finalised send, because re-scoring a campaign's breaker is a cross-campaign
 decision rather than one message's delivery. Routing is one table — `queueForTaskType` in
 `internal/platform/queue`.

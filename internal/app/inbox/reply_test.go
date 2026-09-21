@@ -192,9 +192,10 @@ func TestReplyQueuesARowAndEnqueuesOnlyItsID(t *testing.T) {
 // ClaimInboxPendingReply guards on `send_after <= now()` evaluated on the
 // DATABASE clock, while this instant is stamped from the APP clock. Equal-to-now
 // therefore loses to any forward skew between the two: the task fires, the claim
-// matches no row, and — because there is no sweeper over stranded 'scheduled'
-// rows (see ScheduleReply's own note) — the reply never leaves and the operator
-// is told it was sent.
+// matches no row, and the reply waits for the stranded-send sweep to notice it
+// minutes later while the operator is told it was sent. The sweep exists to
+// rescue failures nobody saw coming, not to absorb a skew this backdating
+// removes outright.
 func TestReplySendAfterIsStrictlyInThePastToSurviveClockSkew(t *testing.T) {
 	f := newReplyFixture(t)
 
