@@ -108,6 +108,21 @@ func TestAPoollessWorkerDrivesTheInboundAndFleetRoutesAgainstPostgres(t *testing
 	})
 
 	workerID := "fleet-host-" + uuid.NewString()
+	// `workers` is GLOBAL infrastructure state with no tenant column, so a live
+	// row this test leaves behind is visible to every package running beside it
+	// under `go test -p 4` — and it is not inert: AssignMailboxWorker takes the
+	// "sole live worker, place unconditionally" path only when the live fleet
+	// has at most one member, and scored placement (with its health gate and
+	// its ErrNoEligibleWorker) once it has more. Leaving this row would quietly
+	// change which branch another package's test takes.
+	//
+	// Aged rather than deleted, which is what killWorker does and for the
+	// stronger reason: a worker outside the live window is the state a real
+	// stopped host leaves, and a DELETE would also have to reason about the
+	// assignment rows referencing it.
+	t.Cleanup(func() {
+		killWorker(t, ctx, pool, workerID, 2*workerLiveWindow)
+	})
 
 	t.Run("the worker registers and is routed to", func(t *testing.T) {
 		if err := c.UpsertWorkerHeartbeat(ctx, workerID, "203.0.113.7", "ipv4"); err != nil {
