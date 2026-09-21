@@ -32,6 +32,9 @@ type warmupSettingsRequest struct {
 	MaxVolume     *int32   `json:"max_volume"`
 	RampIncrement *int32   `json:"ramp_increment"`
 	ReplyRate     *float32 `json:"reply_rate"`
+	// Timezone is the IANA zone the waking-hours window is read in. Without it
+	// warmup paced every mailbox on UTC, so a US sender warmed at 03:00 local.
+	Timezone *string `json:"timezone"`
 }
 
 // toSettings converts the wire request to the service settings type. The two

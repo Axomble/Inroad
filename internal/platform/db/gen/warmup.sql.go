@@ -661,7 +661,7 @@ func (q *Queries) GetWarmupEngageBundle(ctx context.Context, arg GetWarmupEngage
 }
 
 const getWarmupParticipant = `-- name: GetWarmupParticipant :one
-SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason, is_sentinel FROM warmup_participants
+SELECT mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason, is_sentinel, timezone FROM warmup_participants
 WHERE mailbox_id = $1 AND workspace_id = $2
 `
 
@@ -690,6 +690,7 @@ func (q *Queries) GetWarmupParticipant(ctx context.Context, arg GetWarmupPartici
 		&i.Lane,
 		&i.LaneReason,
 		&i.IsSentinel,
+		&i.Timezone,
 	)
 	return i, err
 }
@@ -2903,9 +2904,9 @@ const upsertWarmupParticipant = `-- name: UpsertWarmupParticipant :one
 
 INSERT INTO warmup_participants (
     mailbox_id, workspace_id,
-    start_volume, max_volume, ramp_increment, reply_rate, lane
+    start_volume, max_volume, ramp_increment, reply_rate, timezone, lane
 )
-SELECT $1, $2, $3, $4, $5, $6,
+SELECT $1, $2, $3, $4, $5, $6, $7,
        COALESCE((
            SELECT CASE WHEN t.to_lane IN ('quarantine','blocked') THEN t.to_lane END
            FROM warmup_state_transitions t
@@ -2921,9 +2922,10 @@ ON CONFLICT (mailbox_id) DO UPDATE SET
     max_volume     = EXCLUDED.max_volume,
     ramp_increment = EXCLUDED.ramp_increment,
     reply_rate     = EXCLUDED.reply_rate,
+    timezone       = EXCLUDED.timezone,
     updated_at     = now()
 WHERE warmup_participants.workspace_id = $2
-RETURNING mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason, is_sentinel
+RETURNING mailbox_id, workspace_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, started_at, health_state, health_reason, paused_until, created_at, updated_at, lane, lane_reason, is_sentinel, timezone
 `
 
 type UpsertWarmupParticipantParams struct {
@@ -2933,6 +2935,7 @@ type UpsertWarmupParticipantParams struct {
 	MaxVolume     int32     `json:"max_volume"`
 	RampIncrement int32     `json:"ramp_increment"`
 	ReplyRate     float32   `json:"reply_rate"`
+	Timezone      string    `json:"timezone"`
 }
 
 // Warmup control-plane persistence (spec §3). Every tenant query is
@@ -2970,6 +2973,7 @@ func (q *Queries) UpsertWarmupParticipant(ctx context.Context, arg UpsertWarmupP
 		arg.MaxVolume,
 		arg.RampIncrement,
 		arg.ReplyRate,
+		arg.Timezone,
 	)
 	var i WarmupParticipant
 	err := row.Scan(
@@ -2989,6 +2993,7 @@ func (q *Queries) UpsertWarmupParticipant(ctx context.Context, arg UpsertWarmupP
 		&i.Lane,
 		&i.LaneReason,
 		&i.IsSentinel,
+		&i.Timezone,
 	)
 	return i, err
 }

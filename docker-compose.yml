@@ -27,8 +27,18 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-inroad}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inroad}
       POSTGRES_DB: ${POSTGRES_DB:-inroad}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    # Deliberately NOT published to the host. The api, worker and migrate
+    # services reach Postgres over this compose network; nothing outside it
+    # needs to, and publishing 5432 made the documented one-command install
+    # fail outright for anyone already running Postgres locally — which is
+    # most of the developers self-hosting this. deploy/docker/
+    # docker-compose.prod.yml has always published only the API for the same
+    # reason; this manifest now matches it.
+    #
+    # To reach the database from the host anyway (psql, a GUI client), add a
+    # compose override rather than editing this file:
+    #   docker compose -f docker-compose.yml -f your-override.yml up -d
+    # with `services: { postgres: { ports: ["5432:5432"] } }`.
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -40,8 +50,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    # Not published, for the same reason as Postgres above: only the api and
+    # worker talk to Redis, and 6379 is another common local-port collision.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s

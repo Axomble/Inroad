@@ -19,12 +19,14 @@ type Participant struct {
 	MaxVolume     int32
 	RampIncrement int32
 	ReplyRate     float32
-	StartedAt     pgtype.Timestamptz
-	HealthState   string
-	HealthReason  string
-	PausedUntil   pgtype.Timestamptz
-	CreatedAt     pgtype.Timestamptz
-	UpdatedAt     pgtype.Timestamptz
+	// Timezone is the IANA zone this mailbox's waking-hours window is read in.
+	Timezone     string
+	StartedAt    pgtype.Timestamptz
+	HealthState  string
+	HealthReason string
+	PausedUntil  pgtype.Timestamptz
+	CreatedAt    pgtype.Timestamptz
+	UpdatedAt    pgtype.Timestamptz
 	// IsSentinel is the measurement-reference marker: a mailbox the operator
 	// controls end to end and is willing to expose to every lane, so a degrading
 	// mailbox has something dependable to be measured against.
@@ -52,6 +54,7 @@ func participantFromGen(p gen.WarmupParticipant) Participant {
 		MaxVolume:     p.MaxVolume,
 		RampIncrement: p.RampIncrement,
 		ReplyRate:     p.ReplyRate,
+		Timezone:      p.Timezone,
 		StartedAt:     p.StartedAt,
 		HealthState:   p.HealthState,
 		HealthReason:  p.HealthReason,
@@ -128,6 +131,7 @@ type UpsertParams struct {
 	MaxVolume     int32
 	RampIncrement int32
 	ReplyRate     float32
+	Timezone      string
 }
 
 // OverviewRow is one participant enriched for the workspace overview: its ramp
@@ -289,6 +293,7 @@ type WarmupParticipantDTO struct {
 	MaxVolume     int32   `json:"max_volume"`
 	RampIncrement int32   `json:"ramp_increment"`
 	ReplyRate     float32 `json:"reply_rate"`
+	Timezone      string  `json:"timezone"`
 	HealthState   string  `json:"health_state"`
 	HealthReason  string  `json:"health_reason"`
 	StartedAt     string  `json:"started_at"`

@@ -3258,6 +3258,8 @@ export type WarmupParticipant = {
   max_volume: number;
   ramp_increment: number;
   reply_rate: number;
+  /** IANA zone the waking-hours window is read in (default UTC) */
+  timezone: string;
   /** SENDER REPUTATION axis — the verdict on this mailbox's outbound mail, derived from inbox-placement and behavior signals. Carries no claim about pool eligibility; see lane for that. */
   health_state: "unknown" | "healthy" | "watch" | "throttled" | "paused";
   /** human-readable explanation of a non-healthy state */
@@ -3321,6 +3323,8 @@ export type WarmupSettings = {
   ramp_increment?: number;
   /** probability a warmup send is an in-thread reply */
   reply_rate?: number;
+  /** IANA zone name (e.g. Europe/Berlin) the mailbox's waking-hours window is read in. Defaults to UTC. Validated at the boundary — an unrecognised zone is a 400, because pacing a mailbox on the wrong clock stays invisible until its reputation has already suffered. */
+  timezone?: string;
 };
 export type WarmupMailbox = {
   mailbox_id: string;

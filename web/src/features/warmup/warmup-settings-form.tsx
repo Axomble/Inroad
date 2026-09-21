@@ -9,10 +9,37 @@ import { httpStatus } from '@/lib/rtk-error'
 import type { WarmupParticipant } from '@/store/api'
 import { useEnableMailboxWarmupMutation } from './api'
 import {
+  browserTimeZone,
   warmupSettingsSchema,
   warmupSettingsDefaults,
   type WarmupSettingsValues,
 } from './settings-schema'
+
+/**
+ * Datalist suggestions: a short spread of common business zones, with the
+ * viewer's own first so the usual choice is one keystroke away. Not exhaustive
+ * by design — the field validates against the runtime's full IANA database, so
+ * anything real is accepted whether or not it appears here.
+ */
+function suggestedZones(): string[] {
+  const common = [
+    'UTC',
+    'America/New_York',
+    'America/Chicago',
+    'America/Denver',
+    'America/Los_Angeles',
+    'Europe/London',
+    'Europe/Berlin',
+    'Europe/Madrid',
+    'Asia/Dubai',
+    'Asia/Karachi',
+    'Asia/Kolkata',
+    'Asia/Singapore',
+    'Asia/Tokyo',
+    'Australia/Sydney',
+  ]
+  return [...new Set([browserTimeZone(), ...common])]
+}
 
 /** Human copy for a failed enable/update, narrowed via the typed rtk-error helper. */
 function saveErrorMessage(error: unknown): string {
@@ -46,6 +73,7 @@ export function WarmupSettingsForm({
   const maxId = useId()
   const incId = useId()
   const replyId = useId()
+  const zoneId = useId()
 
   const {
     register,
@@ -60,6 +88,7 @@ export function WarmupSettingsForm({
           max_volume: participant.max_volume,
           ramp_increment: participant.ramp_increment,
           reply_rate: participant.reply_rate,
+          timezone: participant.timezone,
         }
       : warmupSettingsDefaults,
   })
@@ -92,6 +121,32 @@ export function WarmupSettingsForm({
           <Input id={replyId} type="number" inputMode="decimal" step={0.05} min={0} max={1} aria-invalid={!!errors.reply_rate} {...register('reply_rate', { valueAsNumber: true })} />
         </Field>
       </div>
+
+      <Field
+        id={zoneId}
+        label="Timezone"
+        hint="warmup only sends during waking hours in this zone"
+        error={errors.timezone?.message}
+      >
+        <Input
+          id={zoneId}
+          type="text"
+          list={`${zoneId}-zones`}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="Europe/Berlin"
+          aria-invalid={!!errors.timezone}
+          {...register('timezone')}
+        />
+        {/* A datalist, not a select: the IANA list is ~400 entries and grows, and
+            the field accepts anything the runtime knows — the suggestions are the
+            common ones plus whatever zone this browser is already in. */}
+        <datalist id={`${zoneId}-zones`}>
+          {suggestedZones().map((zone) => (
+            <option key={zone} value={zone} />
+          ))}
+        </datalist>
+      </Field>
 
       {error && (
         <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
