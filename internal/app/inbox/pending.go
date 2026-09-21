@@ -289,11 +289,15 @@ func (s *Service) queueReply(
 	// WATCHING; this failure has someone watching it.
 	if s.pendingEnq != nil {
 		if err := s.pendingEnq.EnqueuePendingInboxReply(ctx, saved.ID.String(), workspaceID.String(), sendAfter); err != nil {
-			// The row exists but nothing will ever claim it. Marked failed
-			// before returning, so the outbox tells the truth: leaving it
-			// `scheduled` would show the operator a reply that looks in flight,
-			// counts toward their outbox, and offers an Undo — for mail that is
-			// never going to leave. Wrong in the direction that matters.
+			// The row exists and no task points at it. Marked failed before
+			// returning, so the outbox agrees with the error the caller is
+			// about to see: leaving it `scheduled` would show a reply that
+			// looks in flight, counts toward their outbox, and offers an Undo,
+			// while the caller has just been told the send failed. Two answers
+			// to one question is the failure here, not a lost reply — the
+			// stranded-send sweep would deliver a `scheduled` row minutes
+			// later, which is precisely what makes leaving it there dishonest
+			// rather than merely lossy.
 			if claimer, ok := s.pending.(PendingReplyClaimer); ok {
 				if failErr := claimer.FailPendingReply(ctx, workspaceID, saved.ID,
 					"could not be queued for delivery — please send it again"); failErr != nil {
