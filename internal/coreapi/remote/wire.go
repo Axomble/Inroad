@@ -100,6 +100,54 @@ const (
 	PathInboxPendingComposeSent    = PathPrefix + "inbox-pending-compose/sent"
 	PathInboxPendingComposeRelease = PathPrefix + "inbox-pending-compose/release"
 	PathInboxPendingComposeFail    = PathPrefix + "inbox-pending-compose/fail"
+
+	// The INBOUND MAIL routes (slice 4): everything an inbox poll learns from a
+	// message it has just read, and the cursor that says it is done with it.
+	//
+	// These are what was left after slices 1–3b, and they are the ones that make
+	// the pool removable: a poller that can fetch its job and record its
+	// outcomes but cannot advance its own cursor is a poller that re-reads the
+	// same window forever.
+	//
+	// PathInboxMessageStore is the SECOND route on this transport that carries a
+	// tenant's own correspondence, after inbox-reply/record (see the slice-3b
+	// block above). It is unavoidable for the same kind of reason and a
+	// different one: the poller has just read the message off IMAP or a provider
+	// API, and the control plane — which no longer reads that mailbox itself —
+	// can only write the thread's history from what the poller hands it. The
+	// same rule follows: no route here logs a body, a subject, a recipient or an
+	// address, on either side.
+	PathInboxCursorUID        = PathPrefix + "inbox-poll/cursor-uid"
+	PathInboxCursorString     = PathPrefix + "inbox-poll/cursor-string"
+	PathInboxMessageStore     = PathPrefix + "inbox-message/store"
+	PathCRMReplyCapture       = PathPrefix + "crm-reply/capture"
+	PathComplaintIngest       = PathPrefix + "complaint/ingest"
+	PathReplyLabelResolve     = PathPrefix + "reply-label/resolve"
+	PathWarmupReceipt         = PathPrefix + "warmup-receipt/record"
+	PathWarmupSendByMessageID = PathPrefix + "warmup-send/by-message-id"
+	PathWarmupTokenFailure    = PathPrefix + "warmup-evidence/token-failure"
+	PathWarmupHardBounce      = PathPrefix + "warmup-evidence/hard-bounce"
+
+	// PathWarmupNextDue is the last per-message job READ, and it sits with the
+	// other reads rather than here: "when should this mailbox send its next
+	// warmup, and is one due now" is the same kind of question
+	// PathWarmupSendJob answers, side-effect free and about one named mailbox.
+	// It is listed in this block only because it shipped in the same slice.
+	PathWarmupNextDue = PathPrefix + "warmup-send/next-due"
+
+	// The WORKER INFRASTRUCTURE routes (slice 4). These are the only routes on
+	// this transport whose subject is NOT a tenant row: a worker's heartbeat, a
+	// worker's standing with a provider, and a task that exhausted its retries.
+	//
+	// Two of them carry no workspace at all, and that is correct rather than an
+	// omission — `workers` and `worker_provider_signals` hold no tenant column
+	// (docs/security.md invariant 24). The third, the mailbox assignment, IS
+	// tenant data and is workspace-pinned like everything else. The dead-letter
+	// record carries the workspace the failed task named.
+	PathWorkerHeartbeat       = PathPrefix + "worker/heartbeat"
+	PathWorkerProviderSignals = PathPrefix + "worker/provider-signals"
+	PathMailboxWorkerAssign   = PathPrefix + "worker/assign-mailbox"
+	PathDeadLetterRecord      = PathPrefix + "dead-letter/record"
 )
 
 // The claim outcome, on the wire.
@@ -157,6 +205,21 @@ const (
 	// message to reply to. PERMANENT — both reply handlers log it and fail the
 	// row rather than retrying a reply that can never be built.
 	codeNoInbound = "no_inbound"
+
+	// codeInvalidComplaint → coreapi.ErrInvalidComplaint, on 422 rather than
+	// 404 or 409: the row is not gone and no state forbids the write — the
+	// INPUT is one the control plane will never accept, however many times it
+	// is sent.
+	//
+	// It is load-bearing for the same reason the two above are, and the failure
+	// it prevents is the largest on this seam. An abuse report the ingest
+	// refuses permanently is skipped by the poller (poll.go's
+	// errors.Is(err, coreapi.ErrInvalidComplaint) arm); flattened to a plain
+	// error it becomes a retry, and recordInboundComplaint returns BEFORE
+	// SetInboxCursor — so the mailbox's cursor never advances and every inbound
+	// signal for it stops, campaign replies and bounces included, on the
+	// strength of one unauthenticated inbound message.
+	codeInvalidComplaint = "invalid_complaint"
 )
 
 // suppressionRequest asks whether ONE named address is suppressed in ONE named
@@ -604,6 +667,234 @@ type pendingInboxComposeResponse struct {
 // the other.
 type claimedResponse struct {
 	Claimed bool `json:"claimed"`
+}
+
+// The INBOUND MAIL shapes (slice 4).
+//
+// # Ids in, values out — with two documented exceptions, both inbound
+//
+// Eight of the ten routes carry ids and closed-vocabulary tokens only. The two
+// that do not are inboxMessageRequest (the inbound message itself) and
+// crmReplyRequest (its subject and the sender's display name), and both travel
+// in the SAME direction: from a worker that has just read the message, to a
+// control plane that no longer reads that mailbox. Nothing on any of the ten can
+// express "rows matching X" — no filter, no pattern, no limit, no cursor — which
+// is the restriction invariant 73 puts on this whole seam.
+//
+// # The free-text values that are not correspondence
+//
+// Several fields here come off unauthenticated inbound mail: a Message-ID, a
+// token fingerprint, an IMAP folder name. Every one travels UNVALIDATED for the
+// parity reason messageIDRequest states — whatever string the worker would have
+// handed the local query, the control plane hands to the same query — and the
+// request body cap is what bounds them. Adding a check on one side only would be
+// a behaviour difference between the two transports, which is the one thing a
+// transport must not introduce.
+
+// inboxCursorUIDRequest advances one mailbox's IMAP poll cursor.
+//
+// The two counters are uint32 because that is what an IMAP UID is, on the wire
+// and in coreapi. Encoding them as JSON numbers is exact: both fit in a float64
+// mantissa with 21 bits to spare, so there is no precision question to reason
+// about here (there would be at uint64).
+type inboxCursorUIDRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	MailboxID   string `json:"mailbox_id"`
+	LastSeenUID uint32 `json:"last_seen_uid"`
+	UIDValidity uint32 `json:"uid_validity"`
+}
+
+// inboxCursorStringRequest advances one mailbox's OPAQUE provider cursor (a
+// Gmail historyId, a Graph delta link). The value is persisted and re-dialed
+// later, and the host-pinning that makes that safe (docs/security.md invariant
+// 13) happens where it is USED, not here — this route only stores it.
+type inboxCursorStringRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	MailboxID   string `json:"mailbox_id"`
+	Cursor      string `json:"cursor"`
+}
+
+// inboxMessageRequest carries one inbound message onto its thread.
+//
+// It wraps coreapi.InboxMessageInput itself rather than mirroring its thirteen
+// fields, the same rule every other job- and input-carrying shape here follows:
+// a field added to the input and forgotten in a hand-written mirror arrives
+// ZERO-VALUED, and for CampaignID/ContactID — which are *string precisely so
+// "no match" is unambiguous — a zero value is a silently mis-threaded message.
+//
+// This is the route that carries a tenant's inbound correspondence. It is the
+// only way the control plane can have it: the poller holds the mailbox
+// connection now, and the thread history is written from what it read.
+type inboxMessageRequest struct {
+	WorkspaceID string                    `json:"workspace_id"`
+	Message     coreapi.InboxMessageInput `json:"message"`
+}
+
+// crmReplyRequest captures one positive reply as a CRM activity. Wraps the
+// coreapi input for the reason above; it carries the reply's subject and the
+// sender's display name, which the CRM record is written from.
+type crmReplyRequest struct {
+	WorkspaceID string                `json:"workspace_id"`
+	Reply       coreapi.CRMReplyInput `json:"reply"`
+}
+
+// complaintRequest ingests one complaint that arrived AS MAIL.
+//
+// Email on it is OUR OWN send's contact, never an address the report named —
+// the worker resolves it from the send row before calling, because a feedback
+// report is unauthenticated mail and acting on a reported address would let
+// anyone suppress a contact they do not own (docs/security.md invariant 65).
+// That resolution stays on the worker's side of this wire, so the field is
+// carried rather than re-derived: the control plane's own pin and the ingest's
+// workspace-scoped send lookup are what make it safe regardless.
+type complaintRequest struct {
+	WorkspaceID string                 `json:"workspace_id"`
+	Complaint   coreapi.ComplaintInput `json:"complaint"`
+}
+
+// replyLabelRequest resolves one classified reply key to the workspace's label.
+//
+// Key is a machine key the classifier produced, not user input, but it travels
+// unvalidated like every other free-text value here.
+type replyLabelRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	Key         string `json:"key"`
+}
+
+// replyLabelResponse answers with the label and whether one was found.
+//
+// Found is an explicit field rather than a 404, and the distinction is
+// load-bearing: ok=false is the ORDINARY answer for a deleted custom label
+// whose key survives on historical rows, and the caller must fall back to its
+// pre-taxonomy behaviour rather than fail the poll. A 404 would arrive at
+// notFound(), which maps an unrecognised body to a plain error — turning the
+// normal case into a failed task.
+type replyLabelResponse struct {
+	Found bool               `json:"found"`
+	Label coreapi.ReplyLabel `json:"label"`
+}
+
+// warmupReceiptRequest records one received warmup message. Wraps the coreapi
+// input for the reason inboxMessageRequest does: the identity verdicts on it
+// are five separate strings that normalise to "unknown", so a forgotten mirror
+// field would record a clean verdict nobody observed.
+type warmupReceiptRequest struct {
+	WorkspaceID string                     `json:"workspace_id"`
+	Receipt     coreapi.WarmupReceiptInput `json:"receipt"`
+}
+
+// warmupEngagePlanResponse carries the deterministic engagement plan back.
+//
+// EngageAfter is a time.Duration, so it crosses as an integer count of
+// NANOSECONDS — encoding/json's treatment of the underlying int64. That is
+// exact and symmetric (both sides decode into the same type), and it is
+// mentioned because a duration that reads as "1800000000000" in a capture is
+// otherwise alarming.
+type warmupEngagePlanResponse struct {
+	Plan coreapi.WarmupEngagePlan `json:"plan"`
+}
+
+// warmupSendLookupRequest resolves an inbound message back to a warmup send
+// when the X-Inroad-Warmup header did not survive the provider.
+//
+// All three values are required and all three are pinned by the implementation:
+// the send must belong to this workspace AND have been addressed to this
+// mailbox. The narrowness is the point — it answers a question about our own
+// data, never a claim the message carries — so the transport carries all three
+// rather than letting the control plane infer one.
+type warmupSendLookupRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	ToMailboxID string `json:"to_mailbox_id"`
+	MessageID   string `json:"message_id"`
+}
+
+// warmupSendLookupResponse answers with the send and whether one was found.
+// Found is a field rather than a 404 for the reason replyLabelResponse's is:
+// ok=false is the ordinary answer for nearly every message the poller sees.
+type warmupSendLookupResponse struct {
+	Found bool                  `json:"found"`
+	Send  coreapi.WarmupSendRef `json:"send"`
+}
+
+// warmupTokenFailureRequest records that a warmup token did not verify.
+//
+// Fingerprint is a truncated hash of the rejected token, not the token — the
+// in-process caller computes it, and this transport carries what it was given.
+type warmupTokenFailureRequest struct {
+	WorkspaceID      string `json:"workspace_id"`
+	RecipientMailbox string `json:"recipient_mailbox"`
+	Fingerprint      string `json:"fingerprint"`
+	ReasonCode       string `json:"reason_code"`
+}
+
+// warmupHardBounceRequest attributes one DSN to a warmup send, if it is one.
+type warmupHardBounceRequest struct {
+	WorkspaceID     string `json:"workspace_id"`
+	MessageID       string `json:"message_id"`
+	ObserverMailbox string `json:"observer_mailbox"`
+}
+
+// warmupHardBounceResponse reports whether the DSN matched a warmup send.
+// matched=false is the ordinary answer — it is how the poller knows to try the
+// campaign lookup next — so it is a field, not a 404.
+type warmupHardBounceResponse struct {
+	Matched bool `json:"matched"`
+}
+
+// warmupNextDueResponse answers when this mailbox's next warmup is due and
+// whether one is due now. Both travel: sendNow is not derivable from due on the
+// caller's clock, because the decision is the control plane's ramp/window
+// policy, not a comparison against time.Now.
+type warmupNextDueResponse struct {
+	Due     time.Time `json:"due"`
+	SendNow bool      `json:"send_now"`
+}
+
+// The WORKER INFRASTRUCTURE shapes (slice 4).
+//
+// Two of the four carry NO workspace, and that is the honest encoding rather
+// than a field someone forgot. `workers` and `worker_provider_signals` are
+// global infrastructure state with no tenant column (docs/security.md invariant
+// 24): several workspaces' mailboxes share one worker, and how a provider is
+// treating one egress IP belongs to no tenant. Inventing a workspace field to
+// make the shapes look uniform would be inventing a tenancy claim.
+
+// workerHeartbeatRequest refreshes this worker's row in the global registry.
+// The worker id is the worker's own (config.WorkerID), not a tenant value.
+type workerHeartbeatRequest struct {
+	WorkerID string `json:"worker_id"`
+	EgressIP string `json:"egress_ip"`
+	IDFamily string `json:"id_family"`
+}
+
+// providerSignalsRequest reports one accumulation window of provider verdicts.
+// Wraps the coreapi type for the usual reason; Counts is a slice, so the body
+// grows with the number of distinct (provider, operation, reason) triples a
+// window produced — a closed vocabulary, bounded well under the ids-only cap.
+type providerSignalsRequest struct {
+	Signals coreapi.WorkerProviderSignals `json:"signals"`
+}
+
+// assignMailboxResponse is the destination queue a mailbox's traffic routes to:
+// "w:<worker id>" or "" for the shared queue.
+//
+// Empty is a VALID answer and not an error — it is what a deployment with no
+// live worker registry returns, and it means "use the shared queue" — so the
+// response is a struct with an always-present field rather than a route that
+// could 404.
+type assignMailboxResponse struct {
+	Queue string `json:"queue"`
+}
+
+// deadLetterRequest persists one retry-exhausted task.
+//
+// Payload is the ORIGINAL task body byte-for-byte, so it crosses as base64
+// (encoding/json's treatment of []byte) and is stored verbatim: replaying
+// anything else would re-run different work than the task that failed. It can
+// therefore contain whatever a task payload contains — which, by invariant 64,
+// is ids and never content.
+type deadLetterRequest struct {
+	DeadLetter coreapi.DeadLetterInput `json:"dead_letter"`
 }
 
 // ackResponse is what a route that returns nothing but "this committed" writes.

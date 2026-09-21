@@ -4,10 +4,8 @@
 package inprocess
 
 import (
-	"context"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/app/deliverability"
@@ -335,13 +333,4 @@ func newInboxService(pool *pgxpool.Pool) *inbox.Service {
 		inbox.WithComposeStore(store),
 		inbox.WithPendingReplyStore(store),
 	)
-}
-
-func (c client) MailboxExists(ctx context.Context, id string) (bool, error) {
-	uid, err := uuid.Parse(id)
-	if err != nil {
-		//nolint:nilerr // a malformed id can't identify any mailbox: absent, not a lookup failure
-		return false, nil
-	}
-	return c.q.MailboxExists(ctx, uid)
 }

@@ -145,6 +145,7 @@ func serveInboxSends(t *testing.T, f *fakeInboxSends) (*Client, *httptest.Server
 	t.Helper()
 	h, err := NewHandler(Deps{
 		Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}, InboxSends: f,
+		Inbound: &fakeInbound{}, Fleet: &fakeFleet{},
 	}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)

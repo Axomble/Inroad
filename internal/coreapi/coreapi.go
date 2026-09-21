@@ -291,9 +291,6 @@ type InboxMessageInput struct {
 }
 
 type Client interface {
-	// MailboxExists reports whether a mailbox is present and active.
-	MailboxExists(ctx context.Context, id string) (bool, error)
-
 	// --- Multi-step sequencing (sequence:advance path) ---
 
 	// GetStepSendJob loads everything needed to send the enrollment's next due

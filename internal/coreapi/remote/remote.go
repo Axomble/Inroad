@@ -486,6 +486,8 @@ func (c *Client) post(ctx context.Context, b callBudget, path string, in, out an
 		return notFound(path, io.LimitReader(resp.Body, maxResponseBytes))
 	case http.StatusConflict:
 		return conflict(path, io.LimitReader(resp.Body, maxResponseBytes))
+	case http.StatusUnprocessableEntity:
+		return unprocessable(path, io.LimitReader(resp.Body, maxResponseBytes))
 	default:
 		// The status only. The control plane's error text is not ours to relay
 		// into a worker's logs, and relaying it is how an upstream string
@@ -543,4 +545,23 @@ func conflict(path string, body io.Reader) error {
 	default:
 		return fmt.Errorf("coreapi remote: %s: control plane returned 409 with no known reason", path)
 	}
+}
+
+// unprocessable is the third status that can carry a sentinel: the row is not
+// gone and no state forbids the write — the INPUT will never be accepted, so a
+// retry is pointless and, on the complaint route, actively harmful.
+//
+// Same rule as the two above, and it matters here more than on either: an
+// unrecognised 422 stays a PLAIN error, which the poller retries. Guessing
+// ErrInvalidComplaint from a bare 422 would let an intermediary's response
+// convince a worker that a real abuse report was permanently invalid, and the
+// report would be dropped rather than retried. The safe direction on this route
+// is the retry.
+func unprocessable(path string, body io.Reader) error {
+	var e errorResponse
+	_ = json.NewDecoder(body).Decode(&e)
+	if e.Code == codeInvalidComplaint {
+		return fmt.Errorf("coreapi remote: %s: %w", path, coreapi.ErrInvalidComplaint)
+	}
+	return fmt.Errorf("coreapi remote: %s: control plane returned 422 with no known reason", path)
 }

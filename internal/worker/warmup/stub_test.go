@@ -16,7 +16,6 @@ type stubCore struct{}
 
 var _ coreapi.Client = stubCore{}
 
-func (stubCore) MailboxExists(context.Context, string) (bool, error) { return false, nil }
 func (stubCore) GetStepSendJob(context.Context, string, string) (coreapi.StepSendJob, error) {
 	return coreapi.StepSendJob{}, nil
 }

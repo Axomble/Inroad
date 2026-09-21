@@ -81,6 +81,89 @@ func (f *fakeJobReader) FindSendByMessageID(context.Context, string, string) (co
 	return coreapi.SendRef{}, nil
 }
 
+func (f *fakeJobReader) NextWarmupDue(context.Context, string, string) (time.Time, bool, error) {
+	f.calls++
+	return time.Time{}, false, nil
+}
+
+// fakeInboundWriter is the control plane's inbound-mail half (slice 4). Like
+// the readers above it answers zero values: this file is about which routes are
+// mounted, behind which token, on which listener.
+type fakeInboundWriter struct{ calls int }
+
+func (f *fakeInboundWriter) SetInboxCursor(context.Context, string, string, uint32, uint32) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboundWriter) SetInboxCursorString(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboundWriter) StoreInboundMessage(context.Context, coreapi.InboxMessageInput) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboundWriter) CaptureCRMReply(context.Context, coreapi.CRMReplyInput) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboundWriter) IngestComplaint(context.Context, coreapi.ComplaintInput) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboundWriter) ResolveReplyLabel(context.Context, string, string) (coreapi.ReplyLabel, bool, error) {
+	f.calls++
+	return coreapi.ReplyLabel{}, false, nil
+}
+
+func (f *fakeInboundWriter) RecordWarmupReceipt(context.Context, coreapi.WarmupReceiptInput) (coreapi.WarmupEngagePlan, error) {
+	f.calls++
+	return coreapi.WarmupEngagePlan{}, nil
+}
+
+func (f *fakeInboundWriter) FindWarmupSendByMessageID(context.Context, string, string, string) (coreapi.WarmupSendRef, bool, error) {
+	f.calls++
+	return coreapi.WarmupSendRef{}, false, nil
+}
+
+func (f *fakeInboundWriter) RecordWarmupTokenFailure(context.Context, string, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeInboundWriter) RecordWarmupHardBounce(context.Context, string, string, string) (bool, error) {
+	f.calls++
+	return false, nil
+}
+
+// fakeFleetWriter is the control plane's worker-infrastructure half (slice 4).
+type fakeFleetWriter struct{ calls int }
+
+func (f *fakeFleetWriter) UpsertWorkerHeartbeat(context.Context, string, string, string) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeFleetWriter) RecordWorkerProviderSignals(context.Context, coreapi.WorkerProviderSignals) error {
+	f.calls++
+	return nil
+}
+
+func (f *fakeFleetWriter) AssignMailboxWorker(context.Context, string, string) (string, error) {
+	f.calls++
+	return "", nil
+}
+
+func (f *fakeFleetWriter) RecordDeadLetter(context.Context, coreapi.DeadLetterInput) error {
+	f.calls++
+	return nil
+}
+
 // fakeOutcomeWriter is the control plane's claim/outcome half. Like
 // fakeJobReader it answers zero values: this file is about which routes are
 // mounted, behind which token, on which listener — what the writes DO is
@@ -311,6 +394,30 @@ func fleetRoutes() []struct{ name, path, body string } {
 		{"coreapi: pending compose sent", remote.PathInboxPendingComposeSent, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","message_id":"<a@b.test>"}`},
 		{"coreapi: pending compose release", remote.PathInboxPendingComposeRelease, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","reason":"transient"}`},
 		{"coreapi: pending compose fail", remote.PathInboxPendingComposeFail, `{"workspace_id":"` + ws + `","pending_id":"` + id + `","reason":"permanent"}`},
+
+		// The inbound-mail routes and the last job read (slice 4). The four
+		// input-carrying ones repeat the workspace inside the input, because the
+		// handler refuses a mismatch before it reaches the writer — a body that
+		// omitted it would make this a 400 test rather than a mounting test.
+		{"coreapi: inbox cursor uid", remote.PathInboxCursorUID, `{"workspace_id":"` + ws + `","mailbox_id":"` + id + `","last_seen_uid":42,"uid_validity":7}`},
+		{"coreapi: inbox cursor string", remote.PathInboxCursorString, `{"workspace_id":"` + ws + `","mailbox_id":"` + id + `","cursor":"history:1"}`},
+		{"coreapi: inbound message", remote.PathInboxMessageStore, `{"workspace_id":"` + ws + `","message":{"WorkspaceID":"` + ws + `","MailboxID":"` + id + `"}}`},
+		{"coreapi: crm reply capture", remote.PathCRMReplyCapture, `{"workspace_id":"` + ws + `","reply":{"WorkspaceID":"` + ws + `","SendID":"` + id + `"}}`},
+		{"coreapi: complaint ingest", remote.PathComplaintIngest, `{"workspace_id":"` + ws + `","complaint":{"WorkspaceID":"` + ws + `","SendID":"` + id + `"}}`},
+		{"coreapi: reply label resolve", remote.PathReplyLabelResolve, `{"workspace_id":"` + ws + `","key":"positive"}`},
+		{"coreapi: warmup receipt", remote.PathWarmupReceipt, `{"workspace_id":"` + ws + `","receipt":{"WorkspaceID":"` + ws + `","WarmupSendID":"` + id + `"}}`},
+		{"coreapi: warmup send by message id", remote.PathWarmupSendByMessageID, `{"workspace_id":"` + ws + `","to_mailbox_id":"` + id + `","message_id":"<a@b.test>"}`},
+		{"coreapi: warmup token failure", remote.PathWarmupTokenFailure, `{"workspace_id":"` + ws + `","recipient_mailbox":"` + id + `","fingerprint":"ab12","reason_code":"bad_signature"}`},
+		{"coreapi: warmup hard bounce", remote.PathWarmupHardBounce, `{"workspace_id":"` + ws + `","message_id":"<a@b.test>","observer_mailbox":"` + id + `"}`},
+		{"coreapi: warmup next due", remote.PathWarmupNextDue, `{"workspace_id":"` + ws + `","mailbox_id":"` + id + `"}`},
+
+		// The worker-infrastructure routes (slice 4). Three of the four carry no
+		// workspace, which is the honest shape rather than an omission — see
+		// remote.FleetWriter.
+		{"coreapi: worker heartbeat", remote.PathWorkerHeartbeat, `{"worker_id":"box-1","egress_ip":"203.0.113.7","id_family":"ipv4"}`},
+		{"coreapi: worker provider signals", remote.PathWorkerProviderSignals, `{"signals":{"WorkerID":"box-1","Counts":[]}}`},
+		{"coreapi: assign mailbox worker", remote.PathMailboxWorkerAssign, `{"workspace_id":"` + ws + `","mailbox_id":"` + id + `"}`},
+		{"coreapi: dead letter record", remote.PathDeadLetterRecord, `{"dead_letter":{"WorkspaceID":"` + ws + `","TaskType":"sequence:advance"}}`},
 	}
 }
 
@@ -332,8 +439,12 @@ func postFleet(t *testing.T, h http.Handler, path, token, body string) int {
 func TestTheFleetListenerServesBothTransportsUnderOneToken(t *testing.T) {
 	opener, reader, jobs := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}
 	outcomes, sends := &fakeOutcomeWriter{}, &fakeInboxSendWriter{}
+	inbound, workers := &fakeInboundWriter{}, &fakeFleetWriter{}
 	h, err := newFleetHandler(
-		fleetDeps{credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes, inboxSends: sends},
+		fleetDeps{
+			credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes,
+			inboxSends: sends, inbound: inbound, fleet: workers,
+		},
 		fleetTestToken, discardLogger())
 	if err != nil {
 		t.Fatalf("newFleetHandler: %v", err)
@@ -350,14 +461,23 @@ func TestTheFleetListenerServesBothTransportsUnderOneToken(t *testing.T) {
 	if reader.calls != 1 {
 		t.Errorf("suppression reader reached %d times, want 1", reader.calls)
 	}
-	if jobs.calls != 8 {
-		t.Errorf("job reader reached %d times, want 8", jobs.calls)
+	// Nine since slice 4 added NextWarmupDue: it is a per-message READ about one
+	// named mailbox, so it sits with the job reads rather than with that slice's
+	// inbound-mail group.
+	if jobs.calls != 9 {
+		t.Errorf("job reader reached %d times, want 9", jobs.calls)
 	}
 	if outcomes.calls != 20 {
 		t.Errorf("outcome writer reached %d times, want 20", outcomes.calls)
 	}
 	if sends.calls != 12 {
 		t.Errorf("inbox send writer reached %d times, want 12", sends.calls)
+	}
+	if inbound.calls != 10 {
+		t.Errorf("inbound writer reached %d times, want 10", inbound.calls)
+	}
+	if workers.calls != 4 {
+		t.Errorf("fleet writer reached %d times, want 4", workers.calls)
 	}
 }
 
@@ -366,8 +486,12 @@ func TestTheFleetListenerServesBothTransportsUnderOneToken(t *testing.T) {
 func TestTheFleetListenerRejectsAWrongTokenOnBothTransports(t *testing.T) {
 	opener, reader, jobs := &fakeOpener{}, &fakeSuppressionReader{}, &fakeJobReader{}
 	outcomes, sends := &fakeOutcomeWriter{}, &fakeInboxSendWriter{}
+	inbound, workers := &fakeInboundWriter{}, &fakeFleetWriter{}
 	h, err := newFleetHandler(
-		fleetDeps{credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes, inboxSends: sends},
+		fleetDeps{
+			credentials: opener, suppression: reader, jobs: jobs, outcomes: outcomes,
+			inboxSends: sends, inbound: inbound, fleet: workers,
+		},
 		fleetTestToken, discardLogger())
 	if err != nil {
 		t.Fatalf("newFleetHandler: %v", err)
@@ -385,9 +509,10 @@ func TestTheFleetListenerRejectsAWrongTokenOnBothTransports(t *testing.T) {
 			}
 		})
 	}
-	if opener.calls != 0 || reader.calls != 0 || jobs.calls != 0 || outcomes.calls != 0 || sends.calls != 0 {
-		t.Errorf("dependencies were reached (%d opener, %d reader, %d jobs, %d outcomes, %d sends) despite rejected tokens",
-			opener.calls, reader.calls, jobs.calls, outcomes.calls, sends.calls)
+	if opener.calls != 0 || reader.calls != 0 || jobs.calls != 0 || outcomes.calls != 0 ||
+		sends.calls != 0 || inbound.calls != 0 || workers.calls != 0 {
+		t.Errorf("dependencies were reached (%d opener, %d reader, %d jobs, %d outcomes, %d sends, %d inbound, %d fleet) despite rejected tokens",
+			opener.calls, reader.calls, jobs.calls, outcomes.calls, sends.calls, inbound.calls, workers.calls)
 	}
 }
 
@@ -399,6 +524,7 @@ func TestTheFleetListenerServesNothingElse(t *testing.T) {
 		fleetDeps{
 			credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{},
 			outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{},
+			inbound: &fakeInboundWriter{}, fleet: &fakeFleetWriter{},
 		},
 		fleetTestToken, discardLogger())
 	if err != nil {
@@ -415,18 +541,37 @@ func TestTheFleetListenerServesNothingElse(t *testing.T) {
 // would start, serve the half it has, and fail every call to the other at the
 // first send — which is #216's lesson in a different shape.
 func TestTheFleetListenerRefusesAMissingTransport(t *testing.T) {
+	// Built from a COMPLETE set with one field cleared, rather than seven
+	// literals each listing six dependencies. The earlier shape was already
+	// drifting: a case that omitted two fields would still pass while proving
+	// only that one of them was checked, and slice 4 added two more chances to
+	// get that wrong.
+	full := func() fleetDeps {
+		return fleetDeps{
+			credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{},
+			outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{},
+			inbound: &fakeInboundWriter{}, fleet: &fakeFleetWriter{},
+		}
+	}
+	if _, err := newFleetHandler(full(), fleetTestToken, discardLogger()); err != nil {
+		t.Fatalf("newFleetHandler with every transport: %v", err)
+	}
 	for _, tc := range []struct {
-		name string
-		deps fleetDeps
+		name  string
+		clear func(*fleetDeps)
 	}{
-		{"no credentials", fleetDeps{suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{}}},
-		{"no suppression", fleetDeps{credentials: &fakeOpener{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{}}},
-		{"no jobs", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{}}},
-		{"no outcomes", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, inboxSends: &fakeInboxSendWriter{}}},
-		{"no inbox sends", fleetDeps{credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{}, outcomes: &fakeOutcomeWriter{}}},
+		{"no credentials", func(d *fleetDeps) { d.credentials = nil }},
+		{"no suppression", func(d *fleetDeps) { d.suppression = nil }},
+		{"no jobs", func(d *fleetDeps) { d.jobs = nil }},
+		{"no outcomes", func(d *fleetDeps) { d.outcomes = nil }},
+		{"no inbox sends", func(d *fleetDeps) { d.inboxSends = nil }},
+		{"no inbound", func(d *fleetDeps) { d.inbound = nil }},
+		{"no fleet", func(d *fleetDeps) { d.fleet = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := newFleetHandler(tc.deps, fleetTestToken, discardLogger()); err == nil {
+			deps := full()
+			tc.clear(&deps)
+			if _, err := newFleetHandler(deps, fleetTestToken, discardLogger()); err == nil {
 				t.Error("newFleetHandler accepted a half-wired listener, want an error")
 			}
 		})
@@ -453,6 +598,7 @@ func TestTheFleetListenerRefusesAWeakToken(t *testing.T) {
 		fleetDeps{
 			credentials: &fakeOpener{}, suppression: &fakeSuppressionReader{}, jobs: &fakeJobReader{},
 			outcomes: &fakeOutcomeWriter{}, inboxSends: &fakeInboxSendWriter{},
+			inbound: &fakeInboundWriter{}, fleet: &fakeFleetWriter{},
 		},
 		strings.Repeat("a", credbroker.MinTokenLen-1), discardLogger())
 	if err == nil {
