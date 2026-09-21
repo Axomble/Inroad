@@ -57,6 +57,8 @@ func fleetListener(t *testing.T, q *gen.Queries, keyring *crypto.Keyring, cp cor
 		Jobs:        jobReader(t, cp),
 		Outcomes:    outcomeWriter(t, cp),
 		InboxSends:  inboxSendWriter(t, cp),
+		Inbound:     inboundWriter(t, cp),
+		Fleet:       fleetWriter(t, cp),
 	}, remoteTestToken, remoteQuiet())
 	if err != nil {
 		t.Fatalf("remote.NewHandler: %v", err)
@@ -98,6 +100,26 @@ func inboxSendWriter(t *testing.T, c coreapi.Client) remote.InboxSendWriter {
 		t.Fatalf("the in-process client (%T) does not satisfy remote.InboxSendWriter", c)
 	}
 	return s
+}
+
+// inboundWriter is the same assertion for the inbound-mail half (slice 4).
+func inboundWriter(t *testing.T, c coreapi.Client) remote.InboundWriter {
+	t.Helper()
+	w, ok := c.(remote.InboundWriter)
+	if !ok {
+		t.Fatalf("the in-process client (%T) does not satisfy remote.InboundWriter", c)
+	}
+	return w
+}
+
+// fleetWriter is the same assertion for the worker-infrastructure half (slice 4).
+func fleetWriter(t *testing.T, c coreapi.Client) remote.FleetWriter {
+	t.Helper()
+	w, ok := c.(remote.FleetWriter)
+	if !ok {
+		t.Fatalf("the in-process client (%T) does not satisfy remote.FleetWriter", c)
+	}
+	return w
 }
 
 // remoteJobCore builds the EXECUTION plane's coreapi client the way

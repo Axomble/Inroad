@@ -68,6 +68,43 @@ linters:
                 the control-plane/execution-plane boundary (see
                 docs/security.md and CLAUDE.md). Add or extend a
                 coreapi.Client method instead of importing the DB layer here.
+
+        # internal/coreapi/remote is the EXECUTION plane's transport: the
+        # coreapi implementation a role=send worker runs, and since slice 4 the
+        # ONLY one it runs — cmd/worker opens no pool on that role, so this
+        # package is the whole of a fleet host's access to control-plane state.
+        #
+        # The security claim that makes ("a compromised send host cannot read
+        # the tenant database") rests on this package having no way to. That is
+        # true today because *remote.Client is HTTP and nothing else, and this
+        # rule is what keeps it true: a database import here would not fail a
+        # build, it would quietly hand the execution plane back the access the
+        # plane split exists to remove — and the type assertion at the
+        # composition root would go on succeeding.
+        #
+        # pgx itself is NOT denied, for the same reason it is not denied above:
+        # remote.go re-mints pgx.ErrNoRows as a sentinel for an errors.Is check
+        # in internal/worker/webhook. That is a package-level value, not a
+        # query. The project's db package, its generated queries and pgxpool
+        # are the things there is no innocent reason to reach for here.
+        coreapi-remote-no-db:
+          files:
+            - "**/internal/coreapi/remote/**"
+            - "internal/coreapi/remote/**"
+          deny:
+            - pkg: "github.com/inroad/inroad/internal/platform/db"
+              desc: >-
+                internal/coreapi/remote is the transport a POOLLESS role=send
+                worker runs; it must reach the control plane over HTTP and have
+                no database access of its own. Importing the DB layer here
+                would give a fleet host back the tenant-database reach slice 4
+                removed. Add a route to the transport instead.
+            - pkg: "github.com/jackc/pgx/v5/pgxpool"
+              desc: >-
+                internal/coreapi/remote must hold no connection pool — see
+                above. A *remote.Client with no *pgxpool.Pool field is what
+                makes "this worker cannot reach the tenant database" a fact
+                about the type rather than a claim about reachability.
     dupl:
       threshold: 120          # ~15+ duplicated lines before it flags
     errcheck:

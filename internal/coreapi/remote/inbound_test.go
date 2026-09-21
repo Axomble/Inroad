@@ -692,7 +692,7 @@ func TestSlice4RoutesArePOSTOnly(t *testing.T) {
 	_, srv := serveSlice4(t, &fakeInbound{}, &fakeFleet{}, &fakeJobs{})
 	for _, path := range slice4Paths() {
 		for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
-			req, err := http.NewRequestWithContext(t.Context(), method, srv.URL+path, nil)
+			req, err := http.NewRequestWithContext(t.Context(), method, srv.URL+path, http.NoBody)
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
