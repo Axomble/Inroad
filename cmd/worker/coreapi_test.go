@@ -115,10 +115,11 @@ func TestTheRemoteCoreAPIResolvesForAConfiguredSendWorker(t *testing.T) {
 	if wiring.client == nil {
 		t.Fatal("remote wiring carries no coreapi client")
 	}
-	// Three options after slice 3: the suppression source, the job source and
-	// the outcome source, all satisfied by the one client.
-	if got := len(wiring.coreOptions()); got != 3 {
-		t.Errorf("coreOptions() returned %d options, want 3", got)
+	// Four options after slice 3b: the suppression source, the job source, the
+	// outcome source and the manual reply/compose source, all satisfied by the
+	// one client.
+	if got := len(wiring.coreOptions()); got != 4 {
+		t.Errorf("coreOptions() returned %d options, want 4", got)
 	}
 }
 

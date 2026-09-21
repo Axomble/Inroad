@@ -54,9 +54,16 @@ type client struct {
 	// fleet worker installs internal/coreapi/remote's client via
 	// WithRemoteOutcomes and then none of those twenty methods touches a
 	// database. Same nil-means-local shape as jobs above; see outcomesource.go.
-	outcomes  OutcomeSource
-	jwtSecret []byte
-	publicURL string
+	outcomes OutcomeSource
+	// inboxSends answers the manual reply/compose protocol — the mail a HUMAN
+	// wrote. NIL IS THE DEFAULT and means "here, through the pool" — the
+	// self-host path, unchanged. A fleet worker installs
+	// internal/coreapi/remote's client via WithRemoteInboxSends and then none of
+	// those twelve methods touches a database. Same nil-means-local shape as jobs
+	// and outcomes above; see inboxsendsource.go.
+	inboxSends InboxSendSource
+	jwtSecret  []byte
+	publicURL  string
 	// enroll owns the enrollment state machine (advance/complete/stop). The
 	// control plane composes the domain service here so the MarkStep* coreapi
 	// methods delegate the transition to a single, unit-tested place.
@@ -235,6 +242,36 @@ func WithRemoteOutcomes(s OutcomeSource) Option {
 	return func(c *client) {
 		if s != nil {
 			c.outcomes = s
+		}
+	}
+}
+
+// WithRemoteInboxSends replaces the pool-backed manual reply/compose protocol
+// with another InboxSendSource — in practice internal/coreapi/remote's HTTP
+// client, pointed at the control plane's fleet listener.
+//
+// This is slice 3b of giving up the worker's pgxpool, and it carries slice 3's
+// risk with a HIGHER bar: these are emails a person wrote and pressed send on, so
+// a duplicate is the operator's own words arriving twice in a customer's thread
+// rather than one extra marketing touch. What makes a lost response safe is the
+// ROW's status-guarded claim, not this option; see
+// internal/coreapi/remote/inboxsends.go for the per-method audit of what a lost
+// response costs, and the fault-injection tests that drive it.
+//
+// Same shape and same reasoning as WithRemoteSuppression, WithRemoteJobs and
+// WithRemoteOutcomes — an Option rather than a positional parameter because every
+// other caller (cmd/inroad, cmd/seed, every test, and the self-host RoleAll
+// worker) wants the local path and should not have to say so, and OFF by default,
+// so an installation that sets nothing behaves exactly as it did before this
+// existed.
+//
+// Passing nil is a no-op, NOT a way to disable manual sends: silently dropping a
+// source that was meant to be wired would leave the process reaching a pool it
+// was supposed to give up, with nothing saying so.
+func WithRemoteInboxSends(s InboxSendSource) Option {
+	return func(c *client) {
+		if s != nil {
+			c.inboxSends = s
 		}
 	}
 }

@@ -31,6 +31,8 @@ type replyCore interface {
 	RecordInboxReply(ctx context.Context, in coreapi.RecordInboxReplyInput) error
 	ClaimInboxReply(ctx context.Context, workspaceID, taskID string) (bool, error)
 	ReleaseInboxReply(ctx context.Context, workspaceID, taskID string) error
+	ClaimPendingInboxReply(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxReply, error)
+	ClaimPendingInboxCompose(ctx context.Context, workspaceID, pendingID string) (coreapi.PendingInboxCompose, error)
 }
 
 func newInboxReplyClient(t *testing.T, pool *pgxpool.Pool, q *gen.Queries) replyCore {
@@ -332,6 +334,75 @@ func TestClaimInboxReplyRoundTrip(t *testing.T) {
 	if !claimed {
 		t.Fatal("a claim after release must succeed again — the retry's own re-claim")
 	}
+}
+
+// THE SENTINEL THE WORKER BRANCHES ON MUST BE THE ONE IT RECEIVES.
+//
+// internal/app/inbox returns its own inbox.ErrPendingNotClaimable, and both
+// worker handlers check errors.Is(err, coreapi.ErrInboxPendingNotClaimable).
+// Those are two distinct errors.New values, so passing the store's error through
+// unchanged means the check NEVER matches: the ordinary undo path — the operator
+// cancelled, the row is already sent, another worker holds the lease — becomes a
+// returned error, asynq retries it to exhaustion, and the task lands in
+// task_dead_letters instead of finishing quietly.
+//
+// It also decides what the REMOTE transport can do. A sentinel that does not
+// reach the coreapi seam cannot be mapped onto a status code, so a fleet worker
+// would retry an undone reply until the queue gave up.
+func TestAnUnclaimableRowCrossesAsTheCoreapiSentinel(t *testing.T) {
+	ctx := context.Background()
+	pool, q := claimConnect(t)
+	fx := seedForClaim(t, ctx, q)
+	client := newInboxReplyClient(t, pool, q)
+
+	store := inbox.NewPgStore(pool)
+	svc := inbox.NewService(store,
+		inbox.WithPendingReplyStore(store),
+		inbox.WithComposeStore(store),
+		inbox.WithPendingReplyEnqueuer(&recordingPendingEnqueuer{}),
+	)
+
+	t.Run("pending reply", func(t *testing.T) {
+		threadID := seedThreadForReply(t, ctx, pool, fx.ws, fx.mailboxID, "Sentinel")
+		if err := svc.Reply(ctx, fx.ws, threadID, "going out now", nil); err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		row, err := store.PendingReplyForThread(ctx, fx.ws, threadID)
+		if err != nil {
+			t.Fatalf("PendingReplyForThread: %v", err)
+		}
+		if _, err := client.ClaimPendingInboxReply(ctx, fx.ws.String(), row.ID.String()); err != nil {
+			t.Fatalf("the first claim must win: %v", err)
+		}
+		_, err = client.ClaimPendingInboxReply(ctx, fx.ws.String(), row.ID.String())
+		if !errors.Is(err, coreapi.ErrInboxPendingNotClaimable) {
+			t.Fatalf("second claim = %v, want coreapi.ErrInboxPendingNotClaimable — the worker "+
+				"branches on that sentinel, so anything else retries an undone reply to exhaustion", err)
+		}
+	})
+
+	t.Run("pending compose", func(t *testing.T) {
+		at := time.Now().Add(-time.Minute)
+		row, err := svc.ScheduleCompose(ctx, fx.ws, inbox.CreatePendingComposeInput{
+			WorkspaceID: fx.ws, MailboxID: fx.mailboxID, ToEmails: []string{"to@x.test"},
+			Subject: "Sentinel", BodyText: "going out now",
+		}, nil)
+		if err != nil {
+			t.Fatalf("ScheduleCompose: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`UPDATE inbox_pending_composes SET send_after = $1 WHERE id = $2 AND workspace_id = $3`,
+			at, row.ID, fx.ws); err != nil {
+			t.Fatalf("make the compose due: %v", err)
+		}
+		if _, err := client.ClaimPendingInboxCompose(ctx, fx.ws.String(), row.ID.String()); err != nil {
+			t.Fatalf("the first claim must win: %v", err)
+		}
+		_, err = client.ClaimPendingInboxCompose(ctx, fx.ws.String(), row.ID.String())
+		if !errors.Is(err, coreapi.ErrInboxPendingNotClaimable) {
+			t.Fatalf("second claim = %v, want coreapi.ErrInboxPendingNotClaimable", err)
+		}
+	})
 }
 
 // A workspace can never see, let alone conflict with, another workspace's

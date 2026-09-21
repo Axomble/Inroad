@@ -1749,6 +1749,84 @@ write history that never happened.
     reports `inroad_send_claims_total` — and omitting them would not have failed
     anything, it would have silently stopped a fleet deployment's webhooks firing.
 
+78. **A lost response never duplicates a human's reply, and the transport prefers
+    dropping an ambiguous manual send over risking a second one.** The manual
+    reply and compose protocol now crosses the wire whole — the reply job read,
+    the record, the legacy drain claim/release, and the claim families for
+    deferred replies and deferred composes
+    (`internal/coreapi/remote/inboxsends.go`, twelve methods).
+
+    The bar is deliberately higher than invariant 77's. A duplicate sequence step
+    is one extra marketing touch; a duplicate manual reply is the operator's own
+    words arriving twice in a conversation a customer is watching. What holds it
+    is the ROW, never this transport: a status-guarded `scheduled` -> `sending`
+    UPDATE with a 300s lease (`queries/inbox.sql`), which is simultaneously the
+    claim and the operator's undo handle.
+
+    **`ClaimPendingInboxReply` loses the LEASE AND THE BODY together**, which has
+    no analogue elsewhere on the seam — every other claim answers with an enum. A
+    lost response means the row is `sending` and the content the worker was about
+    to send is gone with the answer. The retry re-claims, the guarded UPDATE
+    matches nothing, and the control plane answers
+    `coreapi.ErrInboxPendingNotClaimable`, which `worker/inbox` treats as
+    terminal: that attempt sends NOTHING. The reply is therefore deferred until
+    the lease expires, at which point the row — which still holds the body —
+    delivers it exactly once.
+
+    That trade is chosen rather than inherited. Handing the body back to "the same
+    worker" on a re-claim would need an attempt id on the wire, and therefore a
+    change to the coreapi signature, every fake and both handlers — and any such
+    mechanism weakens the mutual exclusion between two DIFFERENT workers, which is
+    the only thing standing between a lost response and a duplicate reply. A
+    deferred send the operator can see in their outbox beats a double send they
+    cannot take back. The window is not new either: an in-process worker that
+    claimed and then crashed leaves the identical row in the identical state
+    (invariant 4a).
+
+    `remoteinboxsends_integration_test.go` drives the real
+    `PendingReplySendHandler` and `PendingComposeSendHandler` against real
+    Postgres with slice 77's response dropper, and asserts EXACTLY ONE SEND across
+    the lost claim, the lost completion and the lease expiry. Both were verified
+    against a deliberately broken implementation — with the claim error ignored
+    they report "THE DOUBLE SEND: sent 2 times for one manual reply" and "a
+    cancelled reply was sent 1 times".
+
+    **Two sentinels cross as 409, not 404, and the status is load-bearing.**
+    `ErrInboxPendingNotClaimable` (cancelled, already sent, not yet due, or held
+    by a live lease) and `ErrInboxNoInbound` (a thread with nothing to reply to)
+    are both branched on by `worker/inbox`. 404 means "the row is gone"; these mean
+    "the row is there and its state forbids this". Keeping them off 404 is not
+    tidiness — a stray 404 from a mis-routed request or an intermediary must never
+    be readable as "the operator cancelled this reply", because that reading makes
+    a worker return nil, report the task done, and silently never send a reply the
+    operator is watching for. An unrecognised 409 maps to no sentinel at all
+    (`TestAnUnrecognisedConflictIsNotMistakenForAnUndo`).
+
+    **The sentinel had to be made to exist first.** `internal/app/inbox` returns
+    its own `inbox.ErrPendingNotClaimable` while `worker/inbox` checks
+    `errors.Is(err, coreapi.ErrInboxPendingNotClaimable)` — two distinct
+    `errors.New` values, so the check had NEVER matched. Every undone reply was
+    returned to asynq as a failure, retried to exhaustion, and captured into
+    `task_dead_letters` (served under `campaigns:read`) instead of ending the task
+    quietly. `inprocess` now translates, wrapping rather than replacing.
+
+    **This is the one place a tenant's own CORRESPONDENCE crosses the fleet wire**,
+    and it is unavoidable: a worker cannot send a reply it has not been given the
+    text of. Eleven of the twelve routes are ids-only; the twelfth
+    (`inbox-reply/record`) carries the delivered body back because the thread's
+    history is written from it, and the worker is by then holding that exact text
+    because the control plane handed it over on the claim — so the wire reveals
+    nothing the caller was not already given, and nothing on it can express "rows
+    matching X". What follows is a rule rather than a mitigation: **no route logs a
+    body, a subject or a recipient**, on either side. The reply body still never
+    enters a task payload (invariant 64) — the task remains a pointer to a row.
+
+    **Workspace-pinned like every other route**, and asserted on the BODY as well
+    as the row: `TestTheManualSendProtocolIsPinnedToTheRequestedWorkspace` checks
+    that a foreign workspace's claim receives an empty `BodyText`, because leaking
+    correspondence is a different and worse failure than leaking a state
+    transition.
+
 ## Fleet operator read surface
 70. **The scheduled-job ledger never serves its error text.** `scheduled_job_runs`
     has no `workspace_id` and cannot honestly have one — a periodic reconcile runs

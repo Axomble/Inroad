@@ -123,7 +123,7 @@ func (f *fakeOpener) OpenWebhookEndpointSecret(_ context.Context, ws, endpoint u
 // wired to a fake broker — the two channels a fleet worker actually has.
 func serveJobs(t *testing.T, jobs *fakeJobs, opener *fakeOpener) (*Client, *httptest.Server) {
 	t.Helper()
-	h, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: jobs, Outcomes: &fakeOutcomes{}}, testToken, quietLogger())
+	h, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: jobs, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestSecretJobFieldsNeverCrossTheWire(t *testing.T) {
 	}
 
 	// Capture every response body the handler writes.
-	h, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: jobs, Outcomes: &fakeOutcomes{}}, testToken, quietLogger())
+	h, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: jobs, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger())
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -831,11 +831,14 @@ func TestEveryJobRouteRequiresTheFleetToken(t *testing.T) {
 // A handler missing any half refuses to be built. Part of a transport would
 // start, register its routes, and fail every call to the rest at the first send.
 func TestAHandlerNeedsBothHalvesWired(t *testing.T) {
-	if _, err := NewHandler(Deps{Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}}, testToken, quietLogger()); err == nil {
+	if _, err := NewHandler(Deps{Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger()); err == nil {
 		t.Error("a handler with no suppression reader was built")
 	}
-	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Outcomes: &fakeOutcomes{}}, testToken, quietLogger()); err == nil {
+	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Outcomes: &fakeOutcomes{}, InboxSends: &fakeInboxSends{}}, testToken, quietLogger()); err == nil {
 		t.Error("a handler with no job reader was built")
+	}
+	if _, err := NewHandler(Deps{Suppression: &fakeSuppression{}, Jobs: &fakeJobs{}, Outcomes: &fakeOutcomes{}}, testToken, quietLogger()); err == nil {
+		t.Error("a handler with no inbox send writer was built")
 	}
 }
 

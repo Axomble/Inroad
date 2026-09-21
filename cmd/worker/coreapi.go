@@ -25,12 +25,13 @@ const (
 	// worker that sets no new variable gets.
 	coreAPILocal coreAPIMode = iota
 	// coreAPIRemote: the process asks the control plane over the fleet channel
-	// for the methods the transport has taken over — after slice 3, the one
-	// suppression check, the eight per-message job READS, and the twenty claim
-	// and outcome WRITES. The pool is still open for everything else (the inbox
-	// poll cursor, the warmup receipt, the manual reply/compose claim family,
-	// and every sweep); see internal/coreapi/remote's package doc for what that
-	// does and does not buy yet.
+	// for the methods the transport has taken over — after slice 3b, the one
+	// suppression check, the eight per-message job READS, the twenty claim and
+	// outcome WRITES, and the twelve manual reply/compose calls. The pool is
+	// still open for everything else (the inbox poll cursor, the inbound-message
+	// store, the warmup receipt, and every periodic sweep); see
+	// internal/coreapi/remote's package doc for what that does and does not buy
+	// yet.
 	coreAPIRemote
 )
 
@@ -42,7 +43,10 @@ const coreAPIRemoteMethods = "IsSuppressed, GetStepSendJob, GetInboxPollJob, Get
 	"ClaimStepSend, MarkStepDelivered, AdvanceStepCursor, ReleaseStepSend, FinalizeStepSend, MarkStepStopped, " +
 	"DeferEnrollment, IncrementEnrollmentCapDeferrals, ClaimWarmupSend, MarkWarmupSent, ReleaseWarmupSend, " +
 	"FailWarmupSend, MarkWarmupEngaged, MarkReplied, RecordReplyClass, MarkUnsubscribed, MarkBounced, " +
-	"MarkWebhookDelivered, MarkWebhookRetrying, MarkWebhookFailed"
+	"MarkWebhookDelivered, MarkWebhookRetrying, MarkWebhookFailed, " +
+	"GetInboxReplyJob, RecordInboxReply, ClaimInboxReply, ReleaseInboxReply, " +
+	"ClaimPendingInboxReply, MarkPendingInboxReplySent, ReleasePendingInboxReply, FailPendingInboxReply, " +
+	"ClaimPendingInboxCompose, MarkPendingInboxComposeSent, ReleasePendingInboxCompose, FailPendingInboxCompose"
 
 func (m coreAPIMode) String() string {
 	if m == coreAPIRemote {
@@ -107,9 +111,9 @@ var ErrCoreAPIRemoteNeedsBroker = errors.New(
 	"INROAD_FLEET_COREAPI_REMOTE needs the credential broker: coreapi job responses carry no credential, and a worker reading them remotely obtains one through INROAD_FLEET_BROKER_URL")
 
 // coreAPIWiring is what the composition root got back. client is non-nil only
-// in coreAPIRemote, and it satisfies ALL THREE inprocess source interfaces
-// (SuppressionSource, JobSource, OutcomeSource) — one transport, one set of
-// connection pools, one token.
+// in coreAPIRemote, and it satisfies ALL FOUR inprocess source interfaces
+// (SuppressionSource, JobSource, OutcomeSource, InboxSendSource) — one transport,
+// one set of connection pools, one token.
 type coreAPIWiring struct {
 	mode   coreAPIMode
 	client *remote.Client
@@ -140,7 +144,7 @@ func buildCoreAPIWiring(cfg *config.Config, mode coreAPIMode, creds credbroker.O
 	}
 	logger.Info("coreapi source", "mode", mode.String(), "control_plane", cfg.FleetBrokerURL,
 		"methods", coreAPIRemoteMethods,
-		"note", "this worker asks the control plane for the methods the remote transport carries — reads AND the claim/outcome writes — and brokers their credentials separately; it still opens a pool for the rest")
+		"note", "this worker asks the control plane for the methods the remote transport carries — reads, the claim/outcome writes, and the manual reply/compose protocol — and brokers their credentials separately; it still opens a pool for the rest")
 	return coreAPIWiring{mode: mode, client: client}, nil
 }
 
@@ -151,14 +155,15 @@ func (w coreAPIWiring) coreOptions() []inprocess.Option {
 	if w.client == nil {
 		return nil
 	}
-	// All three sources, one client. They are separate seams because they
-	// shipped in separate slices, not because a deployment would ever want one
-	// without the others — and the outcome seam in particular MUST arrive with
-	// the job seam: a worker fetching its work remotely while claiming it
-	// locally would be two processes disagreeing about who owns a send.
+	// All four sources, one client. They are separate seams because they shipped
+	// in separate slices, not because a deployment would ever want one without
+	// the others — and the write seams in particular MUST arrive with the job
+	// seam: a worker fetching its work remotely while claiming it locally would
+	// be two processes disagreeing about who owns a send.
 	return []inprocess.Option{
 		inprocess.WithRemoteSuppression(w.client),
 		inprocess.WithRemoteJobs(w.client),
 		inprocess.WithRemoteOutcomes(w.client),
+		inprocess.WithRemoteInboxSends(w.client),
 	}
 }

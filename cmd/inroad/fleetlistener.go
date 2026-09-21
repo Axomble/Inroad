@@ -93,6 +93,22 @@ type fleetDeps struct {
 	// would not fail — every one is a nil-safe no-op — it would silently stop a
 	// fleet deployment's integrations firing. See cmd/inroad/main.go.
 	outcomes remote.OutcomeWriter
+	// inboxSends serves the manual reply/compose protocol. The SAME client again,
+	// by the same type assertion — so a reply claimed by a fleet worker and one
+	// claimed by the single-process topology run identical SQL, including the
+	// status-guarded 'scheduled' -> 'sending' transition that is the only thing
+	// standing between a lost HTTP response and a customer receiving the
+	// operator's words twice.
+	//
+	// Its optional wiring was checked rather than assumed, because slice 3 found a
+	// comment claiming the wiring was unnecessary that had quietly become false.
+	// These twelve methods reach inbox.Service (composed inside inprocess.New from
+	// the pool alone, with no realtime, webhook or metrics seam of its own) and the
+	// idempotency store. None of them emits an event, a webhook or a metric today.
+	// The client passed here is built WITH all of it anyway, since the outcome
+	// writes need it — so this is a superset, and the day a manual send starts
+	// emitting something it will already be wired.
+	inboxSends remote.InboxSendWriter
 }
 
 // newFleetHandler assembles the listener's router: each transport's own handler
@@ -102,7 +118,7 @@ type fleetDeps struct {
 // out here, so a route that moves cannot silently stop being mounted. Anything
 // not under one of them is a 404: this listener is not a second copy of the API.
 func newFleetHandler(d fleetDeps, token string, logger *slog.Logger) (http.Handler, error) {
-	if d.credentials == nil || d.suppression == nil || d.jobs == nil || d.outcomes == nil {
+	if d.credentials == nil || d.suppression == nil || d.jobs == nil || d.outcomes == nil || d.inboxSends == nil {
 		return nil, errors.New("fleet listener: every transport must be wired")
 	}
 	brokerHandler, err := credbroker.NewHandler(d.credentials, token, logger)
@@ -110,7 +126,7 @@ func newFleetHandler(d fleetDeps, token string, logger *slog.Logger) (http.Handl
 		return nil, err
 	}
 	coreHandler, err := remote.NewHandler(remote.Deps{
-		Suppression: d.suppression, Jobs: d.jobs, Outcomes: d.outcomes,
+		Suppression: d.suppression, Jobs: d.jobs, Outcomes: d.outcomes, InboxSends: d.inboxSends,
 	}, token, logger)
 	if err != nil {
 		return nil, err
