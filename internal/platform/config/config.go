@@ -29,8 +29,25 @@ type Config struct {
 	Env         string
 	HTTPAddr    string
 	DatabaseURL string
-	RedisAddr   string
-	JWTSecret   []byte
+	// DatabaseURLSet reports whether INROAD_DATABASE_URL was actually PRESENT in
+	// the environment, as opposed to DatabaseURL holding the local development
+	// default above.
+	//
+	// It exists because "was a DSN given to this process" is a question
+	// DatabaseURL cannot answer: the field is never empty, so every binary looks
+	// configured for a database whether or not anyone said so. cmd/worker needs
+	// the real answer to refuse a role=send worker that was handed one — a fleet
+	// host must open no database connection at all, and silently ignoring the
+	// variable would leave an operator believing they had pointed it somewhere.
+	//
+	// Deliberately NOT the same shape as MasterKey's nil-means-unset, because
+	// the two defaults differ: there is no safe default master key, and there IS
+	// a conventional local DSN that every self-hosted install and every
+	// docker-compose relies on. Emptying DatabaseURL to make absence
+	// representable would break all of them.
+	DatabaseURLSet bool
+	RedisAddr      string
+	JWTSecret      []byte
 
 	// MasterKey is INROAD_MASTER_KEY: the KEK that wraps every per-workspace
 	// DEK, and the legacy v1 field key (docs/security.md invariants 14–17).
@@ -232,20 +249,31 @@ type Config struct {
 	// reachable only over a trusted private network, and it has to be chosen.
 	FleetBrokerAllowPlaintext bool
 
-	// FleetCoreAPIRemote moves a role=send worker's coreapi reads onto the
-	// fleet channel instead of its own pgxpool (internal/coreapi/remote).
-	// Slice 1 of that transport carries exactly one method, IsSuppressed.
+	// FleetCoreAPIRemote no longer SELECTS anything, and what it does now is
+	// worth stating plainly because the name still suggests a switch.
 	//
-	// DEFAULT FALSE, and fail-closed like every other opt-in here: unset,
-	// empty, "false" or a typo all keep the in-process path, because a
-	// configuration mistake must never be able to change where a worker gets
-	// its data. A self-hosted installation sets nothing and is unaffected.
+	// Slices 1–3b made it the opt-in that moved a role=send worker's coreapi
+	// calls onto the fleet channel, method group by method group. Slice 4
+	// finished the move and took the pool away: a role=send worker now reads
+	// coreapi remotely ALWAYS, because it has no database connection to read it
+	// any other way, and cmd/worker refuses to start one that was given a DSN.
+	// There is no longer a value of this variable that selects a supported
+	// different behaviour on that role.
 	//
-	// It deliberately adds NO address, URL or token of its own — it reuses the
-	// three FleetBroker* values above, because the coreapi transport and the
-	// credential broker share one listener and one token by decision (see
-	// cmd/inroad/fleetlistener.go). cmd/worker refuses the combinations that
-	// cannot work: the flag needs role=send and needs FleetBrokerURL.
+	// It is kept, and still parsed strictly, for the one thing it can still
+	// catch: setting it TRUE on a control or all-role worker, which
+	// cmd/worker.resolveCoreAPIMode refuses. An operator who sets it there
+	// believes their worker stopped reading the tenant database, and it has
+	// not. Deleting the field would turn that refusal into a silent ignore.
+	//
+	// DEFAULT FALSE, and a value this parser does not recognise is still a
+	// startup error rather than a silent false — the same rule as every other
+	// flag here, and the reason a self-hosted installation that sets nothing
+	// (or copies .env.example's explicit `false`) is unaffected either way.
+	//
+	// It adds no address, URL or token of its own: the coreapi transport reuses
+	// the three FleetBroker* values above, because it and the credential broker
+	// share one listener and one token by decision (cmd/inroad/fleetlistener.go).
 	FleetCoreAPIRemote bool
 
 	// --- Worker identity + per-IP routing (spec §15, F3) ---
@@ -391,6 +419,11 @@ func Load() (*Config, error) {
 		DatabaseURL: getenv("INROAD_DATABASE_URL", "postgres://inroad:inroad@localhost:5432/inroad?sslmode=disable"),
 		RedisAddr:   getenv("INROAD_REDIS_ADDR", "localhost:6379"),
 	}
+	// Whether the DSN above came from the environment or from the default
+	// beside it. trimmedEnv rather than os.LookupEnv, so an empty or
+	// whitespace-only INROAD_DATABASE_URL counts as unset — which is what
+	// getenv already decided one line above, and the two must agree.
+	_, cfg.DatabaseURLSet = trimmedEnv("INROAD_DATABASE_URL")
 	cfg.MetricsAddr = getenv("INROAD_METRICS_ADDR", "")
 	cfg.PprofEnabled = env.boolVal("INROAD_PPROF_ENABLED", false)
 

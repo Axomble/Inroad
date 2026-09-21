@@ -4,7 +4,7 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/inroad/inroad/internal/coreapi/inprocess"
+	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/coreapi/remote"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/credbroker"
@@ -21,32 +21,20 @@ type coreAPIMode int
 const (
 	// coreAPILocal: the process reads through its own pgxpool, in-process.
 	// This is EXACTLY the behaviour that shipped before the remote transport
-	// existed, it is what every self-hosted installation runs, and it is what a
-	// worker that sets no new variable gets.
+	// existed, it is what every self-hosted installation runs, and it is what
+	// role=all and role=control get.
 	coreAPILocal coreAPIMode = iota
 	// coreAPIRemote: the process asks the control plane over the fleet channel
-	// for the methods the transport has taken over — after slice 3b, the one
-	// suppression check, the eight per-message job READS, the twenty claim and
-	// outcome WRITES, and the twelve manual reply/compose calls. The pool is
-	// still open for everything else (the inbox poll cursor, the inbound-message
-	// store, the warmup receipt, and every periodic sweep); see
-	// internal/coreapi/remote's package doc for what that does and does not buy
-	// yet.
+	// for EVERY coreapi method it can reach, and opens no database connection
+	// at all. This is role=send, and since slice 4 it is not optional there.
+	//
+	// The client is a *remote.Client, not an inprocess client with remote
+	// pieces installed. That distinction is the security property: the type has
+	// no *pgxpool.Pool field, so "this worker cannot reach the tenant database"
+	// is a fact about the type rather than a claim about which code paths
+	// happen to be unreachable today.
 	coreAPIRemote
 )
-
-// coreAPIRemoteMethods is what this worker reaches remotely, logged at startup
-// so an operator can see the boundary move slice by slice rather than having to
-// read the source to find out what the flag currently covers.
-const coreAPIRemoteMethods = "IsSuppressed, GetStepSendJob, GetInboxPollJob, GetWarmupSendJob, " +
-	"GetWarmupEngageJob, GetWebhookDeliveryJob, GetTestSendContent, ResolveSenderTransport, FindSendByMessageID, " +
-	"ClaimStepSend, MarkStepDelivered, AdvanceStepCursor, ReleaseStepSend, FinalizeStepSend, MarkStepStopped, " +
-	"DeferEnrollment, IncrementEnrollmentCapDeferrals, ClaimWarmupSend, MarkWarmupSent, ReleaseWarmupSend, " +
-	"FailWarmupSend, MarkWarmupEngaged, MarkReplied, RecordReplyClass, MarkUnsubscribed, MarkBounced, " +
-	"MarkWebhookDelivered, MarkWebhookRetrying, MarkWebhookFailed, " +
-	"GetInboxReplyJob, RecordInboxReply, ClaimInboxReply, ReleaseInboxReply, " +
-	"ClaimPendingInboxReply, MarkPendingInboxReplySent, ReleasePendingInboxReply, FailPendingInboxReply, " +
-	"ClaimPendingInboxCompose, MarkPendingInboxComposeSent, ReleasePendingInboxCompose, FailPendingInboxCompose"
 
 func (m coreAPIMode) String() string {
 	if m == coreAPIRemote {
@@ -55,39 +43,78 @@ func (m coreAPIMode) String() string {
 	return "in-process"
 }
 
-// ErrCoreAPIRemoteNeedsSendRole refuses the flag on any role but send. A
-// control-role worker runs beside the API and a role=all worker IS the
-// single-process self-host topology — in both, the database is right there, so
-// a network hop to reach it would be pure latency. Refusing is not pedantry:
-// an operator who sets this believes their worker stopped reading the tenant
-// database, and silently ignoring it would leave that belief uncorrected.
+// ErrCoreAPIRemoteNeedsSendRole refuses INROAD_FLEET_COREAPI_REMOTE on any role
+// but send. A control-role worker runs beside the API and a role=all worker IS
+// the single-process self-host topology — in both, the database is right there
+// and they need it (the cross-tenant sweeps have no remote transport and never
+// will). Refusing is not pedantry: an operator who sets this believes their
+// worker stopped reading the tenant database, and it has not.
+//
+// This is now the variable's ONLY remaining effect. On role=send it selects
+// nothing, because that role reads remotely either way; see
+// config.Config.FleetCoreAPIRemote.
 var ErrCoreAPIRemoteNeedsSendRole = errors.New(
-	"INROAD_FLEET_COREAPI_REMOTE applies only to a role=send worker: a control or all-role worker runs beside the database it would be asking the control plane about")
+	"INROAD_FLEET_COREAPI_REMOTE applies only to a role=send worker: a control or all-role worker runs beside the database it would be asking the control plane about (and a role=send worker now reads remotely whether or not this is set)")
 
-// ErrCoreAPIRemoteNeedsFleetURL is the fail-closed half: a worker told to read
-// remotely with nowhere to read from refuses at startup rather than starting
-// and failing every check — and never falls back to the local pool, which is
-// the one outcome that would make the flag a lie.
+// ErrCoreAPIRemoteNeedsFleetURL is the fail-closed half: a role=send worker has
+// no pool and nowhere to read from, so it refuses at startup rather than
+// starting and failing every job. It never falls back to opening one.
 var ErrCoreAPIRemoteNeedsFleetURL = errors.New(
-	"INROAD_FLEET_COREAPI_REMOTE needs INROAD_FLEET_BROKER_URL (and INROAD_FLEET_BROKER_TOKEN): the coreapi transport shares the credential broker's listener and token")
+	"a role=send worker must set INROAD_FLEET_BROKER_URL (and INROAD_FLEET_BROKER_TOKEN): it opens no database connection and reads coreapi from the control plane")
+
+// ErrSendRoleHoldsDatabaseURL is THE refusal this slice exists for, and it is
+// deliberately shaped exactly like ErrSendRoleHoldsMasterKey next door
+// (cmd/worker/credentials.go).
+//
+// A role=send worker is the role meant for a host we do not control. Until
+// slice 4 it opened its own pgxpool, so it could read every workspace's
+// contacts, message bodies, reply text and secret_ciphertext — the ciphertext
+// it could not decrypt since #207, but could still exfiltrate. It now reaches
+// all of that through the control plane instead, one named subject at a time.
+//
+// Being HANDED a DSN is therefore a misconfiguration rather than a preference:
+// either the operator believes this host talks to the database (it does not,
+// and nothing here will use the value), or they have put production database
+// credentials in the environment of a machine that has no use for them. Both
+// are worth stopping at startup. That refusal IS the boundary — without it the
+// variable would sit there unused, and the next person to add a pool-backed
+// call site would find it working.
+//
+// It fires on the variable being PRESENT, not on the resolved value being
+// non-empty: INROAD_DATABASE_URL has a local-development default, so every
+// process has one (see config.Config.DatabaseURLSet).
+var ErrSendRoleHoldsDatabaseURL = errors.New(
+	"INROAD_DATABASE_URL must not be set on a role=send worker: a fleet host opens no database connection and reaches every coreapi method through INROAD_FLEET_BROKER_URL; unset it (this worker will not use it, and a fleet host should not hold tenant database credentials at all)")
 
 // resolveCoreAPIMode decides where this process reads from, from the role and
-// the configuration alone.
+// the configuration alone. Pure, and called before anything connects, so a
+// combination that cannot work fails with no database attempt behind it.
 //
 // The matrix, stated once:
 //
-//	role     flag  url  →  outcome
-//	any      no    any  →  in-process   (the default; self-host, unchanged)
-//	send     yes   yes  →  remote
-//	send     yes   no   →  ERROR (nowhere to read from — fail closed)
-//	control  yes   any  →  ERROR (the flag does nothing there)
-//	all      yes   any  →  ERROR (same)
+//	role     flag  url  dsn  →  outcome
+//	all      no    -    any  →  in-process   (self-host, unchanged)
+//	control  no    -    any  →  in-process   (runs the cross-tenant sweeps)
+//	all/ctl  yes   -    any  →  ERROR (the flag does nothing there)
+//	send     any   yes  no   →  remote, NO POOL
+//	send     any   yes  yes  →  ERROR (a fleet host must hold no DSN)
+//	send     any   no   any  →  ERROR (nowhere to read from — fail closed)
+//
+// The flag column is almost inert on purpose. role=send reads remotely because
+// it has no pool, not because a variable said so; the only thing the flag can
+// still do is be wrong on another role.
 func resolveCoreAPIMode(cfg *config.Config, role worker.Role) (coreAPIMode, error) {
-	if !cfg.FleetCoreAPIRemote {
+	if role != worker.RoleSend {
+		if cfg.FleetCoreAPIRemote {
+			return coreAPILocal, ErrCoreAPIRemoteNeedsSendRole
+		}
 		return coreAPILocal, nil
 	}
-	if role != worker.RoleSend {
-		return coreAPILocal, ErrCoreAPIRemoteNeedsSendRole
+	// Checked BEFORE the broker URL, so an operator who has set both hears
+	// about the one that is a security problem rather than the one that is a
+	// missing setting.
+	if cfg.DatabaseURLSet {
+		return coreAPILocal, ErrSendRoleHoldsDatabaseURL
 	}
 	if cfg.FleetBrokerURL == "" {
 		return coreAPILocal, ErrCoreAPIRemoteNeedsFleetURL
@@ -104,16 +131,15 @@ func resolveCoreAPIMode(cfg *config.Config, role worker.Role) (coreAPIMode, erro
 //
 // In practice resolveCredentialMode has already refused a role=send worker
 // without a broker (ErrSendRoleNeedsBroker), and role=send is the only role
-// this flag is allowed on — so this is the belt-and-braces half, checked here
+// that reads remotely — so this is the belt-and-braces half, checked here
 // because the ORDER of two independent resolutions is not something the next
 // person to touch this file should have to reason about.
 var ErrCoreAPIRemoteNeedsBroker = errors.New(
-	"INROAD_FLEET_COREAPI_REMOTE needs the credential broker: coreapi job responses carry no credential, and a worker reading them remotely obtains one through INROAD_FLEET_BROKER_URL")
+	"a role=send worker needs the credential broker: coreapi job responses carry no credential, and a worker reading them remotely obtains one through INROAD_FLEET_BROKER_URL")
 
 // coreAPIWiring is what the composition root got back. client is non-nil only
-// in coreAPIRemote, and it satisfies ALL FOUR inprocess source interfaces
-// (SuppressionSource, JobSource, OutcomeSource, InboxSendSource) — one transport,
-// one set of connection pools, one token.
+// in coreAPIRemote, and it is a COMPLETE coreapi.Client — the compile-time
+// assertion lives in internal/coreapi/remote/controlplane.go.
 type coreAPIWiring struct {
 	mode   coreAPIMode
 	client *remote.Client
@@ -124,9 +150,9 @@ type coreAPIWiring struct {
 //
 // The mode is a parameter rather than resolved here because the two halves have
 // to happen at different points in the composition root: resolveCoreAPIMode is
-// pure and runs before anything connects, so a role/flag combination that
-// cannot work fails with no database attempt behind it; this half needs the
-// credential broker, which is built after the pool.
+// pure and runs before anything connects, so a role/configuration combination
+// that cannot work fails with no database attempt behind it; this half needs
+// the credential broker.
 //
 // creds is that broker. The coreapi client takes it because a job response
 // carries no credential and the client fills one in per job; it is nil in every
@@ -143,27 +169,22 @@ func buildCoreAPIWiring(cfg *config.Config, mode coreAPIMode, creds credbroker.O
 		return coreAPIWiring{}, err
 	}
 	logger.Info("coreapi source", "mode", mode.String(), "control_plane", cfg.FleetBrokerURL,
-		"methods", coreAPIRemoteMethods,
-		"note", "this worker asks the control plane for the methods the remote transport carries — reads, the claim/outcome writes, and the manual reply/compose protocol — and brokers their credentials separately; it still opens a pool for the rest")
+		"note", "this worker opens NO database connection: every coreapi method it can reach is answered by the control plane, and each credential is brokered separately. The cross-tenant sweeps have no remote transport and are not registered on this role.")
 	return coreAPIWiring{mode: mode, client: client}, nil
 }
 
-// coreOptions returns the inprocess options this wiring implies. The local mode
-// returns NONE, so inprocess.New builds exactly the client it built before this
-// slice existed — that emptiness is the self-host guarantee, not an oversight.
-func (w coreAPIWiring) coreOptions() []inprocess.Option {
+// coreClient returns the coreapi.Client this wiring implies, or nil in the
+// local mode — where the composition root builds the in-process client from
+// the pool it opened, exactly as it did before any of this existed.
+//
+// Returning coreapi.Client rather than the concrete type is deliberate: the
+// caller must not be able to reach past the seam into transport internals, and
+// a nil *remote.Client wrapped in a non-nil interface is the classic way a
+// "core == nil" check silently stops working. The nil here is an untyped nil
+// interface, and the caller branches on the MODE anyway.
+func (w coreAPIWiring) coreClient() coreapi.Client {
 	if w.client == nil {
 		return nil
 	}
-	// All four sources, one client. They are separate seams because they shipped
-	// in separate slices, not because a deployment would ever want one without
-	// the others — and the write seams in particular MUST arrive with the job
-	// seam: a worker fetching its work remotely while claiming it locally would
-	// be two processes disagreeing about who owns a send.
-	return []inprocess.Option{
-		inprocess.WithRemoteSuppression(w.client),
-		inprocess.WithRemoteJobs(w.client),
-		inprocess.WithRemoteOutcomes(w.client),
-		inprocess.WithRemoteInboxSends(w.client),
-	}
+	return w.client
 }
