@@ -145,6 +145,8 @@ var tenancyExceptions = map[string]string{
 	"worker_routing.sql:PickLeastLoadedWorker":        "load-balances across the GLOBAL worker fleet — infrastructure, not tenant data (migration 000017); assignment counts are fleet-wide by design.",
 	"enrollment.sql:ListDueEnrollments":               "sweeper fan-out: selects due enrollments across all workspaces and RETURNS workspace_id so each enrollment is then advanced workspace-scoped. The pin lives one step later, in the per-enrollment job.",
 	"mailbox.sql:ListActiveMailboxes":                 "poller fan-out: returns (id, workspace_id) for every active mailbox so each poll then runs workspace-scoped via GetMailbox.",
+	"inbox.sql:ListStrandedInboxPendingReplies":       "stranded-send sweep fan-out: finds manual replies nothing will deliver, across all workspaces, and RETURNS workspace_id so the rescue task it enqueues re-claims workspace-pinned through ClaimInboxPendingReply. It selects ids and a status, never a reply body.",
+	"inbox.sql:ListStrandedInboxPendingComposes":      "the compose half of the same stranded-send sweep fan-out: returns (id, workspace_id, status) so each rescue re-claims workspace-pinned through ClaimInboxPendingCompose. No recipient, subject or body crosses this query.",
 	"warmup.sql:ListDueWarmupMailboxes":               "warmup sweep fan-out: returns (mailbox, workspace) pairs, and per-mailbox gating (NextWarmupDue, GetWarmupSendJob) is workspace-pinned.",
 	"warmup.sql:ListWorkspacesWithWarmupParticipants": "drives the per-workspace snapshot loop by ENUMERATING workspaces; it mentions workspace_id only in the SELECT and ORDER BY, and every statement the loop then issues is pinned to one of these ids.",
 	"send.sql:GetCampaignIDForSend":                   "the tracking classifier's lookup by an unguessable send id; it RETURNS workspace_id rather than filtering on it, because the unauthenticated tracking path has no workspace to supply.",
@@ -462,7 +464,7 @@ func TestEveryTenancyExceptionHasAWrittenReason(t *testing.T) {
 // this guard has stopped guarding, so the count is the size of the hole in the net.
 // Raising it should be a conscious act in a diff, not a drift.
 func TestTheTenancyAllowlistDoesNotGrowSilently(t *testing.T) {
-	const known = 47
+	const known = 49
 	if got := len(tenancyExceptions); got != known {
 		t.Errorf("tenancyExceptions has %d entries, expected %d. Every entry is a query this "+
 			"guard no longer checks. If you added one deliberately, update `known` in the same "+

@@ -35,6 +35,7 @@ func sweepRegistrars() []sweepRegistrar {
 		{jobrun.NameDomainAuthSweep, queue.RegisterDomainAuthSweep},
 		{jobrun.NameRecipientESPSweep, queue.RegisterRecipientESPSweep},
 		{jobrun.NameFleetRotate, queue.RegisterFleetRotate},
+		{jobrun.NameInboxPendingSweep, queue.RegisterInboxPendingSendSweep},
 	}
 }
 

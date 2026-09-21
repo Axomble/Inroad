@@ -1635,6 +1635,131 @@ func (q *Queries) ListSentOutboundStepsForThread(ctx context.Context, arg ListSe
 	return items, nil
 }
 
+const listStrandedInboxPendingComposes = `-- name: ListStrandedInboxPendingComposes :many
+SELECT id, workspace_id, status
+FROM inbox_pending_composes
+WHERE send_after <= now()
+  AND ((status = 'scheduled' AND send_after < now() - $1::interval)
+       OR (status = 'sending' AND claimed_at < now() - $2::interval))
+ORDER BY send_after
+LIMIT 200
+`
+
+type ListStrandedInboxPendingComposesParams struct {
+	OverdueAfter    pgtype.Interval `json:"overdue_after"`
+	StaleClaimAfter pgtype.Interval `json:"stale_claim_after"`
+}
+
+type ListStrandedInboxPendingComposesRow struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Status      string    `json:"status"`
+}
+
+// The compose half of the stranded-send scan. Same two shapes, same subset-of-
+// the-claim-guard property, same bound — see ListStrandedInboxPendingReplies for
+// the reasoning, which is identical because the two tables share a lifecycle.
+//
+// It is a separate query rather than a UNION with the reply scan because the two
+// rescues enqueue DIFFERENT task types, so the caller has to know which table a
+// row came from; a union would have to carry a literal discriminator column to
+// say the same thing less clearly.
+func (q *Queries) ListStrandedInboxPendingComposes(ctx context.Context, arg ListStrandedInboxPendingComposesParams) ([]ListStrandedInboxPendingComposesRow, error) {
+	rows, err := q.db.Query(ctx, listStrandedInboxPendingComposes, arg.OverdueAfter, arg.StaleClaimAfter)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStrandedInboxPendingComposesRow
+	for rows.Next() {
+		var i ListStrandedInboxPendingComposesRow
+		if err := rows.Scan(&i.ID, &i.WorkspaceID, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStrandedInboxPendingReplies = `-- name: ListStrandedInboxPendingReplies :many
+SELECT id, workspace_id, status
+FROM inbox_pending_replies
+WHERE send_after <= now()
+  AND ((status = 'scheduled' AND send_after < now() - $1::interval)
+       OR (status = 'sending' AND claimed_at < now() - $2::interval))
+ORDER BY send_after
+LIMIT 200
+`
+
+type ListStrandedInboxPendingRepliesParams struct {
+	OverdueAfter    pgtype.Interval `json:"overdue_after"`
+	StaleClaimAfter pgtype.Interval `json:"stale_claim_after"`
+}
+
+type ListStrandedInboxPendingRepliesRow struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Status      string    `json:"status"`
+}
+
+// The stranded-send sweep's scan: manual replies that will never leave on their
+// own, across every workspace. Cross-tenant by design — it RETURNS workspace_id
+// so each rescue the sweep then enqueues is workspace-pinned (tenancy exception
+// family (d); the pin lives one step later, in the per-row send task).
+//
+// THE PREDICATE IS A SUBSET OF ClaimInboxPendingReply'S, deliberately, and that
+// is the whole safety argument for the sweep: every row this returns is one the
+// claim would already accept from any task, so the sweep can never manufacture a
+// send the claim guard would have refused. Two shapes qualify:
+//
+//	'scheduled' whose send_after passed more than @overdue_after ago. No claim
+//	has ever been held for it — a claim moves the row to 'sending' — so nothing
+//	can be mid-dial. The grace is not safety, it is noise control: without it
+//	the sweep would re-enqueue rows whose own task is merely sitting in asynq's
+//	retry backoff.
+//
+//	'sending' whose claimed_at is older than @stale_claim_after, which the
+//	caller computes as the lease PLUS a grace. Strictly older than the lease, so
+//	a worker that may still be mid-dial is never nominated — the lease is the
+//	whole reason a second worker must keep its hands off.
+//
+// The leading `send_after <= now()` is redundant for the first arm and load
+// bearing for the second: it is the claim guard's own first condition, restated
+// here so the subset property holds by reading rather than by inference.
+//
+// Terminal rows ('sent', 'cancelled', 'failed') cannot match, so a delivered,
+// undone or failed reply is never re-driven.
+//
+// LIMIT bounds one tick. Oldest-first, so the remainder is not starved: the rows
+// this tick rescues leave the candidate set as they are claimed, and the next
+// tick takes the next oldest. Served by idx_inbox_pending_replies_workspace_-
+// pending, whose partial predicate is exactly the non-terminal rows — a set that
+// is transient by nature and bounded per workspace by MaxOutstandingPendingSends.
+// inroad_sweep_rows_total{kind="inbox_pending_sends"} is the curve to watch if
+// that ever stops being true.
+func (q *Queries) ListStrandedInboxPendingReplies(ctx context.Context, arg ListStrandedInboxPendingRepliesParams) ([]ListStrandedInboxPendingRepliesRow, error) {
+	rows, err := q.db.Query(ctx, listStrandedInboxPendingReplies, arg.OverdueAfter, arg.StaleClaimAfter)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListStrandedInboxPendingRepliesRow
+	for rows.Next() {
+		var i ListStrandedInboxPendingRepliesRow
+		if err := rows.Scan(&i.ID, &i.WorkspaceID, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markInboxPendingComposeSent = `-- name: MarkInboxPendingComposeSent :execrows
 UPDATE inbox_pending_composes
 SET status = 'sent', message_id = $1, sent_at = now(), updated_at = now(), last_error = ''
