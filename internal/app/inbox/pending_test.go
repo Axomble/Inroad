@@ -294,9 +294,9 @@ func TestScheduleReplyAppliesTheUndoWindow(t *testing.T) {
 // ClaimInboxPendingReply guards on `send_after <= now()` evaluated on the
 // DATABASE clock (queries/inbox.sql); this instant is stamped from the APP
 // clock. An equal instant therefore loses to any forward skew between the two:
-// the task fires, the claim matches nothing, and — there being no sweeper over
-// stranded 'scheduled' rows — the reply never leaves while the operator is told
-// it is on its way.
+// the task fires, the claim matches nothing, and the reply waits minutes for the
+// stranded-send sweep while the operator is told it is on its way. A safety net
+// is not a reason to build the skew in.
 func TestScheduleReplyWithNoUndoWindowIsDueStrictlyBeforeNow(t *testing.T) {
 	f := newPendingFixture(t)
 	f.pending.undoWindow = 0
@@ -393,9 +393,10 @@ func TestScheduleReplyEnqueuesForTheRowsSendAfter(t *testing.T) {
 	}
 }
 
-// An enqueue failure must be REPORTED, not swallowed. There is no sweeper yet,
-// so a silent failure would leave a row nothing ever picks up while telling the
-// operator their reply was queued.
+// An enqueue failure must be REPORTED, not swallowed. The stranded-send sweep
+// would eventually deliver the row, but the caller is a human watching the
+// result: "that failed, try again" beats "queued" followed by silence and a
+// delivery seven minutes later.
 func TestScheduleReplyReportsAnEnqueueFailure(t *testing.T) {
 	f := newPendingFixture(t)
 	f.enq.err = errors.New("redis down")

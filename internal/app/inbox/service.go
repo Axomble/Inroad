@@ -90,8 +90,10 @@ func WithPendingReplyStore(pending PendingReplyStore) ServiceOption {
 }
 
 // WithPendingReplyEnqueuer supplies the task publisher for queued replies.
-// Without it a scheduled row is still created (and a sweeper would pick
-// it up), but nothing is enqueued — which is why cmd/inroad always passes one.
+// Without it a scheduled row is still created and nothing is enqueued, so the
+// reply leaves only when the stranded-send sweep notices it minutes later
+// (internal/worker/inbox.PendingSweepHandler) — which is why cmd/inroad always
+// passes one: the sweep is a safety net, not a delivery path.
 func WithPendingReplyEnqueuer(enq PendingReplyEnqueuer) ServiceOption {
 	return func(s *Service) { s.pendingEnq = enq }
 }

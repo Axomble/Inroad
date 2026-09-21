@@ -14,18 +14,26 @@ import (
 )
 
 // RegisterScheduled attaches this domain's SCHEDULED half: inbox:sweep, the
-// periodic reconcile that fans out an inbox:poll for every active mailbox. It
-// enumerates mailboxes across every workspace, so it belongs to the control
-// role only (see internal/worker/role.go). mtx records the inbox sweep's
-// duration and mailbox count; a nil mtx no-ops. recorder is the same
-// jobrun.Recorder handlers.go resolved once for all seven periodic reconciles
-// (nil when the coreapi client doesn't implement it); inbox:sweep is the one
-// task in this package that is a scheduled reconcile (see
-// cmd/worker/scheduler.go's sweepRegistrars()), so it alone is wrapped in
-// jobrun.Record — the per-message handlers in RegisterPerMessage stay
-// unwrapped.
+// periodic reconcile that fans out an inbox:poll for every active mailbox, and
+// inbox:pending_send_sweep, the safety net that re-drives manual sends no live
+// task will deliver. Both enumerate rows across every workspace, so they belong
+// to the control role only (see internal/worker/role.go). mtx records each
+// sweep's duration and candidate count; a nil mtx no-ops. recorder is the same
+// jobrun.Recorder handlers.go resolved once for all eight periodic reconciles
+// (nil when the coreapi client doesn't implement it); these two are the
+// scheduled reconciles in this package (see cmd/worker/scheduler.go's
+// sweepRegistrars()), so they alone are wrapped in jobrun.Record — the
+// per-message handlers in RegisterPerMessage stay unwrapped.
 func RegisterScheduled(mux *asynq.ServeMux, core coreapi.Client, enq *queue.Client, mtx *metrics.Metrics, recorder jobrun.Recorder) {
 	mux.HandleFunc(queue.TaskInboxSweep, jobrun.Record(recorder, mtx, jobrun.NameInboxSweep, SweepHandler(core, enq, mtx)))
+	// Registered by type assertion for the same reason as PendingReplyCore
+	// below — the capability is consumed through PendingSweepCore rather than by
+	// widening coreapi.Client. A client without it simply runs no stranded-send
+	// sweep, which is the behaviour that shipped before this existed.
+	if psc, ok := core.(PendingSweepCore); ok {
+		mux.HandleFunc(queue.TaskInboxPendingSendSweep, jobrun.Record(recorder, mtx, jobrun.NameInboxPendingSweep,
+			PendingSweepHandler(psc, enq, DefaultPendingSweepWindow, mtx)))
+	}
 }
 
 // RegisterPerMessage attaches this domain's PER-MESSAGE handlers to the mux:

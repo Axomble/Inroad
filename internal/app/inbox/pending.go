@@ -276,20 +276,28 @@ func (s *Service) queueReply(
 	// authority: a task that fires early finds send_after in the future and
 	// declines to claim.
 	//
-	// An enqueue failure is RETURNED rather than swallowed, which leaves a
-	// 'scheduled' row nothing will ever pick up. That is the honest tradeoff
-	// today: reporting failure to the operator (who still has their text, and
-	// can retry) beats reporting success for a reply that will never leave.
-	// A periodic sweeper over `scheduled` rows past their send_after would make
-	// the row self-healing and is the obvious next increment — it does not exist
-	// yet, so this must not pretend the row is safe on its own.
+	// An enqueue failure is RETURNED rather than swallowed, and the row is
+	// failed below rather than left for the sweep.
+	//
+	// The stranded-send sweep DOES now exist (internal/worker/inbox.
+	// PendingSweepHandler) and would pick a 'scheduled' row up a few minutes
+	// later, so this is a choice rather than a limitation. It is the right one
+	// here: the caller is a human who has just pressed Send and is looking at
+	// the result. Telling them it failed, while they still have their text and
+	// can retry in a second, beats telling them it is queued and delivering it
+	// seven minutes later. The sweep is the safety net under failures NOBODY IS
+	// WATCHING; this failure has someone watching it.
 	if s.pendingEnq != nil {
 		if err := s.pendingEnq.EnqueuePendingInboxReply(ctx, saved.ID.String(), workspaceID.String(), sendAfter); err != nil {
-			// The row exists but nothing will ever claim it. Marked failed
-			// before returning, so the outbox tells the truth: leaving it
-			// `scheduled` would show the operator a reply that looks in flight,
-			// counts toward their outbox, and offers an Undo — for mail that is
-			// never going to leave. Wrong in the direction that matters.
+			// The row exists and no task points at it. Marked failed before
+			// returning, so the outbox agrees with the error the caller is
+			// about to see: leaving it `scheduled` would show a reply that
+			// looks in flight, counts toward their outbox, and offers an Undo,
+			// while the caller has just been told the send failed. Two answers
+			// to one question is the failure here, not a lost reply — the
+			// stranded-send sweep would deliver a `scheduled` row minutes
+			// later, which is precisely what makes leaving it there dishonest
+			// rather than merely lossy.
 			if claimer, ok := s.pending.(PendingReplyClaimer); ok {
 				if failErr := claimer.FailPendingReply(ctx, workspaceID, saved.ID,
 					"could not be queued for delivery — please send it again"); failErr != nil {
@@ -325,9 +333,12 @@ func (s *Service) checkOutstandingSendCapacity(ctx context.Context, workspaceID 
 // (Service.now), while ClaimInboxPendingReply guards on `send_after <= now()`
 // evaluated on the DATABASE clock (queries/inbox.sql). An instant equal to "now"
 // therefore loses to any forward skew between them: the task fires, the guarded
-// UPDATE matches no row, ErrPendingNotClaimable is not retryable, and the row
-// sits 'scheduled' forever — there is no sweeper over stranded rows (see
-// queueReply). The operator is told the reply was sent and it never leaves.
+// UPDATE matches no row, ErrPendingNotClaimable is not retryable, and that task
+// is done with the row still 'scheduled'. The stranded-send sweep would rescue
+// it minutes later (internal/worker/inbox.PendingSweepHandler), which is the
+// difference between "never leaves" and "arrives late" — neither being
+// acceptable for a reply the operator was told had been sent. The slack removes
+// the skew outright rather than leaning on the safety net.
 //
 // Thirty seconds is far beyond any sane NTP-synced skew and costs nothing: the
 // row is already due, so the only effect is that the claim's guard is satisfied

@@ -33,6 +33,7 @@ var scheduledTasks = []string{
 	queue.TaskWarmupSweep,
 	queue.TaskSweepEnrollments,
 	queue.TaskInboxSweep,
+	queue.TaskInboxPendingSendSweep,
 	queue.TaskDeliverabilityEvaluate,
 }
 

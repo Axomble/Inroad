@@ -160,6 +160,7 @@ var taskQueues = map[string]string{
 	TaskDomainAuthSweep:        QueueControl,
 	TaskRecipientESPSweep:      QueueControl,
 	TaskFleetRotate:            QueueControl,
+	TaskInboxPendingSendSweep:  QueueControl,
 	TaskDeliverabilityEvaluate: QueueControl,
 }
 
@@ -344,6 +345,29 @@ const TaskInboxPendingReplySend = "inbox:pending_reply_send"
 // than derived from a thread. Same pointer-to-a-row design as
 // TaskInboxPendingReplySend, and cancellable the same way.
 const TaskInboxPendingComposeSend = "inbox:pending_compose_send"
+
+// TaskInboxPendingSendSweep is the periodic reconcile that finds manual replies
+// and composed emails no live task will ever deliver — a row whose enqueue was
+// lost, and a row abandoned in 'sending' past its lease — and re-enqueues the
+// ordinary send task for each. It never sends: a second send path for mail a
+// human already pressed send on is the failure this whole subsystem is built
+// around.
+//
+// Cross-tenant by nature, so control-role work like every other reconcile.
+const TaskInboxPendingSendSweep = "inbox:pending_send_sweep"
+
+// pendingSendSweepInterval is how often the stranded-send sweep ticks. It drives
+// both the scheduler registration and the rescue tasks' dedup bucket, so the two
+// cannot drift — a bucket shorter than the interval would stop deduplicating,
+// and one longer would let a tick's rescue suppress the next tick's.
+//
+// Faster than the 5-minute family, and the reason is what this one sweeps: every
+// other reconcile reconciles machine-scheduled work, while this one is the only
+// safety net under an email a PERSON wrote and is watching for. A tick is two
+// bounded index reads over rows that are transient by nature, and enqueues
+// nothing at all when there is nothing stranded, so the cost of ticking often is
+// close to zero.
+const pendingSendSweepInterval = 2 * time.Minute
 
 // InboxPendingReplySendPayload names a row in inbox_pending_replies. It
 // carries NO body: the row is the single source of truth for what to send and
@@ -823,6 +847,75 @@ func (c *Client) EnqueuePendingInboxCompose(ctx context.Context, pendingID, work
 	)
 }
 
+// strandedRescueTaskID keys ONE stranded-send rescue within one sweep interval.
+//
+// IT MUST NOT BE THE ID THE ORIGINAL ENQUEUE USED, and that is the single detail
+// the whole sweep turns on. asynq's uniqueness check is `EXISTS` on the task's
+// own Redis key (rdb.enqueueCmd), and that key survives the run: a task that
+// completed is held for its asynq.Retention (taskRetention, 24h) and a task that
+// exhausted its retries is held in the archive for far longer. Re-enqueuing
+// "inboxpending:<id>" for a row whose task has already run would therefore
+// conflict — and c.enqueue treats a TaskID conflict as SUCCESS (deliberately, so
+// a sweeper racing a live task is a no-op rather than an error). The sweep would
+// report a rescue, enqueue nothing, and the reply would still never leave. A
+// sweep that silently does nothing is worse than no sweep, because the metric
+// and the ledger both say it ran.
+//
+// The bucket is what keeps it a dedup key rather than a licence to pile up
+// tasks: every replica's sweep in the same interval computes the same id, so
+// their enqueues collapse to one, while the next interval mints a distinct id
+// and can try again. Bucketing (rather than a bare per-row key) is also what
+// stops a completed rescue from suppressing every later one — see
+// inboxPollTaskID, which makes the same trade for the same reason.
+//
+// Collapsing is safe here for the reason it is safe everywhere else in this
+// file: the ROW's guarded claim, not this key, is the delivery-idempotency
+// guarantee. A dropped duplicate only saves work.
+func strandedRescueTaskID(prefix, pendingID string, now time.Time) string {
+	return fmt.Sprintf("%s:%s:%d", prefix, pendingID, now.Truncate(pendingSendSweepInterval).Unix())
+}
+
+// EnqueueStrandedPendingInboxReply re-drives one stranded manual reply: the
+// SAME task type, the same payload shape and the same retry budget the original
+// schedule used, with no ProcessAt (the row is already overdue by definition)
+// and a rescue-scoped TaskID.
+//
+// It is a separate helper rather than a flag on EnqueuePendingInboxReply because
+// the two differ in exactly the properties a flag would hide — the dedup key and
+// the delay — and because the sweep must not be able to reschedule a row into
+// the future by accident.
+func (c *Client) EnqueueStrandedPendingInboxReply(ctx context.Context, pendingID, workspaceID string) error {
+	b, err := json.Marshal(InboxPendingReplySendPayload{
+		PendingID: pendingID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return err
+	}
+	return c.enqueueRouted(ctx, TaskInboxPendingReplySend, b,
+		asynq.TaskID(strandedRescueTaskID("inboxpending-rescue", pendingID, time.Now())),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Timeout(sendTimeout),
+		asynq.Retention(taskRetention),
+	)
+}
+
+// EnqueueStrandedPendingInboxCompose is the compose half of the rescue. Same
+// shape over the compose table's task type; see the reply helper above.
+func (c *Client) EnqueueStrandedPendingInboxCompose(ctx context.Context, pendingID, workspaceID string) error {
+	b, err := json.Marshal(InboxPendingComposeSendPayload{
+		PendingID: pendingID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		return err
+	}
+	return c.enqueueRouted(ctx, TaskInboxPendingComposeSend, b,
+		asynq.TaskID(strandedRescueTaskID("inboxcompose-rescue", pendingID, time.Now())),
+		asynq.MaxRetry(sendMaxRetry),
+		asynq.Timeout(sendTimeout),
+		asynq.Retention(taskRetention),
+	)
+}
+
 // inboxPollTaskID is the dedup key for one mailbox's poll within one sweep
 // interval: every replica's sweep in the same interval computes the same bucket,
 // so their enqueues collapse to a single task. Split out of EnqueueInboxPoll (as
@@ -1024,6 +1117,13 @@ func RegisterSweepEnrollments(sch *asynq.Scheduler) error {
 // inboxSweepInterval to fan out inbox:poll tasks for every active mailbox.
 func RegisterInboxSweep(sch *asynq.Scheduler) error {
 	return registerControlSweep(sch, "@every "+inboxSweepInterval.String(), TaskInboxSweep)
+}
+
+// RegisterInboxPendingSendSweep registers the periodic stranded-manual-send
+// reconcile. Runs every pendingSendSweepInterval — see that constant for why
+// this one ticks faster than the rest.
+func RegisterInboxPendingSendSweep(sch *asynq.Scheduler) error {
+	return registerControlSweep(sch, "@every "+pendingSendSweepInterval.String(), TaskInboxPendingSendSweep)
 }
 
 // RegisterWarmupSweep registers the periodic warmup:sweep. Runs every 5 minutes

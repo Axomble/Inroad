@@ -13,6 +13,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/queue"
 	"github.com/inroad/inroad/internal/worker"
 	"github.com/inroad/inroad/internal/worker/fleet"
+	workerinbox "github.com/inroad/inroad/internal/worker/inbox"
 	"github.com/inroad/inroad/internal/worker/maintenance"
 	"github.com/inroad/inroad/internal/worker/recipientesp"
 )
@@ -22,13 +23,14 @@ import (
 // vocabularies meet: sweepRegistrars() knows the names and platform/queue knows
 // the task types, and nothing before this test connected them.
 var scheduledSweeps = map[string]string{
-	queue.TaskSweepEnrollments:   jobrun.NameEnrollments,
-	queue.TaskInboxSweep:         jobrun.NameInboxSweep,
-	queue.TaskWarmupSweep:        jobrun.NameWarmupSweep,
-	queue.TaskMaintenanceCleanup: jobrun.NameMaintenanceCleanup,
-	queue.TaskDomainAuthSweep:    jobrun.NameDomainAuthSweep,
-	queue.TaskRecipientESPSweep:  jobrun.NameRecipientESPSweep,
-	queue.TaskFleetRotate:        jobrun.NameFleetRotate,
+	queue.TaskSweepEnrollments:      jobrun.NameEnrollments,
+	queue.TaskInboxSweep:            jobrun.NameInboxSweep,
+	queue.TaskWarmupSweep:           jobrun.NameWarmupSweep,
+	queue.TaskMaintenanceCleanup:    jobrun.NameMaintenanceCleanup,
+	queue.TaskDomainAuthSweep:       jobrun.NameDomainAuthSweep,
+	queue.TaskRecipientESPSweep:     jobrun.NameRecipientESPSweep,
+	queue.TaskFleetRotate:           jobrun.NameFleetRotate,
+	queue.TaskInboxPendingSendSweep: jobrun.NameInboxPendingSweep,
 }
 
 // recordingCore is the coreapi client worker.Register wires the sweeps over.
@@ -38,10 +40,11 @@ var scheduledSweeps = map[string]string{
 // loudly if one were reached, which is the assertion: a periodic reconcile
 // should do nothing here but be counted. The methods that ARE overridden are
 // exactly the sweeps' entry points, each answering "nothing due", plus the
-// three capability interfaces Register resolves by type assertion
-// (maintenance.Cleaner, recipientesp.Core, fleet.Rotator) — without those the
-// handlers are never registered at all and ProcessTask would report "handler not
-// found", which is itself a failure this test should catch.
+// four capability interfaces Register resolves by type assertion
+// (maintenance.Cleaner, recipientesp.Core, fleet.Rotator and — reached via
+// inbox.RegisterScheduled — inbox.PendingSweepCore). Without those the handlers
+// are never registered at all and ProcessTask would report "handler not found",
+// which is itself a failure this test should catch.
 type recordingCore struct {
 	coreapi.Client
 	runs []jobrun.Run
@@ -100,12 +103,19 @@ func (c *recordingCore) RecordRecipientDomainESP(context.Context, coreapi.Recipi
 
 func (c *recordingCore) RotateMailboxWorkers(context.Context) (int64, error) { return 0, nil }
 
+// --- inbox.PendingSweepCore (resolved by type assertion in RegisterScheduled) ---
+
+func (c *recordingCore) ListStrandedPendingInboxSends(context.Context, coreapi.StrandedPendingWindow) ([]coreapi.StrandedPendingSend, error) {
+	return nil, nil
+}
+
 var (
-	_ coreapi.Client      = (*recordingCore)(nil)
-	_ jobrun.Recorder     = (*recordingCore)(nil)
-	_ maintenance.Cleaner = (*recordingCore)(nil)
-	_ recipientesp.Core   = (*recordingCore)(nil)
-	_ fleet.Rotator       = (*recordingCore)(nil)
+	_ coreapi.Client               = (*recordingCore)(nil)
+	_ jobrun.Recorder              = (*recordingCore)(nil)
+	_ maintenance.Cleaner          = (*recordingCore)(nil)
+	_ recipientesp.Core            = (*recordingCore)(nil)
+	_ fleet.Rotator                = (*recordingCore)(nil)
+	_ workerinbox.PendingSweepCore = (*recordingCore)(nil)
 )
 
 // Every periodic reconcile must land exactly one row in the run ledger, under

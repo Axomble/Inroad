@@ -18,7 +18,7 @@ const (
 	// self-host topology: an operator running Inroad for their own mailboxes has
 	// one trust domain and should never have to learn this setting exists.
 	RoleAll Role = "all"
-	// RoleControl runs the scheduler, the seven periodic sweeps and the purges.
+	// RoleControl runs the scheduler, the eight periodic sweeps and the purges.
 	// It stays on trusted infrastructure beside the API.
 	RoleControl Role = "control"
 	// RoleSend runs per-message work only: sends, warmup ticks, inbox polls,

@@ -68,7 +68,7 @@ type Metrics struct {
 }
 
 // sweepRowBuckets bound the rows-scanned histogram-free counter's companion
-// duration histogram. A sweep is a periodic reconcile (5-minute cadence at the
+// duration histogram. A sweep is a periodic reconcile (2-minute cadence at the
 // fastest), so the interesting range is "sub-second" through "longer than the
 // interval, and therefore overlapping itself" — the default Prometheus buckets
 // top out at 10s, which would collapse every genuinely pathological sweep into
@@ -77,8 +77,8 @@ var sweepDurationBuckets = []float64{0.05, 0.25, 1, 5, 15, 60, 300, 900}
 
 // jobRunDurationBuckets bound inroad_job_run_seconds. Reuses sweepDurationBuckets'
 // range (sub-second through 900s) rather than a second bucket set: the jobs
-// jobRunSeconds observes run on the same 5-minute-to-24-hour cadence spectrum as
-// the three sweeps sweepDuration already covers, so a run "longer than its own
+// jobRunSeconds observes run on the same 2-minute-to-24-hour cadence spectrum as
+// the four sweeps sweepDuration already covers, so a run "longer than its own
 // interval" is interesting at the same scale. Kept as its own slice, not a shared
 // variable, because the two metrics measure different windows of the same job
 // (sweepDuration times only the SCAN inside a handler; jobRunSeconds times the
@@ -258,12 +258,13 @@ func (m *Metrics) SweepCompleted(kind string, rows int, elapsed time.Duration) {
 // what the handler itself does or does not instrument.
 //
 // Deliberately separate from SweepCompleted: that metric carries a row count
-// SweepCompleted's three callers (the enrollment, inbox and warmup sweeps)
-// already have in hand, and the other three wrapped jobs (maintenance
-// cleanup, domain auth sweep, recipient esp sweep) do not report one to the
-// decorator — inventing rows=0 for them here would put fabricated data in
-// SweepCompleted's series. This metric reports only what jobrun.Record itself
-// observes: wall time and outcome, nothing it would have to guess at.
+// SweepCompleted's four callers (the enrollment, inbox, warmup and stranded-
+// pending-send sweeps) already have in hand, and the other four wrapped jobs
+// (maintenance cleanup, domain auth sweep, recipient esp sweep, fleet
+// rotation) do not report one to the decorator — inventing rows=0 for them
+// here would put fabricated data in SweepCompleted's series. This metric
+// reports only what jobrun.Record itself observes: wall time and outcome,
+// nothing it would have to guess at.
 //
 // A nil receiver is a no-op, like every other method on Metrics.
 func (m *Metrics) JobRunCompleted(job, outcome string, elapsed time.Duration) {

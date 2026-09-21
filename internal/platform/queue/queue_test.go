@@ -340,6 +340,7 @@ func TestEveryControlSweepTargetsControlQueue(t *testing.T) {
 		{"domain auth sweep", "@every 1h", TaskDomainAuthSweep},
 		{"recipient esp sweep", "@every 5m", TaskRecipientESPSweep},
 		{"fleet rotate", "@every 5m", TaskFleetRotate},
+		{"inbox pending send sweep", "@every " + pendingSendSweepInterval.String(), TaskInboxPendingSendSweep},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeRegistrar{}
@@ -466,6 +467,120 @@ func TestInboxPollTaskID(t *testing.T) {
 	if !strings.HasPrefix(a, "inbox-poll:mb-1:") {
 		t.Fatalf("task id = %q, want an inbox-poll:mb-1: prefix", a)
 	}
+}
+
+// THE assertion the stranded-send sweep rests on: a rescue must not reuse the
+// task id the original schedule used.
+//
+// asynq's uniqueness check is `EXISTS` on the task's Redis key, and that key
+// outlives the run — 24h of asynq.Retention for a completed task, the archive
+// retention for an exhausted one. c.enqueue then treats a TaskID conflict as
+// SUCCESS. So a rescue keyed "inboxpending:<id>" for a row whose task has
+// already run would be swallowed silently: the sweep would log a rescue, the
+// ledger would record a clean run, and the human's reply would still never
+// leave. That is strictly worse than having no sweep, because both signals say
+// it worked.
+func TestAStrandedRescueNeverReusesTheScheduledTasksID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		call     func(c *Client) error
+		schedule func(c *Client) error
+		prefix   string
+	}{
+		{
+			"reply",
+			func(c *Client) error { return c.EnqueueStrandedPendingInboxReply(context.Background(), "p1", "ws1") },
+			func(c *Client) error {
+				return c.EnqueuePendingInboxReply(context.Background(), "p1", "ws1", time.Now())
+			},
+			"inboxpending-rescue:p1:",
+		},
+		{
+			"compose",
+			func(c *Client) error { return c.EnqueueStrandedPendingInboxCompose(context.Background(), "p1", "ws1") },
+			func(c *Client) error {
+				return c.EnqueuePendingInboxCompose(context.Background(), "p1", "ws1", time.Now())
+			},
+			"inboxcompose-rescue:p1:",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheduled := &fakeEnqueuer{}
+			if err := tc.schedule(&Client{inner: scheduled}); err != nil {
+				t.Fatalf("schedule: %v", err)
+			}
+			scheduledID, ok := taskIDOption(scheduled.opts)
+			if !ok {
+				t.Fatal("the scheduled enqueue set no task id")
+			}
+
+			rescue := &fakeEnqueuer{}
+			if err := tc.call(&Client{inner: rescue}); err != nil {
+				t.Fatalf("rescue: %v", err)
+			}
+			rescueID, ok := taskIDOption(rescue.opts)
+			if !ok {
+				t.Fatal("the rescue enqueue set no task id")
+			}
+
+			if rescueID == scheduledID {
+				t.Fatalf("the rescue reuses the scheduled task id (%q) — asynq answers "+
+					"ErrTaskIDConflict for a task that has already run, enqueue() swallows that as "+
+					"success, and the sweep silently rescues nothing", rescueID)
+			}
+			if !strings.HasPrefix(rescueID, tc.prefix) {
+				t.Errorf("rescue task id = %q, want the %q prefix so it cannot collide in asynq's "+
+					"shared task-id space", rescueID, tc.prefix)
+			}
+			// A rescue carries NO delay: the row is overdue by definition, and a
+			// ProcessAt here would push a late reply later still.
+			if _, delayed := optionOfType(rescue.opts, asynq.ProcessAtOpt); delayed {
+				t.Error("a rescue set ProcessAt — the row is already overdue, so the task must run now")
+			}
+		})
+	}
+}
+
+// The bucket makes the rescue key a dedup key rather than a licence to pile up
+// one task per tick: every replica's sweep in the same interval computes the
+// same id, while the next interval mints a distinct one so a completed rescue
+// never suppresses a later attempt.
+func TestStrandedRescueTaskIDBucketsByTheSweepInterval(t *testing.T) {
+	base := time.Unix(1_700_000_000, 0).Truncate(pendingSendSweepInterval)
+	a := strandedRescueTaskID("inboxpending-rescue", "p1", base)
+
+	for _, offset := range []time.Duration{0, pendingSendSweepInterval / 2, pendingSendSweepInterval - time.Nanosecond} {
+		if got := strandedRescueTaskID("inboxpending-rescue", "p1", base.Add(offset)); got != a {
+			t.Fatalf("offset %s must share the bucket key: %q != %q", offset, got, a)
+		}
+	}
+	if got := strandedRescueTaskID("inboxpending-rescue", "p1", base.Add(pendingSendSweepInterval)); got == a {
+		t.Fatalf("the next interval must get a distinct key: %q == %q", got, a)
+	}
+	if strandedRescueTaskID("inboxpending-rescue", "p2", base) == a {
+		t.Fatal("different rows must get distinct keys")
+	}
+	if strandedRescueTaskID("inboxcompose-rescue", "p1", base) == a {
+		t.Fatal("a compose and a reply sharing a row id must still get distinct keys")
+	}
+	// The bucket must stay well under taskRetention, or an id could recur while
+	// asynq still holds the previous task under it.
+	if pendingSendSweepInterval >= taskRetention {
+		t.Errorf("pendingSendSweepInterval (%s) is not shorter than taskRetention (%s): a rescue id "+
+			"could recur while asynq still reserves it", pendingSendSweepInterval, taskRetention)
+	}
+}
+
+// optionOfType reports whether opts carry an option of the given type, and its
+// value. Broader than queueOption/taskIDOption because the assertion above is
+// about ABSENCE, which neither of those can express.
+func optionOfType(opts []asynq.Option, want asynq.OptionType) (any, bool) {
+	for _, o := range opts {
+		if o.Type() == want {
+			return o.Value(), true
+		}
+	}
+	return nil, false
 }
 
 func TestTestSendPayloadRoundTrip(t *testing.T) {
