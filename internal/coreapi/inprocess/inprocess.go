@@ -37,28 +37,22 @@ type client struct {
 	// suppression answers IsSuppressed. Like creds above, it is the ONLY route
 	// from this client to that answer, so replacing it moves every consumer at
 	// once. Defaults to localSuppression (the pool-backed query every
-	// self-hosted install runs); a fleet worker replaces it with
-	// internal/coreapi/remote's HTTP client via WithRemoteSuppression, and then
-	// this one method needs no database. See suppression.go.
+	// self-hosted install runs). See suppression.go, and the note on
+	// WithRemoteSuppression for why nothing in production replaces it any more.
 	suppression SuppressionSource
 	// jobs answers the per-message job reads. NIL IS THE DEFAULT and means
-	// "build them here, from the pool" — the self-host path, unchanged. A fleet
-	// worker installs internal/coreapi/remote's client via WithRemoteJobs and
-	// then none of those eight methods touches a database. See jobsource.go for
-	// why this one defaults to nil where suppression defaults to a value.
+	// "build them here, from the pool" — the self-host path, unchanged. See
+	// jobsource.go for why this one defaults to nil where suppression defaults
+	// to a value, and WithRemoteJobs for why nothing replaces it any more.
 	jobs JobSource
 	// outcomes accepts the claim and outcome writes. NIL IS THE DEFAULT and
-	// means "write them here, to the pool" — the self-host path, unchanged. A
-	// fleet worker installs internal/coreapi/remote's client via
-	// WithRemoteOutcomes and then none of those twenty methods touches a
-	// database. Same nil-means-local shape as jobs above; see outcomesource.go.
+	// means "write them here, to the pool" — the self-host path, unchanged.
+	// Same nil-means-local shape as jobs above; see outcomesource.go.
 	outcomes OutcomeSource
 	// inboxSends answers the manual reply/compose protocol — the mail a HUMAN
 	// wrote. NIL IS THE DEFAULT and means "here, through the pool" — the
-	// self-host path, unchanged. A fleet worker installs
-	// internal/coreapi/remote's client via WithRemoteInboxSends and then none of
-	// those twelve methods touches a database. Same nil-means-local shape as jobs
-	// and outcomes above; see inboxsendsource.go.
+	// self-host path, unchanged. Same nil-means-local shape as jobs and outcomes
+	// above; see inboxsendsource.go.
 	inboxSends InboxSendSource
 	jwtSecret  []byte
 	publicURL  string
@@ -174,15 +168,25 @@ func WithCredentialBroker(o credbroker.Opener) Option {
 }
 
 // WithRemoteSuppression replaces the pool-backed suppression query with another
-// SuppressionSource — in practice internal/coreapi/remote's HTTP client,
-// pointed at the control plane's fleet listener.
+// SuppressionSource — in practice internal/coreapi/remote's HTTP client.
 //
-// This is slice 1 of giving up the worker's pgxpool: one method, end to end,
-// over the wire. It is an Option rather than a positional parameter for the
-// same reason WithCredentialBroker is — every other caller (cmd/inroad,
-// cmd/seed, every test, and the self-host RoleAll worker) wants the local query
-// and should not have to say so — and OFF by default, so an installation that
-// sets nothing behaves exactly as it did before this existed.
+// THESE FOUR OPTIONS NOW HAVE NO PRODUCTION CALLER, and that is worth saying
+// once, here, rather than four times. They were how slices 1–3b moved the
+// boundary a method group at a time while cmd/worker still built an in-process
+// client for every role. Slice 4 finished the move: a role=send worker uses
+// *remote.Client WHOLE and builds no in-process client at all, and every other
+// role uses the local path — so there is no longer a caller that wants half of
+// each. What still exercises them is the fault-injection integration suite in
+// this package, which proves the never-double-send properties over a hybrid;
+// migrating those to drive *remote.Client directly is the follow-up that lets
+// these four and their *Source interfaces be deleted. It is deliberately not
+// bundled with the change that moved the boundary.
+//
+// It is an Option rather than a positional parameter for the same reason
+// WithCredentialBroker is — every other caller (cmd/inroad, cmd/seed, every
+// test, and the self-host RoleAll worker) wants the local query and should not
+// have to say so — and OFF by default, so an installation that sets nothing
+// behaves exactly as it did before this existed.
 //
 // Passing nil is a no-op, NOT a way to disable suppression checks: silently
 // dropping a source that was meant to be wired would leave the process reading
@@ -197,10 +201,11 @@ func WithRemoteSuppression(s SuppressionSource) Option {
 
 // WithRemoteJobs replaces the pool-backed per-message job builds with another
 // JobSource — in practice internal/coreapi/remote's HTTP client, pointed at the
-// control plane's fleet listener.
+// control plane's fleet listener. No production caller; see
+// WithRemoteSuppression.
 //
-// This is slice 2 of giving up the worker's pgxpool: eight read methods, end to
-// end, over the wire. Same shape and same reasoning as WithRemoteSuppression —
+// This was slice 2 of giving up the worker's pgxpool: eight read methods, end
+// to end, over the wire. Same shape and same reasoning as WithRemoteSuppression —
 // an Option rather than a positional parameter because every other caller
 // (cmd/inroad, cmd/seed, every test, and the self-host RoleAll worker) wants
 // the local build and should not have to say so, and OFF by default, so an
@@ -221,7 +226,9 @@ func WithRemoteJobs(s JobSource) Option {
 // another OutcomeSource — in practice internal/coreapi/remote's HTTP client,
 // pointed at the control plane's fleet listener.
 //
-// This is slice 3 of giving up the worker's pgxpool, and the one that carries
+// No production caller; see WithRemoteSuppression.
+//
+// This was slice 3 of giving up the worker's pgxpool, and the one that carried
 // the risk: over a network a write has a third outcome a function call does not
 // — it committed and the response was lost. What makes that safe is the claim,
 // not this option; see internal/coreapi/remote's outcomes.go for the per-method
@@ -248,7 +255,9 @@ func WithRemoteOutcomes(s OutcomeSource) Option {
 // with another InboxSendSource — in practice internal/coreapi/remote's HTTP
 // client, pointed at the control plane's fleet listener.
 //
-// This is slice 3b of giving up the worker's pgxpool, and it carries slice 3's
+// No production caller; see WithRemoteSuppression.
+//
+// This was slice 3b of giving up the worker's pgxpool, and it carries slice 3's
 // risk with a HIGHER bar: these are emails a person wrote and pressed send on, so
 // a duplicate is the operator's own words arriving twice in a customer's thread
 // rather than one extra marketing touch. What makes a lost response safe is the

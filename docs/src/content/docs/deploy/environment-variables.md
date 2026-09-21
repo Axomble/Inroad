@@ -544,19 +544,28 @@ mailbox at a time, over an authenticated HTTP channel.
 | `INROAD_FLEET_BROKER_URL` | **Worker side.** Base URL a `send` worker asks at, e.g. `https://control.internal:8090` | unset |
 | `INROAD_FLEET_BROKER_TOKEN` | Shared bearer credential both sides present and check, **at least 32 bytes**. Generate with `openssl rand -base64 32`. Required on either side once the other variable is set | unset |
 | `INROAD_FLEET_BROKER_ALLOW_PLAINTEXT` | Permits an `http://` fleet URL. **Default false** — the channel carries the token and the decrypted credential | `false` |
-| `INROAD_FLEET_COREAPI_REMOTE` | **Worker side.** Read `coreapi` over the fleet channel instead of this worker's own database connection. **Default false.** See [Remote coreapi](#remote-coreapi-worker-side) below | `false` |
+| `INROAD_FLEET_COREAPI_REMOTE` | **Legacy; selects nothing.** A `role=send` worker now reads `coreapi` over the fleet channel unconditionally, because it has no database connection to read it any other way. Kept only so setting it `true` on a `control` or `all` worker is still refused rather than silently ignored. See [Remote coreapi](#remote-coreapi-worker-side) below | `false` |
 
 Rules the binaries enforce at startup, rather than at the first send:
 
 - `role=send` **with** `INROAD_MASTER_KEY` → refuses to start.
-- `role=send` **without** a broker URL → refuses to start (it could not send).
+- `role=send` **with** `INROAD_DATABASE_URL` → refuses to start. A fleet host
+  opens no database connection; the variable would not be used, and a machine
+  that has no use for your tenant database credentials should not hold them.
+  The check is on the variable being *present*, because `INROAD_DATABASE_URL`
+  has a local-development default and is therefore never empty.
+- `role=send` **without** a broker URL → refuses to start (it could not send,
+  and it has nothing to read from).
 - **Any** role with both the key and a broker URL → refuses to start. A process
   configured to broker has no business also being able to decrypt everything.
-- `role=control` needs neither: it registers no handler that opens a credential.
-  An existing control host that still sets `INROAD_MASTER_KEY` keeps working.
+- `role=control` needs neither key nor broker: it registers no handler that
+  opens a credential. An existing control host that still sets
+  `INROAD_MASTER_KEY` keeps working, and it keeps its database connection —
+  it runs the cross-tenant sweeps, which have no remote transport.
 - **Unset `INROAD_WORKER_ROLE` (the single-process self-host default) is
-  completely unaffected.** Set `INROAD_MASTER_KEY` and nothing else, exactly as
-  before. None of the five variables above exist for you.
+  completely unaffected.** Set `INROAD_MASTER_KEY` and `INROAD_DATABASE_URL`
+  and nothing else, exactly as before. None of the five variables above exist
+  for you.
 
 #### One listener, one token
 
@@ -571,10 +580,18 @@ credential token is already the more powerful of the two. Rotate
 
 #### Remote coreapi (worker side)
 
-`INROAD_FLEET_COREAPI_REMOTE=true` moves a `role=send` worker's `coreapi` reads
-from its own `pgxpool` onto the fleet channel. It currently moves the
-suppression check every send makes, plus the eight **per-message job reads** —
-everything a worker needs to know in order to do one piece of work:
+**A `role=send` worker reads `coreapi` over the fleet channel, always, and
+opens no database connection at all.** It is not a setting: that role requires
+`INROAD_FLEET_BROKER_URL` anyway (it holds no master key), so there was nothing
+left for a flag to choose, and leaving it optional would have meant you could
+configure a fleet host that still held a connection to your tenant database.
+
+The transport carries every `coreapi` method that role can reach — the
+suppression check, the nine per-message job reads, the twenty claim and outcome
+writes, the twelve manual reply/compose calls, the ten inbound-mail calls an
+inbox poll makes, and four worker-infrastructure calls. The nine reads are the
+ones worth naming, because they are what a worker needs to know in order to do
+one piece of work:
 
 | Method | What it answers |
 | :--- | :--- |
@@ -587,11 +604,15 @@ everything a worker needs to know in order to do one piece of work:
 | `GetTestSendContent` | One test-send's raw step content and preview values |
 | `ResolveSenderTransport` | One mailbox's send identity and connection settings |
 | `FindSendByMessageID` | Which send an inbound reply or bounce is about |
+| `NextWarmupDue` | When this mailbox's next warm-up is due, and whether one is now |
 
-Nothing that CLAIMS, marks, finalizes or advances anything has moved yet — the
-worker still opens a pool for all of those, and for the periodic sweeps. So this
-is a step toward a worker that cannot read the tenant database at all, not the
-finished thing. Leave it off unless you are deliberately exercising that path.
+**The cross-tenant sweeps are deliberately absent** and always will be.
+`ListDueEnrollments`, `ListActiveMailboxes`, `ListDueWarmupMailboxes`,
+`EvaluateWarmupHealth`, `ListStaleSendingDomains` and `RecordSendingDomainAuth`
+enumerate every workspace's rows, which is exactly the capability splitting the
+planes removes. They run on `role=control`, which keeps its database connection
+for that reason. A `role=send` worker registers no handler that calls them, and
+the transport refuses them by name if one ever does.
 
 **Credentials do not travel on these routes.** A job response carries the
 mailbox's host, port, username and TLS policy, and no secret at all; the worker
@@ -602,13 +623,14 @@ the installation hands out a plaintext secret, and it is the one built for it.
 
 What it enforces at startup:
 
-- On any role **but** `send` → refuses to start. A `control` worker runs beside
-  the API and a single-process (`all`) worker *is* the database's host; a
-  network hop to reach it would be pure latency, and silently ignoring the
-  setting would leave you believing your worker had stopped reading the
-  database.
-- Set **without** `INROAD_FLEET_BROKER_URL` → refuses to start. That URL is both
-  where the reads go and where their credentials come from.
+- `INROAD_FLEET_COREAPI_REMOTE=true` on any role **but** `send` → refuses to
+  start. A `control` worker runs beside the API and a single-process (`all`)
+  worker *is* the database's host; silently ignoring the setting would leave
+  you believing your worker had stopped reading the database. On `role=send`
+  the variable selects nothing and either value is accepted.
+- `role=send` **without** `INROAD_FLEET_BROKER_URL` → refuses to start. That
+  URL is both where the reads go and where their credentials come from, and
+  there is no pool to fall back to.
 - A worker that cannot reach the control plane **refuses to work**. It never
   falls back to a local read, never assumes "not suppressed" (a false negative
   there is mail delivered to someone who opted out), and never returns a
@@ -628,16 +650,27 @@ installation — and every open is a request the control plane sees and can log.
 Refresh tokens never leave the control plane at all: a worker receives only a
 short-lived access token for one API call.
 
-**It does not yet shrink what a LIVE compromised worker can reach.** Every
-`send` worker consumes the shared `send` queue and may legitimately be handed a
-job for any mailbox — only `warmup:tick` is routed by assignment — so the broker
-has to answer for any mailbox the token names. Scoping a worker to only the
-mailboxes actually routed to it needs per-worker identity *and* per-mailbox
-routing; identity now exists (see [Worker identity](#worker-identity-and-egress-ip)
-below), per-mailbox routing does not. The token is also shared across the fleet,
-so the broker cannot tell which host is asking and revoking one revokes all.
+**It also removes the tenant database.** A `role=send` host cannot issue a
+query, enumerate a table, page a result set or match a pattern: its whole access
+is naming one subject at a time over a channel whose request shapes cannot
+express a filter.
+
+**What a LIVE compromised worker can still reach**, stated plainly because the
+stronger claim is false. It can obtain the decrypted credential of **any**
+mailbox by naming its id, because every `send` worker consumes the shared `send`
+queue and may legitimately be handed any mailbox's job — only `warmup:tick` and
+`inbox:poll` are routed by assignment. That credential is the ability to send
+and read mail as that mailbox, which is more than a database read of the same
+row. It can also fetch any **job** whose id it can name, and a job carries real
+content: a step send's subject and HTML, a pending reply's text. It cannot
+discover those ids. Scoping a worker to only its own mailboxes needs per-worker
+identity *and* per-mailbox routing; identity now exists (see
+[Worker identity](#worker-identity-and-egress-ip) below), routing for
+`sequence:advance` does not. The token is shared across the fleet, so the
+listener cannot tell which host is asking and revoking one revokes all.
+
 Treat a `send` host as able to reach any mailbox in the installation while it is
-running, and firewall the broker listener accordingly.
+running, and firewall the fleet listener accordingly.
 
 ### Worker identity and egress IP
 

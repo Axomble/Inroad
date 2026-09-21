@@ -119,24 +119,28 @@ Prefer running Go and Node natively? See [CONTRIBUTING.md](CONTRIBUTING.md). `ma
 Inroad splits into a **control plane** that owns all state and an **execution plane** that owns all
 outbound network I/O. They meet at exactly one interface, `coreapi.Client`.
 
-**The split is mostly logical, not physical — read that literally.** Worker packages reach
-relational data only through `coreapi`, and that is enforced mechanically: a `depguard` rule in
+**Whether the split is physical depends on the role, and that is the design.** Worker packages
+reach relational data only through `coreapi`, enforced mechanically: a `depguard` rule in
 `.golangci.yml` fails `golangci-lint run` (and therefore CI) if a non-test file under
-`internal/worker/` imports `internal/platform/db`. That closes one specific mistake, not the
-underlying gap: the worker *process* still opens its own `pgxpool` and calls `coreapi` as an
-in-process function, not over the network. Giving `coreapi` a full HTTP transport so the split
-becomes physical is planned, not built — the seam was designed for it ("in-process now, HTTP
-later"). Nothing below claims otherwise.
+`internal/worker/` imports `internal/platform/db`.
 
-**One piece of it IS physical now: the encryption key.** A `role=send` worker — the role meant for
-a fleet host — holds no `INROAD_MASTER_KEY` and refuses to start if it is given one. It asks the
-control plane to open each mailbox credential over an authenticated channel
-(`internal/platform/credbroker`), so a stolen worker disk or environment file decrypts nothing.
-The honest limit: while that worker is *running* it can still ask for any mailbox, because every
-`send` worker consumes the shared `send` queue and may legitimately be handed any mailbox's job —
-per-mailbox scoping needs per-mailbox routing first. What moved is the offline, permanent,
-un-revocable capability, not the live one. The single-process self-host topology is unaffected and
-keeps its local keyring.
+**A `role=send` worker — the role meant for a fleet host — opens no database connection at all.**
+`cmd/worker` does not call `db.ConnectSized` on that role; its `coreapi.Client` is
+`*coreapi/remote.Client`, an authenticated HTTP hop to the control plane, and a type with no
+`*pgxpool.Pool` field. It holds no `INROAD_MASTER_KEY` and refuses to start if it is given one; it
+holds no `INROAD_DATABASE_URL` and refuses to start if it is given one of those either. So a
+compromised fleet host cannot read the tenant database: it names one subject at a time over a seam
+whose request shapes cannot express a filter, a pattern, a limit or a cursor.
+
+**The honest limit, stated as plainly as the claim.** While that worker is *running* it can still
+obtain the decrypted credential of any mailbox it names — every `send` worker consumes the shared
+`send` queue and may legitimately be handed any mailbox's job, so per-mailbox scoping needs
+per-mailbox routing first — and it can fetch any *job* whose id it can name, which carries real
+content. It cannot enumerate anything. `docs/security.md` invariant 80 is the full statement.
+
+`role=control` keeps its pool, and must: it runs the cross-tenant sweeps, which have no remote
+transport by design. The single-process self-host topology (`role=all`) is entirely unaffected and
+keeps its pool and its local keyring.
 
 ### Zoomed out — the pieces and what moves between them
 
@@ -156,8 +160,9 @@ keeps its local keyring.
    │              │          └──────┬──────┘       │        SMTP · Gmail API · MS Graph
    │              │                 │              │
    │              └── coreapi.Client┼──────────────┼────────────┘
-   │                 (in-process)   │              │   ⚠ the worker also holds its OWN
-   └────────────────────────────────┼──────────────┘     pgxpool — see the note above
+   │        in-process for role=all │              │   role=send holds NO pool: its
+   │        and role=control        │              │   coreapi is an HTTP hop (see above)
+   └────────────────────────────────┼──────────────┘
                                     │
                        queues, and who consumes them
                 ┌───────────────────┴───────────────────────────────┐
@@ -181,7 +186,7 @@ decision rather than one message's delivery. Routing is one table — `queueForT
 ### Zoomed in — one campaign step, end to end
 
 ```
-  [control role]      [redis]             ┃ [send role] — one process, its own pgxpool, NO keyring
+  [control role]      [redis]             ┃ [send role] — one process, NO pool, NO keyring
         │                │                ┃
   sweep finds a          │                ┃
   due enrollment         │                ┃
@@ -191,11 +196,12 @@ decision rather than one message's delivery. Routing is one table — `queueForT
         │                │                ┃        guarantee; queue dedup is defence in depth)
         │                │                ┃  │
         │                │                ┃  ▼
-        │                │                ┃ coreapi.GetStepSendJob — an in-process function call
-        │                │                ┃ against this process's own pool — EXCEPT the credential:
-        │                │                ┃ unwrapping the DEK and refreshing the OAuth token is one
-        │                │                ┃ authenticated call back to the control plane, which is
-        │                │                ┃ the only place the key lives (role=all keeps it local).
+        │                │                ┃ coreapi.GetStepSendJob — an authenticated HTTP call to
+        │                │                ┃ the control plane (role=all makes the same call in
+        │                │                ┃ process, against its own pool). The response carries no
+        │                │                ┃ secret: unwrapping the DEK and refreshing the OAuth
+        │                │                ┃ token is a SECOND call, to the credential broker on the
+        │                │                ┃ same listener, which is the only place the key lives.
         │                │                ┃  │
         │                │                ┃  ▼
         │                │                ┃ send ─────▶ provider (SMTP · Gmail API · MS Graph)
@@ -210,11 +216,11 @@ decision rather than one message's delivery. Routing is one table — `queueForT
         │   a retry after delivery sees 'sent' and recover-forwards, never re-sends
 ```
 
-Only the first hop crosses a process line. `GetStepSendJob` is reached from `AdvanceHandler`, which
-is registered under the per-message handler set — `role=send` and `role=all` only — so every step
-right of the heavy bar runs inside the send process against its own `coreapi` client. (The similar
-`ResolveSenderTransport` is a different path: ad hoc sends with no enrollment row, such as the test
-send and inbox replies.)
+On `role=send`, every `coreapi` step right of the heavy bar crosses a process line; on `role=all`
+none of them does, and the same code runs either way because both are the same
+`coreapi.Client` interface. `GetStepSendJob` is reached from `AdvanceHandler`, registered under the
+per-message handler set — `role=send` and `role=all` only. (The similar `ResolveSenderTransport` is
+a different path: ad hoc sends with no enrollment row, such as the test send and inbox replies.)
 
 Three properties worth knowing because they shape everything else:
 
@@ -228,11 +234,12 @@ Three properties worth knowing because they shape everything else:
   asks the control plane to open each credential, one mailbox at a time
   (`internal/platform/credbroker`). A stolen worker disk or environment file therefore decrypts
   nothing, and revoking a fleet's access is rotating one token rather than re-encrypting every DEK.
-  The limit worth stating just as plainly: while that worker is *running* it can still ask for any
-  mailbox — every `send` worker consumes the shared `send` queue and may legitimately be handed any
-  mailbox's job — and it still holds its own pool, so it reads every workspace's rows even though it
-  can no longer decrypt them. What moved is the offline, permanent capability; per-mailbox scoping
-  needs per-mailbox routing, and losing the pool needs `coreapi` to grow a full HTTP transport.
+  It also holds no pool: every `coreapi` call it makes is an HTTP hop to the control plane, so it
+  cannot read another tenant's rows at all. The limit worth stating just as plainly: while that
+  worker is *running* it can still ask for any mailbox's credential — every `send` worker consumes
+  the shared `send` queue and may legitimately be handed any mailbox's job — and it can fetch any
+  job whose id it can name. Per-mailbox scoping needs per-mailbox routing for `sequence:advance`,
+  which does not exist yet.
   `role=all` (self-host) keeps its local keyring and is unchanged.
 - **Send windows are unrepresentable-if-overlapping** via a GiST exclusion constraint — an illegal
   state made impossible at the schema rather than validated in application code.
