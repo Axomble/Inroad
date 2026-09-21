@@ -5546,6 +5546,14 @@ components:
         max_volume: { type: integer, minimum: 1, maximum: 200, description: daily ceiling the ramp climbs to }
         ramp_increment: { type: integer, minimum: 1, description: emails/day added each day }
         reply_rate: { type: number, minimum: 0, maximum: 1, description: probability a warmup send is an in-thread reply }
+        timezone:
+          type: string
+          description: >-
+            IANA zone name (e.g. Europe/Berlin) the mailbox's waking-hours window
+            is read in. Defaults to UTC. Validated at the boundary — an
+            unrecognised zone is a 400, because pacing a mailbox on the wrong
+            clock stays invisible until its reputation has already suffered.
+          example: America/New_York
     WarmupSentinelRequest:
       type: object
       description: >-
@@ -5568,7 +5576,7 @@ components:
         itself yet, or sit in quarantine while its last measured reputation was
         fine. Clients must not present either axis as a synonym for the other,
         and must not order the two enums against each other.
-      required: [mailbox_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, health_state, health_reason, lane, started_at, today_sent, today_target]
+      required: [mailbox_id, enabled, start_volume, max_volume, ramp_increment, reply_rate, timezone, health_state, health_reason, lane, started_at, today_sent, today_target]
       properties:
         mailbox_id: { type: string, format: uuid }
         enabled: { type: boolean }
@@ -5576,6 +5584,7 @@ components:
         max_volume: { type: integer }
         ramp_increment: { type: integer }
         reply_rate: { type: number }
+        timezone: { type: string, description: "IANA zone the waking-hours window is read in (default UTC)" }
         health_state:
           type: string
           enum: [unknown, healthy, watch, throttled, paused]

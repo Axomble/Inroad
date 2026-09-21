@@ -1169,6 +1169,7 @@ type WarmupParticipant struct {
 	Lane          string             `json:"lane"`
 	LaneReason    string             `json:"lane_reason"`
 	IsSentinel    bool               `json:"is_sentinel"`
+	Timezone      string             `json:"timezone"`
 }
 
 type WarmupReceipt struct {

@@ -29,9 +29,9 @@
 -- keeps its address, so nothing about the case that already worked changes.
 INSERT INTO warmup_participants (
     mailbox_id, workspace_id,
-    start_volume, max_volume, ramp_increment, reply_rate, lane
+    start_volume, max_volume, ramp_increment, reply_rate, timezone, lane
 )
-SELECT $1, $2, $3, $4, $5, $6,
+SELECT $1, $2, $3, $4, $5, $6, $7,
        COALESCE((
            SELECT CASE WHEN t.to_lane IN ('quarantine','blocked') THEN t.to_lane END
            FROM warmup_state_transitions t
@@ -47,6 +47,7 @@ ON CONFLICT (mailbox_id) DO UPDATE SET
     max_volume     = EXCLUDED.max_volume,
     ramp_increment = EXCLUDED.ramp_increment,
     reply_rate     = EXCLUDED.reply_rate,
+    timezone       = EXCLUDED.timezone,
     updated_at     = now()
 WHERE warmup_participants.workspace_id = $2
 RETURNING *;

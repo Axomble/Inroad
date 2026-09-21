@@ -34,6 +34,9 @@ const (
 	defaultMaxVolume     int32   = 40
 	defaultRampIncrement int32   = 2
 	defaultReplyRate     float32 = 0.30
+	// defaultTimezone keeps a first enable behaving exactly as warmup did before
+	// the column existed, so adding the field changes nobody's schedule.
+	defaultTimezone = "UTC"
 
 	maxVolumeCeiling int32 = 200
 )
@@ -73,6 +76,7 @@ type WarmupSettings struct {
 	MaxVolume     *int32
 	RampIncrement *int32
 	ReplyRate     *float32
+	Timezone      *string
 }
 
 // resolvedSettings are the concrete ramp values after merging a request over the
@@ -82,6 +86,7 @@ type resolvedSettings struct {
 	maxVolume     int32
 	rampIncrement int32
 	replyRate     float32
+	timezone      string
 }
 
 func (r resolvedSettings) validate() error {
@@ -96,6 +101,13 @@ func (r resolvedSettings) validate() error {
 		return fmt.Errorf("%w: ramp_increment must be >= 1", ErrValidation)
 	case r.replyRate < 0 || r.replyRate > 1:
 		return fmt.Errorf("%w: reply_rate must be in [0,1]", ErrValidation)
+	}
+	// Validated here, at the boundary, for the same reason campaigns validate
+	// their zone rather than constraining the column: the IANA database changes,
+	// and a bad zone must be refused on the way in instead of silently pacing a
+	// mailbox on the wrong clock for weeks.
+	if _, err := time.LoadLocation(r.timezone); err != nil {
+		return fmt.Errorf("%w: timezone must be an IANA zone name (e.g. Europe/Berlin), got %q", ErrValidation, r.timezone)
 	}
 	return nil
 }
@@ -123,6 +135,7 @@ func (s *Service) EnableWarmup(ctx context.Context, ws, mailboxID uuid.UUID, set
 		MaxVolume:     resolved.maxVolume,
 		RampIncrement: resolved.rampIncrement,
 		ReplyRate:     resolved.replyRate,
+		Timezone:      resolved.timezone,
 	})
 	switch {
 	case errors.Is(err, ErrMailboxNotInWorkspace):
@@ -144,6 +157,17 @@ func (s *Service) EnableWarmup(ctx context.Context, ws, mailboxID uuid.UUID, set
 // as absent here and is caught downstream by the self-enforcing upsert). Any
 // OTHER read error is propagated, never swallowed: on a partial update of an
 // EXISTING participant a transient read failure must NOT silently collapse the
+// currentOrUTC treats an empty stored zone as UTC. Rows written before the
+// timezone column existed carry the column default, but a hand-written row or a
+// future partial migration could still present "", and an empty string is not a
+// loadable zone.
+func currentOrUTC(zone string) string {
+	if zone == "" {
+		return defaultTimezone
+	}
+	return zone
+}
+
 // merge base to defaults, or the ON CONFLICT DO UPDATE would overwrite the live
 // start/max/increment/reply settings back to defaults (silent data corruption).
 func (s *Service) currentOrDefault(ctx context.Context, ws, mailboxID uuid.UUID) (resolvedSettings, error) {
@@ -155,6 +179,7 @@ func (s *Service) currentOrDefault(ctx context.Context, ws, mailboxID uuid.UUID)
 			maxVolume:     defaultMaxVolume,
 			rampIncrement: defaultRampIncrement,
 			replyRate:     defaultReplyRate,
+			timezone:      defaultTimezone,
 		}, nil
 	case err != nil:
 		return resolvedSettings{}, fmt.Errorf("warmup: read current settings: %w", err)
@@ -164,6 +189,7 @@ func (s *Service) currentOrDefault(ctx context.Context, ws, mailboxID uuid.UUID)
 		maxVolume:     cur.MaxVolume,
 		rampIncrement: cur.RampIncrement,
 		replyRate:     cur.ReplyRate,
+		timezone:      currentOrUTC(cur.Timezone),
 	}, nil
 }
 
@@ -180,6 +206,9 @@ func merge(base resolvedSettings, req WarmupSettings) resolvedSettings {
 	}
 	if req.ReplyRate != nil {
 		base.replyRate = *req.ReplyRate
+	}
+	if req.Timezone != nil {
+		base.timezone = *req.Timezone
 	}
 	return base
 }
@@ -524,6 +553,7 @@ func (s *Service) participantDTO(p Participant, todaySent int32) WarmupParticipa
 		MaxVolume:     p.MaxVolume,
 		RampIncrement: p.RampIncrement,
 		ReplyRate:     p.ReplyRate,
+		Timezone:      currentOrUTC(p.Timezone),
 		HealthState:   p.HealthState,
 		HealthReason:  p.HealthReason,
 		StartedAt:     rfc3339(p.StartedAt),

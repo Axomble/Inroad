@@ -464,6 +464,25 @@ func (c client) localFailWarmupSend(ctx context.Context, job coreapi.WarmupSendJ
 	return c.q.FailWarmupSend(ctx, gen.FailWarmupSendParams{ID: sendID, WorkspaceID: ws, LastError: errMsg})
 }
 
+// warmupLocation resolves a participant's stored IANA zone for the waking-hours
+// window. It never fails the tick: an empty or unreadable zone falls back to UTC,
+// which is both the column default and the behaviour every participant had before
+// the column existed.
+//
+// Refusing here instead would be the wrong trade — a mailbox whose zone string
+// went bad (a renamed IANA entry, a hand-edited row) would stop warming
+// altogether, and silently, which is worse than warming on the wrong clock.
+func warmupLocation(zone string) *time.Location {
+	if zone == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
 // NextWarmupDue computes the mailbox's next warmup send time and whether one is
 // due now. It loads the participant + today's sent count and delegates the (pure,
 // table-tested) policy to warmup.NextDue. A missing/disabled participant is not an
@@ -514,6 +533,7 @@ func (c client) NextWarmupDue(ctx context.Context, mailboxID, workspaceID string
 	if lastSent.Valid {
 		in.LastSentAt = lastSent.Time.UTC()
 	}
+	in.Loc = warmupLocation(p.Timezone)
 	plan := warmup.NextDue(in)
 	return plan.NextDue, plan.SendNow, nil
 }

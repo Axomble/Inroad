@@ -92,6 +92,7 @@ func (s *PgStore) UpsertParticipant(ctx context.Context, arg UpsertParams) (Part
 		MaxVolume:     arg.MaxVolume,
 		RampIncrement: arg.RampIncrement,
 		ReplyRate:     arg.ReplyRate,
+		Timezone:      arg.Timezone,
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):

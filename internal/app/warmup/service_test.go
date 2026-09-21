@@ -93,8 +93,11 @@ func (s *fakeStore) UpsertParticipant(_ context.Context, arg UpsertParams) (Part
 		MaxVolume:     arg.MaxVolume,
 		RampIncrement: arg.RampIncrement,
 		ReplyRate:     arg.ReplyRate,
-		StartedAt:     started,
-		HealthState:   "healthy",
+		// The real upsert writes timezone on both arms, so a fake that dropped it
+		// would hide the merge rule this package's tests assert.
+		Timezone:    arg.Timezone,
+		StartedAt:   started,
+		HealthState: "healthy",
 	}
 	if ok {
 		p.HealthState = existing.HealthState
@@ -1254,5 +1257,59 @@ func TestDiscountedObserverDTOTrimsEveryRate(t *testing.T) {
 	}
 	if got.Lift != 7.1 {
 		t.Errorf("lift = %v, want 7.1", got.Lift)
+	}
+}
+
+// The zone is validated at this boundary, not by a column constraint, for the
+// same reason campaigns validate theirs: the IANA database changes, and a bad
+// zone has to be refused on the way in. Accepting it would pace the mailbox on
+// the wrong clock — a failure that stays invisible until the reputation damage
+// is already done.
+func TestEnableWarmupRejectsAnUnknownTimezone(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	svc := NewService(store)
+
+	bad := "Mars/Olympus_Mons"
+	_, err := svc.EnableWarmup(context.Background(), ws, mb, WarmupSettings{Timezone: &bad})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("want ErrValidation for %q, got %v", bad, err)
+	}
+}
+
+func TestEnableWarmupAcceptsARealZoneAndDefaultsToUTC(t *testing.T) {
+	ws, mb := uuid.New(), uuid.New()
+	store := newFakeStore()
+	store.ownedMailboxes[mb] = ws
+	svc := NewService(store)
+
+	// Omitted on a first enable → UTC, so adding the field changed no schedule.
+	got, err := svc.EnableWarmup(context.Background(), ws, mb, WarmupSettings{})
+	if err != nil {
+		t.Fatalf("EnableWarmup: %v", err)
+	}
+	if got.Timezone != "UTC" {
+		t.Fatalf("default timezone = %q, want UTC", got.Timezone)
+	}
+
+	zone := "America/New_York"
+	got, err = svc.EnableWarmup(context.Background(), ws, mb, WarmupSettings{Timezone: &zone})
+	if err != nil {
+		t.Fatalf("EnableWarmup(%s): %v", zone, err)
+	}
+	if got.Timezone != zone {
+		t.Fatalf("timezone = %q, want %q", got.Timezone, zone)
+	}
+
+	// And an omitted field on a LATER update keeps the stored zone rather than
+	// silently resetting it to UTC — the merge rule every other field follows.
+	rate := float32(0.4)
+	got, err = svc.EnableWarmup(context.Background(), ws, mb, WarmupSettings{ReplyRate: &rate})
+	if err != nil {
+		t.Fatalf("EnableWarmup(reply only): %v", err)
+	}
+	if got.Timezone != zone {
+		t.Fatalf("timezone after an unrelated update = %q, want it preserved as %q", got.Timezone, zone)
 	}
 }
