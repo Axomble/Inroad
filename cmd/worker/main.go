@@ -207,8 +207,8 @@ func run() error {
 	// queries is NIL on a fleet host, and that is safe rather than lucky:
 	// buildCredentialWiring only touches it on the credentialsLocal branch (to
 	// build a keyring), which requires INROAD_MASTER_KEY, which a role=send
-	// worker is refused. It asserts that for itself rather than trusting this
-	// comment.
+	// worker is refused. That branch checks for itself
+	// (ErrKeyringNeedsQueries) rather than trusting this comment.
 	creds, err := buildCredentialWiring(cfg, role, queries, logger)
 	if err != nil {
 		logger.Error("credential source unusable", "err", err)
@@ -230,19 +230,6 @@ func run() error {
 		return err
 	}
 
-	// The worker package depends only on coreapi.Client; the DB-backed
-	// implementation is wired here at the composition root.
-	googleOAuth := mail.GoogleOAuth{
-		ClientID:     cfg.GoogleClientID,
-		ClientSecret: cfg.GoogleClientSecret,
-		RedirectURL:  cfg.GoogleRedirectURL,
-	}
-	msOAuth := mail.MicrosoftOAuth{
-		ClientID:     cfg.MSClientID,
-		ClientSecret: cfg.MSClientSecret,
-		RedirectURL:  cfg.MSRedirectURL,
-		Tenant:       cfg.MSTenant,
-	}
 	// Created before the coreapi client so the webhook emitter (which enqueues
 	// webhook:deliver tasks) can be wired into it. Closed on return.
 	enq := queue.NewClient(cfg.RedisAddr)
@@ -260,6 +247,21 @@ func run() error {
 	// Everything else takes the branch below, unchanged.
 	core := coreWiring.coreClient()
 	if core == nil {
+		// The OAuth configs refresh a mailbox's access token at job-build time,
+		// which only the in-process build does — a fleet worker never refreshes
+		// a token (docs/security.md invariant 9), so they are built here rather
+		// than beside the rest of the wiring.
+		googleOAuth := mail.GoogleOAuth{
+			ClientID:     cfg.GoogleClientID,
+			ClientSecret: cfg.GoogleClientSecret,
+			RedirectURL:  cfg.GoogleRedirectURL,
+		}
+		msOAuth := mail.MicrosoftOAuth{
+			ClientID:     cfg.MSClientID,
+			ClientSecret: cfg.MSClientSecret,
+			RedirectURL:  cfg.MSRedirectURL,
+			Tenant:       cfg.MSTenant,
+		}
 		// Realtime fan-out. The worker is a SEPARATE PROCESS from the API, so
 		// an in-process channel reaches no browser: every worker-originated
 		// event goes through Redis, and this hub is that path. It publishes

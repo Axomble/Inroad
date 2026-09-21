@@ -186,6 +186,29 @@ func TestAPlaintextBrokerURLIsRefusedAtStartup(t *testing.T) {
 	}
 }
 
+// A local keyring without a database refuses rather than building one over a
+// nil *gen.Queries.
+//
+// Since slice 4 a fleet host passes nil here, because it opens no pool. Every
+// path that would reach this is already refused earlier — a local keyring
+// needs INROAD_MASTER_KEY, which role=send may not hold — so this is
+// unreachable today, and that is precisely why it is an error rather than a
+// comment claiming it cannot happen. keys.BuildKeyring would take the nil,
+// build a DEK store over it, and fail on the first UNWRAP: a mailbox that
+// cannot be opened at send time, which is a much worse way to discover it than
+// a process that refused to start.
+func TestALocalKeyringWithoutADatabaseRefuses(t *testing.T) {
+	// role=all with a master key and no broker is the one combination that
+	// resolves to credentialsLocal, so it is the only way to reach the branch.
+	cfg := &config.Config{MasterKey: masterKey()}
+	if mode, err := resolveCredentialMode(cfg, worker.RoleAll); err != nil || mode != credentialsLocal {
+		t.Fatalf("resolveCredentialMode = (%v, %v), want (credentialsLocal, nil) — this test would prove nothing", mode, err)
+	}
+	if _, err := buildCredentialWiring(cfg, worker.RoleAll, nil, quiet()); !errors.Is(err, ErrKeyringNeedsQueries) {
+		t.Fatalf("err = %v, want ErrKeyringNeedsQueries", err)
+	}
+}
+
 // The refusal messages have to tell an operator what to change. A security
 // failure nobody can act on gets worked around.
 func TestTheRefusalsNameTheVariableToChange(t *testing.T) {
