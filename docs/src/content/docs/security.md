@@ -995,6 +995,33 @@ write history that never happened.
     a 90-day purge runs in the maintenance sweep — comfortably beyond the widest
     30-day read window.
 
+82. **Recipient-data retention is off until an operator turns it on, and never
+    deletes what a live decision still reads.** `maintenance:retention`
+    (`internal/worker/maintenance/retention.go`, SQL in
+    `queries/retention.sql`) sweeps `sends`, `inbox_threads`/`inbox_messages`,
+    `tracking_events` and `deliverability_events` only when their
+    `INROAD_RETENTION_*_DAYS` is set. The default is disabled because the window is
+    a Privacy/Legal decision. Rules a change must keep:
+    - **Disabled is zero calls.** A zero window is skipped before any query runs,
+      and the in-process client refuses a non-positive window anyway. Otherwise
+      `now() - 0` would match every row.
+    - **Floors are enforced at worker startup** (`RetentionPolicy.Validate`). A
+      window that would empty a table a rate still reads stops the process.
+    - **Guards are SQL, beside their reasons.** A send that any of these still
+      uses is never deleted: an active enrollment, a running campaign's breaker
+      window, an existing inbox thread, a retained deliverability event, or a CRM
+      deal. Two deliverability events are never deleted: one inside a running
+      campaign's breaker window, and a workspace's newest complaint (it keeps
+      `complaint_feed` answering "measured").
+    - **Tracking events roll up exactly once.** The rollup is inserted from the
+      DELETE's own `RETURNING` in one statement, and every aggregate reads the
+      `tracking_engagement` view, so reporting does not change. The rollup keeps
+      no user agent, client IP or URL.
+    - **Cross-tenant by design, control plane only.** Every batch deletes across
+      workspaces by age, so `maintenance.Retainer` is deliberately absent from
+      `*remote.Client` (invariant 73). The capability census asserts it is
+      absent.
+
 56. **A receiver's authentication verdict is believed only from a header that
     receiver demonstrably wrote.** `warmup_observations` records the SPF/DKIM/DMARC
     results the receiving provider reached (`spf_result`, `dkim_result`,

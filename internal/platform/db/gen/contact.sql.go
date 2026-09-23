@@ -138,8 +138,8 @@ SELECT count(DISTINCT te.send_id) FILTER (
        count(DISTINCT te.send_id) FILTER (
            WHERE te.kind = 'click' AND NOT te.is_machine
        )::bigint AS clicks,
-       max(te.created_at)::timestamptz AS last_event_at
-FROM tracking_events te
+       max(te.last_at)::timestamptz AS last_event_at
+FROM tracking_engagement te
 JOIN sends s ON s.id = te.send_id AND s.workspace_id = te.workspace_id
 WHERE te.workspace_id = $1 AND s.contact_id = $2
 `

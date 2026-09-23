@@ -19,7 +19,7 @@ import (
 // task will deliver. Both enumerate rows across every workspace, so they belong
 // to the control role only (see internal/worker/role.go). mtx records each
 // sweep's duration and candidate count; a nil mtx no-ops. recorder is the same
-// jobrun.Recorder handlers.go resolved once for all eight periodic reconciles
+// jobrun.Recorder handlers.go resolved once for all nine periodic reconciles
 // (nil when the coreapi client doesn't implement it); these two are the
 // scheduled reconciles in this package (see cmd/worker/scheduler.go's
 // sweepRegistrars()), so they alone are wrapped in jobrun.Record — the

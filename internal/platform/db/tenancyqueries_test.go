@@ -135,6 +135,7 @@ var tenancyExceptions = map[string]string{
 	"maintenance.sql:PurgeDeadWorkers":                  "reaps the global worker registry and the assignments pinned to dead workers; workers are deployment infra, not tenant data (migration 000017).",
 	"recipientdomain.sql:DeleteExpiredRecipientDomains": "retention sweep over a DNS-fact cache, by age alone. A lost row costs one re-lookup.",
 	"warmup.sql:PurgeWarmupObservations":                "retention sweep over append-only warmup evidence, by age alone, returning a count (design §4.6).",
+	"retention.sql:RollupTrackingEvents":                "retention sweep folding raw tracking events past the operator's window into per-send rollups, by age alone, returning counts and a cursor. The rollup's workspace_id is copied from the deleted rows (the tenant FK to sends fixes it), never supplied by a caller.",
 	"deadletter.sql:PurgeTaskDeadLetters":               "retention sweep over captured retry-exhausted tasks, by age alone, returning a count. Same shape and same reasoning as PurgeWarmupObservations: the table is append-only in practice and had no sweep at all.",
 	"webhook.sql:PurgeWebhookDeliveries":                "retention sweep over the outbound-webhook delivery log, by age alone, returning a count. Same shape and reasoning as PurgeTaskDeadLetters: one row per (event, endpoint), append-only from the app, and no sweep of its own.",
 	"fleet.sql:PurgeFleetDecisions":                     "retention sweep over the append-only fleet decision log, by age alone, returning a count. The table carries workspace_id because a decision naming a mailbox is tenant data, but the 90-day purge is deployment maintenance across every tenant — scoping it would leave any workspace the sweep did not name growing forever.",
@@ -167,8 +168,21 @@ var createTable = regexp.MustCompile(`(?is)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS
 // starts being guarded automatically instead of silently staying exempt.
 var addColumn = regexp.MustCompile(`(?is)ALTER\s+TABLE\s+(?:ONLY\s+)?"?([a-z0-9_]+)"?\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z0-9_]+)"?`)
 
-// tenantScopedTables returns every table that has a workspace_id column, derived from
-// the embedded up-migrations. Later migrations win, so a table dropped and recreated
+// createView catches a view. A view that exposes workspace_id is tenant-scoped exactly
+// as a table is: reading it without a workspace_id predicate returns every workspace's
+// rows. Without this, moving a query from a table onto a view over that table would
+// silently take it out of this guard — which is precisely what happened when the
+// tracking aggregates moved onto tracking_engagement (20260923110315).
+var createView = regexp.MustCompile(`(?is)CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+"?([a-z0-9_]+)"?\s+AS\s+(.*?);`)
+
+// selectsTenantColumn reports whether a view body mentions workspace_id anywhere. Looser
+// than declaresTenantColumn, and deliberately: a view's column list is a SELECT list,
+// and any mention there means the view carries the tenant column. The bias is the
+// guard's usual one — a false "tenant-scoped" costs one allowlist entry with a reason.
+var tenantColumnWord = regexp.MustCompile(`(?i)\b` + tenantColumn + `\b`)
+
+// tenantScopedTables returns every table (and view) that has a workspace_id column,
+// derived from the embedded up-migrations. Later migrations win, so a table dropped and recreated
 // (users, in 000004) is classified by its final shape.
 func tenantScopedTables(t *testing.T) map[string]bool {
 	t.Helper()
@@ -195,6 +209,9 @@ func tenantScopedTables(t *testing.T) map[string]bool {
 			if strings.EqualFold(m[2], tenantColumn) {
 				scoped[m[1]] = true
 			}
+		}
+		for _, m := range createView.FindAllStringSubmatch(sql, -1) {
+			scoped[m[1]] = tenantColumnWord.MatchString(m[2])
 		}
 	}
 	return scoped
@@ -464,7 +481,7 @@ func TestEveryTenancyExceptionHasAWrittenReason(t *testing.T) {
 // this guard has stopped guarding, so the count is the size of the hole in the net.
 // Raising it should be a conscious act in a diff, not a drift.
 func TestTheTenancyAllowlistDoesNotGrowSilently(t *testing.T) {
-	const known = 49
+	const known = 50
 	if got := len(tenancyExceptions); got != known {
 		t.Errorf("tenancyExceptions has %d entries, expected %d. Every entry is a query this "+
 			"guard no longer checks. If you added one deliberately, update `known` in the same "+

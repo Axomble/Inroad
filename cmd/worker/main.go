@@ -38,6 +38,7 @@ import (
 	"github.com/inroad/inroad/internal/platform/warmup"
 	"github.com/inroad/inroad/internal/worker"
 	"github.com/inroad/inroad/internal/worker/fleetsignal"
+	"github.com/inroad/inroad/internal/worker/maintenance"
 )
 
 // workerHeartbeatInterval is how often a worker refreshes its `workers` row. It
@@ -124,6 +125,19 @@ func run() error {
 		logger.Error("coreapi source unusable", "err", err)
 		return err
 	}
+
+	// The retention windows are validated against their per-table floors here,
+	// before anything connects, for the same reason as the role: a window short
+	// enough to delete rows a live rate still reads must stop the process, not
+	// start deleting. Logged either way, because "is retention on here, and for
+	// what" should be answerable from the startup log.
+	retention, err := retentionPolicy(cfg)
+	if err != nil {
+		logger.Error("invalid retention configuration", "err", err)
+		return err
+	}
+	logger.Info("retention", "enabled_days", retention.Enabled(),
+		"note", "recipient-data tables are disabled unless INROAD_RETENTION_*_DAYS is set; see the environment-variable reference")
 
 	// Prometheus /metrics listener. mtx is always constructed (never nil): the
 	// campaign/warmup send handlers' finalize points record into it
@@ -447,6 +461,7 @@ func run() error {
 		TrackingSecret:      cfg.TrackingSecret,
 		WarmupSecret:        cfg.WarmupSecret,
 		WebhookAllowPrivate: cfg.WebhookAllowPrivate,
+		Retention:           retention,
 		Metrics:             mtx,
 	})
 
@@ -456,6 +471,23 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// retentionPolicy builds the retention sweep's policy from configuration and
+// refuses any window below its table's floor. Split out so the mapping — which
+// variable feeds which table — is testable without starting a worker.
+func retentionPolicy(cfg *config.Config) (maintenance.RetentionPolicy, error) {
+	p := maintenance.RetentionPolicyFromDays(maintenance.RetentionDays{
+		DeliverabilityEvents: cfg.RetentionDeliverabilityEventsDays,
+		InboxThreads:         cfg.RetentionInboxDays,
+		TrackingEvents:       cfg.RetentionTrackingEventsDays,
+		Sends:                cfg.RetentionSendsDays,
+		DeadLetters:          cfg.RetentionDeadLettersDays,
+	})
+	if err := p.Validate(); err != nil {
+		return maintenance.RetentionPolicy{}, err
+	}
+	return p, nil
 }
 
 // resolveWorkerQueues decides the queue set this process consumes. An operator

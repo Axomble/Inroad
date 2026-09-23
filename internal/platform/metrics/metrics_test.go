@@ -217,6 +217,36 @@ func TestFleetRotatedSeparatesTheTiers(t *testing.T) {
 	}
 }
 
+// TestRetentionRowsDeletedSeparatesTableFromDependents pins the scope label. A
+// deleted inbox thread takes its messages with it and a deleted send takes its
+// tracking events: folded into one number, "the sweep deleted 5,000 threads" and
+// "the sweep deleted 5,000 messages" would be indistinguishable, and the second
+// is a hundredth of the first.
+func TestRetentionRowsDeletedSeparatesTableFromDependents(t *testing.T) {
+	m := metrics.New()
+	m.RetentionRowsDeleted("inbox_threads", 3, 40)
+	m.RetentionRowsDeleted("inbox_threads", 2, 0)
+	// A disabled or empty table reports zeros; they must not mint a series.
+	m.RetentionRowsDeleted("sends", 0, 0)
+
+	families := metricstest.Scrape(t, m)
+	if got := metricstest.CounterValue(families, "inroad_retention_rows_deleted_total",
+		map[string]string{"table": "inbox_threads", "scope": "table"}); got != 5 {
+		t.Errorf("inbox_threads{scope=table} = %v, want 5", got)
+	}
+	if got := metricstest.CounterValue(families, "inroad_retention_rows_deleted_total",
+		map[string]string{"table": "inbox_threads", "scope": "dependent"}); got != 40 {
+		t.Errorf("inbox_threads{scope=dependent} = %v, want 40", got)
+	}
+	for _, sample := range families["inroad_retention_rows_deleted_total"].GetMetric() {
+		for _, lp := range sample.GetLabel() {
+			if lp.GetName() == "table" && lp.GetValue() == "sends" {
+				t.Errorf("a zero count minted a sends series")
+			}
+		}
+	}
+}
+
 // TestNewRegistersRuntimeAndProcessCollectors pins the free-and-standard
 // collectors being present on every process's registry without any wiring.
 func TestNewRegistersRuntimeAndProcessCollectors(t *testing.T) {
@@ -240,6 +270,7 @@ func TestNoTenantLabelsAnywhere(t *testing.T) {
 	m.SendClaimed("step", metrics.ClaimOutcomeWon)
 	m.SweepCompleted("inbox", 1, time.Second)
 	m.FleetRotated("unhealthy")
+	m.RetentionRowsDeleted("sends", 1, 1)
 
 	banned := map[string]bool{
 		"workspace_id": true, "workspace": true, "tenant_id": true, "tenant": true,
@@ -270,6 +301,7 @@ func TestNilMetricsNoOps(t *testing.T) {
 	m.SendClaimed("step", metrics.ClaimOutcomeWon)
 	m.SweepCompleted("inbox", 12, 3*time.Second)
 	m.FleetRotated("unreachable")
+	m.RetentionRowsDeleted("sends", 3, 4)
 
 	r := chi.NewRouter()
 	r.Use(m.HTTPMiddleware())

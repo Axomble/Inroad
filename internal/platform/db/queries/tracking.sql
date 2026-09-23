@@ -16,11 +16,19 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,sqlc.narg(client_ip)::inet);
 -- about this same send, and no row content is returned. Scoping it would require
 -- trusting a workspace id from an unauthenticated request, which is worse.
 --
+-- Read from tracking_engagement (migration 20260923110315), not tracking_events:
+-- once retention has rolled a send's old opens up, the raw table alone would tell
+-- the classifier "no human has ever opened this", and the ordering rule would
+-- judge the next open as if it were the first. Summing the rollup's `events`
+-- keeps the count the rule reads exactly what it was before the rollup; a raw
+-- row contributes 1. Both arms are index probes on send_id (idx_tracking_send_recent
+-- and the rollup's primary key).
+--
 -- Every aggregate is explicitly cast: FILTER/COALESCE aggregates otherwise
 -- generate interface{} in the sqlc model and still compile.
-SELECT COALESCE(count(*) FILTER (WHERE kind = 'open' AND NOT is_machine), 0)::bigint AS human_opens,
-       COALESCE(max(created_at) FILTER (WHERE kind = 'open' AND NOT is_machine), 'epoch'::timestamptz)::timestamptz AS last_human_open_at
-FROM tracking_events
+SELECT COALESCE(sum(events) FILTER (WHERE kind = 'open' AND NOT is_machine), 0)::bigint AS human_opens,
+       COALESCE(max(last_at) FILTER (WHERE kind = 'open' AND NOT is_machine), 'epoch'::timestamptz)::timestamptz AS last_human_open_at
+FROM tracking_engagement
 WHERE send_id = $1;
 
 -- name: CountRecentSendOpensFromSubnet :one
@@ -38,6 +46,11 @@ WHERE send_id = $1;
 -- would silently narrow "203.0.113.0/24" to a single host and the rule would
 -- never fire. netip.Prefix.String() produces exactly the CIDR literal cidr()
 -- parses.
+--
+-- The one reader that stays on the RAW table, and correctly: it needs client_ip,
+-- which the retention rollup deliberately does not keep, and it only ever looks
+-- back botfilter.BurstWindow (10 minutes) — far inside the shortest window the
+-- retention sweep accepts, so no row it could read has been rolled up.
 SELECT count(*)::bigint
 FROM tracking_events
 WHERE send_id = $1
@@ -54,8 +67,12 @@ WHERE send_id = $1
 -- CountTrackingEventsByKindAndVerdict reports them, but a prefetch must never
 -- reach the headline rate -- nor, once conditional branching ships, the signal a
 -- branch reads.
+--
+-- tracking_engagement, not tracking_events, in this and every aggregate below:
+-- the view includes the events retention has rolled up, so a campaign's rate does
+-- not fall the day the sweep first runs (migration 20260923110315).
 SELECT kind, count(DISTINCT send_id)::bigint AS n
-FROM tracking_events
+FROM tracking_engagement
 WHERE campaign_id = $1 AND workspace_id = $2 AND NOT is_machine
 GROUP BY kind;
 
@@ -64,7 +81,7 @@ GROUP BY kind;
 -- can say "N opens, M of them machine" instead of quietly showing the filtered
 -- number as if nothing had been excluded.
 SELECT kind, is_machine, count(DISTINCT send_id)::bigint AS n
-FROM tracking_events
+FROM tracking_engagement
 WHERE campaign_id = $1 AND workspace_id = $2
 GROUP BY kind, is_machine;
 
@@ -78,5 +95,5 @@ GROUP BY kind, is_machine;
 -- The verdict is now computed once, at write time, by platform/botfilter, and
 -- every reader agrees by construction. The join to sends is gone with it.
 SELECT count(DISTINCT send_id)::bigint
-FROM tracking_events
+FROM tracking_engagement
 WHERE campaign_id = $1 AND workspace_id = $2 AND kind = 'open' AND NOT is_machine;

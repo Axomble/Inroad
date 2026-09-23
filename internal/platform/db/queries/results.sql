@@ -35,14 +35,17 @@ FROM sends s
 -- Columns stay te-qualified inside each subquery: without the join to sends
 -- these are self-contained, but an unqualified campaign_id then resolves against
 -- the OUTER sends and the reference is ambiguous.
+--
+-- tracking_engagement includes events retention has rolled up (migration
+-- 20260923110315), so a variant breakdown still sums to the campaign total.
 LEFT JOIN (
     SELECT DISTINCT te.send_id
-    FROM tracking_events te
+    FROM tracking_engagement te
     WHERE te.workspace_id = $2 AND te.campaign_id = $1 AND te.kind = 'open' AND NOT te.is_machine
 ) o ON o.send_id = s.id
 LEFT JOIN (
     SELECT DISTINCT te.send_id
-    FROM tracking_events te
+    FROM tracking_engagement te
     WHERE te.workspace_id = $2 AND te.campaign_id = $1 AND te.kind = 'click' AND NOT te.is_machine
 ) c ON c.send_id = s.id
 WHERE s.workspace_id = $2 AND s.campaign_id = $1 AND s.status = 'sent'

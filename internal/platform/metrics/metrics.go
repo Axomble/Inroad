@@ -65,6 +65,7 @@ type Metrics struct {
 	jobRunSeconds         *prometheus.HistogramVec
 	workerAssignmentStale prometheus.Counter
 	fleetRotations        *prometheus.CounterVec
+	retentionRows         *prometheus.CounterVec
 }
 
 // sweepRowBuckets bound the rows-scanned histogram-free counter's companion
@@ -132,10 +133,14 @@ func New() *Metrics {
 			Name: "inroad_fleet_rotations_total",
 			Help: `Mailboxes the rotation pass actually MOVED to a different worker, labeled by the tier that justified each move ("unreachable"|"unhealthy"|"balance"). A rising "unreachable" is a host dying, "unhealthy" is a provider refusing a worker's egress IP, and "balance" is opportunistic repacking — which should be near-flat, since a mailbox that moves discards the IP trust it had accrued.`,
 		}, []string{"tier"}),
+		retentionRows: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "inroad_retention_rows_deleted_total",
+			Help: `Rows the retention sweep (maintenance:retention) deleted, labeled by table ("deliverability_events"|"inbox_threads"|"tracking_events"|"sends"|"task_dead_letters") and scope ("table" for the table's own rows, "dependent" for rows removed with them: an inbox thread's messages, a send's tracking events and rollups). Flat while a window is enabled means nothing is aging out; a table that never drains logs "retention backlog not drained".`,
+		}, []string{"table", "scope"}),
 	}
 	m.registry.MustRegister(
 		m.httpRequests, m.httpDuration, m.sends, m.claims, m.sweepDuration, m.sweepRows, m.jobRunSeconds,
-		m.workerAssignmentStale, m.fleetRotations,
+		m.workerAssignmentStale, m.fleetRotations, m.retentionRows,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -259,8 +264,8 @@ func (m *Metrics) SweepCompleted(kind string, rows int, elapsed time.Duration) {
 //
 // Deliberately separate from SweepCompleted: that metric carries a row count
 // SweepCompleted's four callers (the enrollment, inbox, warmup and stranded-
-// pending-send sweeps) already have in hand, and the other four wrapped jobs
-// (maintenance cleanup, domain auth sweep, recipient esp sweep, fleet
+// pending-send sweeps) already have in hand, and the other five wrapped jobs
+// (maintenance cleanup, retention, domain auth sweep, recipient esp sweep, fleet
 // rotation) do not report one to the decorator — inventing rows=0 for them
 // here would put fabricated data in SweepCompleted's series. This metric
 // reports only what jobrun.Record itself observes: wall time and outcome,
@@ -408,4 +413,25 @@ func (rec *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return nil, nil, fmt.Errorf("metrics: underlying ResponseWriter (%T) does not support http.Hijacker", rec.ResponseWriter)
 	}
 	return hj.Hijack()
+}
+
+// RetentionRowsDeleted records one table's share of a retention run: rows of the
+// table itself, and rows removed along with them. table is one of the sweep's
+// fixed table names (internal/worker/maintenance.retentionTables), never a value
+// derived from data, so the label set is bounded by construction.
+//
+// Zero counts are not added — a Prometheus counter only goes up, and a disabled
+// or empty table should not mint a series it never moves.
+//
+// A nil receiver is a no-op, like every other method on Metrics.
+func (m *Metrics) RetentionRowsDeleted(table string, rows, dependents int64) {
+	if m == nil {
+		return
+	}
+	if rows > 0 {
+		m.retentionRows.WithLabelValues(table, "table").Add(float64(rows))
+	}
+	if dependents > 0 {
+		m.retentionRows.WithLabelValues(table, "dependent").Add(float64(dependents))
+	}
 }

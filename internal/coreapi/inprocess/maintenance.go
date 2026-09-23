@@ -27,17 +27,6 @@ func (c client) PurgeWarmupObservations(ctx context.Context) (int64, error) {
 	return c.q.PurgeWarmupObservations(ctx)
 }
 
-// PurgeDeadLetters removes captured retry-exhausted tasks past their 90-day
-// retention window. task_dead_letters is append-only in practice — triage flips
-// a status, it never deletes — and had no sweep at all, so it grew forever on a
-// system whose failure mode is a provider outage failing hundreds of queued
-// sends at once. Same reasoning as PurgeWarmupObservations above (invariant 55),
-// and kept separate from CleanupExpired for the same reason: a dead letter is a
-// record of dropped work, not an authentication artifact.
-func (c client) PurgeDeadLetters(ctx context.Context) (int64, error) {
-	return c.q.PurgeTaskDeadLetters(ctx)
-}
-
 // PurgeWebhookDeliveries removes webhook_deliveries rows past their 30-day
 // retention window. task_dead_letters / warmup_observations reasoning
 // (invariant 55): the table grows one row per (event, endpoint) and is never
@@ -61,7 +50,7 @@ func (c client) PurgeDeadWorkers(ctx context.Context) (int64, error) {
 
 // PurgeScheduledJobRuns removes scheduled_job_runs rows past their 30-day
 // retention window. task_dead_letters / webhook_deliveries reasoning
-// (invariant 55): eight jobs write a row per run through
+// (invariant 55): nine jobs write a row per run through
 // internal/platform/jobrun.Record, several every five minutes, and nothing
 // else in the codebase ever deletes from the table. Kept separate from
 // CleanupExpired for the same reason as the purges above: a job-run record is

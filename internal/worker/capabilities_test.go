@@ -21,8 +21,8 @@ import (
 //
 // # What this exists to catch
 //
-// Eighteen capabilities are reached by COMMA-OK TYPE ASSERTION on whatever
-// value the composition root put in Deps.Core — six in handlers.go, three in
+// Nineteen capabilities are reached by COMMA-OK TYPE ASSERTION on whatever
+// value the composition root put in Deps.Core — seven in handlers.go, three in
 // inbox.RegisterPerMessage, six feature-detected per message inside
 // PollHandler, and three in cmd/worker. A type assertion is invisible to the
 // compiler. When one stops matching, nothing fails to build: the registrar
@@ -146,6 +146,8 @@ func TestBothCoreAPIImplementationsCarryEveryOptionalCapability(t *testing.T) {
 					assertsAs[deliverability.Breaker](impl.core)},
 				{"maintenance.Cleaner", "maintenance:cleanup is never registered; nothing is ever purged",
 					assertsAs[maintenance.Cleaner](impl.core)},
+				{"maintenance.Retainer", "maintenance:retention is never registered; no configured retention window is ever applied",
+					assertsAs[maintenance.Retainer](impl.core)},
 				{"recipientesp.Core", "the recipient-ESP cache is never refreshed; sender matching degrades to unmatched",
 					assertsAs[recipientesp.Core](impl.core)},
 				{"fleet.Rotator", "a mailbox on a provider-blocked worker is never moved off it",

@@ -49,7 +49,7 @@ import (
 // the method and says why is the only one of the three an operator can act on.
 //
 // The same reasoning does NOT extend to the optional capability interfaces
-// (maintenance.Cleaner, deliverability.Breaker, recipientesp.Core,
+// (maintenance.Cleaner, maintenance.Retainer, deliverability.Breaker, recipientesp.Core,
 // fleet.Rotator, jobrun.Recorder). Those are consumed through comma-ok type
 // assertions, so NOT implementing them is already an explicit, handled answer —
 // the registrar logs and skips. Implementing them here to return an error would

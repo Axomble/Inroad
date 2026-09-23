@@ -7,7 +7,7 @@ description: Every environment variable the Inroad backend reads, with its real 
 the only place the binaries read `INROAD_*` configuration from — the one
 exception is `INROAD_LOG_LEVEL`, which `internal/platform/log` reads directly
 (and alone) so a logger can exist before config does. Every default below is
-that file's, and the tables are complete against it: all **82** variables the
+that file's, and the tables are complete against it: all **87** variables the
 backend reads are listed here.
 
 ## How values are parsed
@@ -362,10 +362,11 @@ plus headroom for the periodic sweepers and HTTP handlers — see
 
 ### The scheduler must be a singleton
 
-The worker binary also runs the asynq **scheduler**, which enqueues the eight
+The worker binary also runs the asynq **scheduler**, which enqueues the nine
 periodic reconcile sweeps (enrollments, inbox, warmup, domain auth, recipient ESP,
-maintenance cleanup, the fleet rotation pass, and the stranded manual-send sweep
-that re-drives a scheduled reply or composed email whose task was lost).
+maintenance cleanup, the [data retention](#data-retention) sweep, the fleet
+rotation pass, and the stranded manual-send sweep that re-drives a scheduled
+reply or composed email whose task was lost).
 
 asynq elects no leader. Every worker process with `INROAD_RUN_SCHEDULER=true`
 registers every periodic task independently, so **N replicas fire each sweep N
@@ -401,7 +402,7 @@ level=INFO msg="scheduler disabled for this replica" run_scheduler=false
 
 ### Splitting control and send roles
 
-By default a worker process runs everything: the scheduler, the eight periodic
+By default a worker process runs everything: the scheduler, the nine periodic
 sweeps above, and every per-message handler (campaign sends, warmup ticks and
 engagement, inbox polls, manual replies, test sends, webhook deliveries). This
 is the self-host topology — one process, one trust domain, nothing to
@@ -412,7 +413,7 @@ halves, **and which queues it consumes follows the same split** — that second
 half used to be missing, which is why this section used to warn you off using
 it. It doesn't any more; the topology below is operable.
 
-- **`control`** — the scheduler and the eight periodic sweeps/purges. These scan
+- **`control`** — the scheduler and the nine periodic sweeps/purges. These scan
   or delete across every workspace, so this role is meant to stay on trusted
   infrastructure beside the API.
 - **`send`** — per-message work only: campaign sends, warmup ticks and
@@ -739,6 +740,112 @@ it moves a mailbox only when the worker it is on is unreachable or the provider 
 refusing it, or (rarely) when a destination beats the incumbent by a wide margin
 after 12 hours of residency. At most 20 moves per tick, 5 per destination. A fleet
 with one live worker never rotates at all.
+
+## Data retention
+
+Five variables set how long the **retention sweep** (`maintenance:retention`,
+hourly, on the one worker that runs the scheduler) keeps rows. Each is a whole
+number of **days**. `0` or blank disables that table's sweep. `0` never means
+"keep nothing".
+
+| Variable | What it removes | Default | Minimum |
+| :--- | :--- | :--- | :--- |
+| `INROAD_RETENTION_SENDS_DAYS` | Campaign sends (`sends`) that nothing live depends on, with their tracking events | **`0` (disabled)** | 90 |
+| `INROAD_RETENTION_INBOX_DAYS` | Whole inbox conversations (`inbox_threads` + their `inbox_messages`) with no activity in the window | **`0` (disabled)** | 30 |
+| `INROAD_RETENTION_TRACKING_EVENTS_DAYS` | Raw open/click events (`tracking_events`), after rolling them up | **`0` (disabled)** | 30 |
+| `INROAD_RETENTION_DELIVERABILITY_EVENTS_DAYS` | Provider bounce/complaint events (`deliverability_events`) that no auto-pause rate still reads | **`0` (disabled)** | 90 |
+| `INROAD_RETENTION_DEAD_LETTERS_DAYS` | Captured retry-exhausted tasks (`task_dead_letters`), every status | `90` | 7 |
+
+:::caution[The four recipient-data windows are off by default, and choosing them is not an engineering decision]
+Sends, inbox conversations, tracking events and deliverability events all record
+information about the **people your workspaces email**: addresses, message
+bodies, when they opened what, and from which IP address. How long you may keep
+that data, or must keep it, depends on your legal obligations, your contracts
+and your own privacy policy. Inroad can't know any of that, so it keeps
+everything until you set a window. **Ask whoever owns privacy and legal questions
+for your deployment to pick these numbers.** This page describes what each
+window does. It is not advice on what the windows should be.
+:::
+
+**Malformed values stop the process.** The rules above for every other number
+apply here too. On top of them, a negative number, a unit (`90d`, `720h`), a
+fraction or anything over 36500 (a century) is refused at startup and the error
+names the variable. A window **below its minimum** stops the *worker* at startup,
+with the reason. Each minimum sits just above the widest window over which a rate
+the product acts on reads that table, so a shorter window would change a
+live decision, not just remove history.
+
+### What "delete" means for each table
+
+- **Tracking events are rolled up, not lost.** Before a raw event is deleted it is
+  folded into a per-send summary (`tracking_event_rollups`: send, open/click,
+  human/machine, a count, first and last time). All open and click numbers read
+  from the raw and rolled-up rows together. Campaign rates, per-step and
+  per-variant results, the campaign ranking, a contact's engagement and the bot
+  classifier's own inputs are therefore **unchanged** when events age out. What's
+  gone is the per-hit detail: user agent, client IP and click URL. That includes
+  the individual open/click entries in a CRM deal's activity feed.
+- **A deliverability event is kept while a rate can still read it.** Two kinds
+  are kept past the window:
+  - an event on a **running** campaign's send, received after that campaign's
+    guardrails were switched on. The circuit breaker can fall back to that whole
+    period when recent volume is low.
+  - each workspace's **newest complaint**. That row is what lets the dashboard
+    tell "complaint feed live, zero complaints" apart from "not measured".
+
+  After deletion, a provider replaying the same event would be ingested again. The
+  90-day minimum puts that far beyond any provider's retry window.
+- **An inbox conversation is deleted whole**, messages and all, only when its last
+  activity is past the window. A conversation is kept if it has any of these:
+  - a reply still scheduled or sending
+  - a snooze that has not lapsed
+  - an active sequence enrollment
+  - any message inside the window
+- **A send is deleted only when nothing live uses it.** A send is kept if it is:
+  - queued or sending (the row *is* the send claim)
+  - part of an **active** enrollment. The next step threads off it, and a reply is
+    matched back through it.
+  - on a running campaign, sent after its guardrails were switched on
+  - shown in an inbox conversation that still exists (the campaign side of the
+    conversation is rebuilt from sends)
+  - named by a deliverability event that is still kept
+  - behind a CRM deal sourced from that campaign and contact
+
+  Deleting a send removes it from **every** report (sent counts, per-step
+  results, the deliverability series), together with its tracking events and
+  rollups, so open and click rates stay consistent. Unsubscribe links in old mail
+  keep working because they don't depend on the send. **Old open pixels and
+  tracked links do stop working:** a click on a link from a deleted send returns
+  404 instead of redirecting.
+
+The windows interact. A send stays while an inbox conversation or deliverability
+event still holds it, so the sends window has no effect beyond those two unless
+they are also enabled. Enabling sends retention while leaving tracking retention
+disabled still removes a deleted send's tracking events, because they belong to
+the send.
+
+### How the sweep runs
+
+- **Hourly, in bounded batches.** Each batch is 5,000 rows, deleted in one
+  short transaction and resumed from the last row deleted. A run takes at most 40
+  batches per table and starts no new batch after 5 minutes. A table that still
+  has rows past its window logs `retention backlog not drained this run` at WARN
+  and continues next hour.
+- **Safe on several replicas.** Rows are claimed with `SKIP LOCKED` and ages are
+  measured on the database clock. Two overlapping runs take disjoint rows, and
+  a row a live send has locked is skipped rather than waited on.
+- **Observable.** Each run logs one `retention applied` line per enabled table,
+  with rows, dependent rows and whether it drained. The counter
+  `inroad_retention_rows_deleted_total{table,scope}` counts deletions
+  (`scope="dependent"` is an inbox thread's messages, or a send's tracking rows).
+  The run is recorded as `retention` in the scheduled-job ledger. At startup the
+  worker logs which tables are enabled (`msg=retention enabled_days=…`).
+- **Upgrading adds indexes.** The migration that ships this
+  (`20260923110315_recipient_data_retention`) builds age indexes on `sends`,
+  `tracking_events`, `deliverability_events` and `inbox_threads`. Building one
+  blocks writes to that table for as long as the build takes: seconds per million
+  rows. On a very large installation, create them `CONCURRENTLY` by hand first.
+  The migration file lists them, and it skips any that already exist.
 
 ## Database connection budget
 

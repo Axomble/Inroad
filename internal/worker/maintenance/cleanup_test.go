@@ -24,8 +24,6 @@ type cleanupCore struct {
 	observationsErr     error
 	workersDeleted      int64
 	workersErr          error
-	deadLettersDeleted  int64
-	deadLettersErr      error
 	webhooksDeleted     int64
 	webhooksErr         error
 	jobRunsDeleted      int64
@@ -38,7 +36,6 @@ type cleanupCore struct {
 	idempotencyCalled   bool
 	observationsCalled  bool
 	workersCalled       bool
-	deadLettersCalled   bool
 	webhooksCalled      bool
 	jobRunsCalled       bool
 	signalsCalled       bool
@@ -65,11 +62,6 @@ func (c *cleanupCore) PurgeDeadWorkers(context.Context) (int64, error) {
 	return c.workersDeleted, c.workersErr
 }
 
-func (c *cleanupCore) PurgeDeadLetters(context.Context) (int64, error) {
-	c.deadLettersCalled = true
-	return c.deadLettersDeleted, c.deadLettersErr
-}
-
 func (c *cleanupCore) PurgeWebhookDeliveries(context.Context) (int64, error) {
 	c.webhooksCalled = true
 	return c.webhooksDeleted, c.webhooksErr
@@ -91,14 +83,14 @@ func (c *cleanupCore) PurgeFleetDecisions(context.Context) (int64, error) {
 }
 
 func TestCleanupHandler(t *testing.T) {
-	// Nine DISTINCT counts. The log line is the only observable this job has —
+	// Eight DISTINCT counts. The log line is the only observable this job has —
 	// nothing returns the numbers — so the assertion below is what makes the
 	// fixture values mean anything, and distinct values are what turn "a count was
 	// logged" into "the RIGHT count was logged": identical numbers would pass a
 	// handler that logged the same variable every time.
 	core := &cleanupCore{
 		deleted: 12, idempotencyDeleted: 3, observationsDeleted: 7, workersDeleted: 2,
-		deadLettersDeleted: 4, webhooksDeleted: 9, jobRunsDeleted: 6,
+		webhooksDeleted: 9, jobRunsDeleted: 6,
 		signalsDeleted: 11, decisionsDeleted: 5,
 	}
 
@@ -122,9 +114,6 @@ func TestCleanupHandler(t *testing.T) {
 	if !core.workersCalled {
 		t.Fatal("PurgeDeadWorkers was not called")
 	}
-	if !core.deadLettersCalled {
-		t.Fatal("PurgeDeadLetters was not called")
-	}
 	if !core.webhooksCalled {
 		t.Fatal("PurgeWebhookDeliveries was not called")
 	}
@@ -146,7 +135,6 @@ func TestCleanupHandler(t *testing.T) {
 		{"expired idempotency keys purged", 3},
 		{"expired warmup observations purged", 7},
 		{"dead workers and their assignments purged", 2},
-		{"expired dead letters purged", 4},
 		{"expired webhook deliveries purged", 9},
 		{"expired scheduled job runs purged", 6},
 		{"expired worker provider signals purged", 11},
@@ -176,21 +164,6 @@ func loggedRows(t *testing.T, logs []byte, msg string) int64 {
 		}
 	}
 	return -1
-}
-
-// task_dead_letters had no retention sweep before this and grows with failures
-// nobody schedules, so a purge that silently stopped running would be invisible
-// until the table was a problem. The failure surfaces for retry instead.
-func TestCleanupHandlerReturnsErrorOnDeadLetterPurgeFailure(t *testing.T) {
-	want := errors.New("db unavailable")
-	core := &cleanupCore{deadLettersErr: want}
-	err := CleanupHandler(core)(context.Background(), asynq.NewTask(queue.TaskMaintenanceCleanup, nil))
-	if !errors.Is(err, want) {
-		t.Fatalf("handler error = %v, want %v", err, want)
-	}
-	if !core.workersCalled {
-		t.Fatal("the earlier purges should still have run")
-	}
 }
 
 // A dead worker's rows are inert for routing (the assigner's liveness join
@@ -231,9 +204,6 @@ func TestCleanupHandlerReturnsErrorForRetry(t *testing.T) {
 	if core.observationsCalled {
 		t.Fatal("PurgeWarmupObservations must not run when CleanupExpired already failed")
 	}
-	if core.deadLettersCalled {
-		t.Fatal("PurgeDeadLetters must not run when CleanupExpired already failed")
-	}
 }
 
 func TestCleanupHandlerReturnsErrorForRetryOnIdempotencyPurgeFailure(t *testing.T) {
@@ -249,7 +219,7 @@ func TestCleanupHandlerReturnsErrorForRetryOnIdempotencyPurgeFailure(t *testing.
 }
 
 // scheduled_job_runs is the newest addition to this purge chain, run last.
-// Like the dead-letter and dead-worker purges before it, its own failure must
+// Like the dead-worker purge before it, its own failure must
 // surface for retry rather than let the run ledger grow unbounded in silence
 // (invariant 55's reasoning, applied to internal/platform/jobrun's writes).
 func TestCleanupHandlerReturnsErrorOnScheduledJobRunPurgeFailure(t *testing.T) {
