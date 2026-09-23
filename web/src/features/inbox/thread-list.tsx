@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { ChevronDown, Mail, MailOpen } from 'lucide-react'
 import { ReplyClassPill } from '@/components/shared/reply-class-pill'
 import { relativeTime } from '@/lib/relative-time'
@@ -104,7 +105,13 @@ export function ThreadList({
   )
 }
 
-function ThreadRow({
+/**
+ * One thread in a list. Exported for the search results, which show the same
+ * row with the matched subject in place of the plain one and the match's
+ * snippet beneath it — one row, so a hit looks and behaves exactly like the
+ * thread it opens.
+ */
+export function ThreadRow({
   thread,
   index,
   active,
@@ -113,6 +120,8 @@ function ThreadRow({
   onHover,
   onOpen,
   onToggleRead,
+  subject,
+  children,
 }: {
   thread: InboxThreadSummary
   index: number
@@ -122,6 +131,10 @@ function ThreadRow({
   onHover: (index: number) => void
   onOpen: (thread: InboxThreadSummary) => void
   onToggleRead: (thread: InboxThreadSummary) => void
+  /** Replaces the plain subject line's content (e.g. with highlighted runs). */
+  subject?: ReactNode
+  /** Extra lines under the subject (e.g. a search snippet). */
+  children?: ReactNode
 }) {
   const sender = contactLabel(thread)
   return (
@@ -182,8 +195,10 @@ function ThreadRow({
             thread.unread ? 'font-medium text-accent-ink' : 'text-muted-foreground',
           )}
         >
-          {thread.subject || '(no subject)'}
+          {subject ?? (thread.subject || '(no subject)')}
         </div>
+
+        {children}
 
         <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
           <ReplyClassPill replyClass={thread.last_reply_class} replyLabel={thread.reply_label} className="shrink-0" />

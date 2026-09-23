@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearch } from '@tanstack/react-router'
+import { skipToken } from '@reduxjs/toolkit/query/react'
 import { MailOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -20,10 +21,12 @@ import {
   useGetInboxOverviewQuery,
   useListInboxLabelsQuery,
   useListInboxThreadsQuery,
+  useSearchInboxThreadPagesInfiniteQuery,
   useSetInboxThreadReadMutation,
   type InboxThreadSummary,
 } from './api'
 import { ThreadList } from './thread-list'
+import { SearchResults } from './search-results'
 import { FolderPane } from './folder-pane'
 import { CommandBar } from './command-bar'
 import { ReplyFilterMenu } from './reply-filter-menu'
@@ -38,6 +41,7 @@ import {
   inboxErrorMessage,
   timezoneOffsetMinutes,
   scopeTimezoneOffset,
+  isSearchQueryTooLong,
   SCOPE_LABELS,
   type InboxScope,
 } from './inbox-search'
@@ -45,6 +49,9 @@ import {
 const ALL_REPLIES_FILTER = { id: '', label: 'All replies' }
 
 const PAGE_SIZE = 25
+
+/** The search endpoint's own default page, sent explicitly so "Load more" steps are predictable. */
+const SEARCH_PAGE_SIZE = 25
 
 /**
  * The breakpoint at which the reader becomes a third pane instead of its own
@@ -60,11 +67,17 @@ const THREE_PANE_QUERY = '(min-width: 64rem)'
 export function InboxPage() {
   const search = parseInboxSearch(useSearch({ strict: false }))
   const patch = useUrlPatch()
+  const pushPatch = useUrlPatch({ push: true })
   const navigate = useNavigate()
   const selectedMailbox = search.mailbox ?? ''
   const replyClass = search.class ?? ''
   const scope: InboxScope = search.scope ?? 'all'
   const selectedLabel = search.label ?? ''
+  // Trimmed again here, not only on commit: a pasted or hand-edited link can
+  // carry `?q=%20`, which is no search at all (and a 400 if sent).
+  const searchQuery = search.q?.trim() ?? ''
+  const searching = searchQuery !== ''
+  const queryTooLong = isSearchQueryTooLong(searchQuery)
   const threePane = useMediaQuery(THREE_PANE_QUERY)
   // One compose window at a time. A multi-window composer is a real feature,
   // but it needs its own stacking/focus model — and one is what the operator
@@ -126,6 +139,17 @@ export function InboxPage() {
     if (!search.cursor) setStack([])
   }
 
+  const facets = {
+    mailboxId: selectedMailbox || undefined,
+    replyClass: replyClass || undefined,
+    // 'all' is the API's own default; sending it explicitly would only make
+    // the cache key noisier for an identical request.
+    scope: scope === 'all' ? undefined : scope,
+    label: selectedLabel || undefined,
+    // Only the calendar-dependent scopes read it; see scopeTimezoneOffset.
+    tzOffset: scopeTimezoneOffset(scope),
+  }
+
   const decodedCursor = decodeCursor(search.cursor)
   const {
     data: page,
@@ -135,26 +159,50 @@ export function InboxPage() {
     error,
     refetch,
   } = useListInboxThreadsQuery(
-    {
-      mailboxId: selectedMailbox || undefined,
-      replyClass: replyClass || undefined,
-      q: search.q,
-      // 'all' is the API's own default; sending it explicitly would only make
-      // the cache key noisier for an identical request.
-      scope: scope === 'all' ? undefined : scope,
-      label: selectedLabel || undefined,
-      // Only the calendar-dependent scopes read it; see scopeTimezoneOffset.
-      tzOffset: scopeTimezoneOffset(scope),
-      beforeLastMessageAt: decodedCursor?.beforeLastMessageAt,
-      beforeId: decodedCursor?.beforeId,
-      limit: PAGE_SIZE,
-    },
+    // While a search is active the list pane shows its results instead; the
+    // list request would only be work nobody sees.
+    searching
+      ? skipToken
+      : {
+          ...facets,
+          beforeLastMessageAt: decodedCursor?.beforeLastMessageAt,
+          beforeId: decodedCursor?.beforeId,
+          limit: PAGE_SIZE,
+        },
     // Replies land from a background IMAP poll, not a client mutation, so no
     // cache tag can invalidate a stale page on its own — same reasoning as
     // the contacts list's identical setting.
     { refetchOnMountOrArgChange: true },
   )
   const busy = isFetching && !currentData
+
+  // The search runs inside the current folder/mailbox/category/reply class —
+  // the same facets the list takes — so a search is always a subset of the
+  // pile the operator is looking at. An over-long query is never sent: the
+  // server's 400 for it is certain, and the pane explains it instead.
+  const searchQueryResult = useSearchInboxThreadPagesInfiniteQuery(
+    searching && !queryTooLong ? { ...facets, q: searchQuery, limit: SEARCH_PAGE_SIZE } : skipToken,
+    { refetchOnMountOrArgChange: true },
+  )
+  // The previous search's results stay up (dimmed) only while the next one
+  // loads; once it has settled — including on an error — only this query's
+  // own pages count, so a failed search can't sit under a stale result list.
+  const searchPages =
+    searchQueryResult.currentData ?? (searchQueryResult.isFetching ? searchQueryResult.data : undefined)
+  const searchHits = useMemo(() => searchPages?.pages.flatMap((p) => p.items) ?? [], [searchPages])
+  const searchThreads = useMemo(() => searchHits.map((hit) => hit.thread), [searchHits])
+  const searchPending = searching && !queryTooLong && !searchPages && searchQueryResult.isFetching
+  const searchBusy = searchQueryResult.isFetching && !searchQueryResult.currentData
+
+  // Whether the failure on screen is "Load more" rather than the search
+  // itself, so Try again retries the page that failed instead of refetching
+  // the ones that loaded. The hook's own flag for this is not on its public
+  // result type, so the outcome is read from the call instead.
+  const [nextPageFailed, setNextPageFailed] = useState(false)
+  const loadMoreResults = async () => {
+    const result = await searchQueryResult.fetchNextPage()
+    setNextPageFailed(result.isError)
+  }
 
   const staleCursor = search.cursor !== undefined && isStaleCursorError(error)
   // The local half of the recovery is adjusted during render (each guarded so
@@ -171,6 +219,7 @@ export function InboxPage() {
   const resetPaging = () => {
     setRecoveredFromStaleCursor(false)
     setStack([])
+    setNextPageFailed(false)
   }
   // The folder pane shows ONE selection, so choosing any of the three clears
   // the other two: a mailbox, a virtual folder, and a category are alternative
@@ -191,26 +240,39 @@ export function InboxPage() {
     resetPaging()
     patch({ class: id || undefined, cursor: undefined })
   }
+  // Starting a search pushes a history entry, so Back returns to the unsearched
+  // inbox; refining or clearing one replaces it, so Back never walks through
+  // every intermediate query.
   const applyQuery = (next: string | undefined) => {
     resetPaging()
-    patch({ q: next, cursor: undefined })
+    const write = next && !searching ? pushPatch : patch
+    write({ q: next, cursor: undefined })
   }
   // Echoes every keystroke immediately but only commits (writes the URL, hits
   // the server) once the user pauses — a real per-keystroke request would be
   // wasteful and would spam the history stack via useUrlPatch's replace.
   const [typedQuery, setTypedQuery] = useDebouncedInput(search.q ?? '', (next) => applyQuery(next.trim() || undefined))
+  // Clearing (Escape, the clear button) commits at once rather than after the
+  // debounce: the operator asked for the inbox back, not a search for "".
+  const changeQuery = (next: string) => {
+    setTypedQuery(next)
+    if (next.trim() === '' && searching) applyQuery(undefined)
+  }
 
   // Memoized so the fallback isn't a fresh array literal on every render while
   // `page` is undefined — otherwise every derived memo and effect downstream
   // (the bucket grouping, the selection guard) re-runs each render.
-  const items = useMemo(() => page?.items ?? [], [page])
+  const listItems = useMemo(() => page?.items ?? [], [page])
+  // What the pane is showing, whichever mode it is in: the selection guard,
+  // the command bar's verbs and the keyboard cursor all work over this.
+  const items = searching ? searchThreads : listItems
 
   // The time groups and their collapse state live HERE, not in ThreadList: the
   // keyboard cursor below must skip the rows a collapsed group hides, and only
   // the owner of the nav can know the visible order. Collapse is view state
   // for this visit — deliberately not persisted, and deliberately keyed by
   // bucket so it survives paging within the same view.
-  const groups = useMemo(() => groupByBucket(items, (t) => t.last_message_at, new Date()), [items])
+  const groups = useMemo(() => groupByBucket(listItems, (t) => t.last_message_at, new Date()), [listItems])
   const [collapsedBuckets, setCollapsedBuckets] = useState<ReadonlySet<ThreadBucket>>(new Set())
   const toggleGroup = (bucket: ThreadBucket) => {
     setCollapsedBuckets((prev) => {
@@ -227,15 +289,18 @@ export function InboxPage() {
     [groups, collapsedBuckets],
   )
   const visibleIndexById = useMemo(() => new Map(visibleThreads.map((t, i) => [t.id, i])), [visibleThreads])
+  // Search results are one flat, ungrouped list (newest first, like the list),
+  // so its keyboard order is simply its display order.
+  const navThreads = searching ? searchThreads : visibleThreads
 
   // The full-vs-partial page is the one honest signal for "is there more":
   // a page that came back short of the limit cannot have another page after
   // it, and a full page might. Not a guess — a fact about what just loaded.
-  const hasNextPage = items.length > 0 && items.length === PAGE_SIZE
+  const hasNextPage = listItems.length > 0 && listItems.length === PAGE_SIZE
   const canGoPrev = stack.length > 0 || search.cursor !== undefined
 
   const goNext = () => {
-    const last = items[items.length - 1]
+    const last = listItems[listItems.length - 1]
     if (!last || !hasNextPage) return
     setRecoveredFromStaleCursor(false)
     setStack((s) => pushCursor(s, search.cursor))
@@ -284,9 +349,9 @@ export function InboxPage() {
   // Destructured, not held as `nav`: the ref inside would make every `nav.*` read
   // in render look like a ref read to the React Compiler lint.
   const { containerRef, isActive, onRowHover } = useListKeyboardNav({
-    count: visibleThreads.length,
+    count: navThreads.length,
     onOpen: (index) => {
-      const thread = visibleThreads[index]
+      const thread = navThreads[index]
       if (thread) openThread(thread)
     },
   })
@@ -316,8 +381,8 @@ export function InboxPage() {
 
   const showError = error !== undefined && !staleCursor
   const hasActiveFilter = Boolean(selectedMailbox || replyClass || search.q || search.scope || selectedLabel)
-  const isEmptyInbox = !isLoading && !showError && items.length === 0 && !hasActiveFilter && !search.cursor
-  const isEmptyFiltered = !isLoading && !showError && items.length === 0 && !isEmptyInbox
+  const isEmptyInbox = !isLoading && !showError && listItems.length === 0 && !hasActiveFilter && !search.cursor
+  const isEmptyFiltered = !isLoading && !showError && listItems.length === 0 && !isEmptyInbox
 
   const listLabel = selectedMailbox
     ? mailboxLabel(selectedMailbox)
@@ -366,8 +431,8 @@ export function InboxPage() {
             selected — the way a mail client keeps its reading pane on screen),
             full-width when the viewport only has room for the list. */}
         <div className={cn('flex min-w-0 flex-col', threePane ? 'w-[24rem] shrink-0 border-r border-border' : 'flex-1')}>
-          <SectionBar label={listLabel}>
-            <ListSearchInput value={typedQuery} onChange={setTypedQuery} placeholder="Search subject or contact email…" />
+          <SectionBar label={searching ? `Search · ${listLabel}` : listLabel}>
+            <ListSearchInput value={typedQuery} onChange={changeQuery} placeholder="Search mail…" />
             <ReplyFilterMenu options={replyClassFilters} value={replyClass} onChange={selectClass} />
           </SectionBar>
 
@@ -377,7 +442,28 @@ export function InboxPage() {
             </p>
           )}
 
-          {isLoading ? (
+          {searching ? (
+            <SearchResults
+              query={searchQuery}
+              scopeLabel={listLabel}
+              hits={searchHits}
+              pending={searchPending}
+              busy={searchBusy}
+              error={searchQueryResult.error}
+              queryTooLong={queryTooLong}
+              hasNextPage={searchQueryResult.hasNextPage}
+              isFetchingNextPage={searchQueryResult.isFetchingNextPage}
+              onLoadMore={() => void loadMoreResults()}
+              onRetry={() => (nextPageFailed ? void loadMoreResults() : void searchQueryResult.refetch())}
+              onClearSearch={() => changeQuery('')}
+              containerRef={containerRef}
+              nav={{ isActive, onRowHover }}
+              mailboxLabel={mailboxLabel}
+              onOpen={openThread}
+              onToggleRead={toggleRead}
+              selectedThreadId={selectedThreadId}
+            />
+          ) : isLoading ? (
             <PageBody>
               <LoadingRows />
             </PageBody>
