@@ -43,3 +43,12 @@ test('the record-page shell is one of the files that guard covers', () => {
   // leave a green test asserting nothing.
   expect(sourceFiles(sharedDir).map((path) => path.slice(sharedDir.length + 1))).toContain('record-page.tsx')
 })
+
+test('the flow canvas primitives are covered too', () => {
+  // The canvas is shared with the automation builder; campaign nodes live in
+  // features/campaigns. Pinned for the same reason as the record-page shell.
+  const covered = sourceFiles(sharedDir).map((path) => path.slice(sharedDir.length + 1).replaceAll('\\', '/'))
+  expect(covered).toEqual(
+    expect.arrayContaining(['flow/flow-canvas.tsx', 'flow/flow-layout.ts', 'flow/node-registry.ts']),
+  )
+})

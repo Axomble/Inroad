@@ -56,7 +56,8 @@ export function StepForm({
   step?: SequenceStep
   /** First step opens the thread, so its subject is required. */
   isFirstStep: boolean
-  onDone: () => void
+  /** Called with the saved step, so a caller that just created one can place it (the API appends at the end). */
+  onDone: (saved?: SequenceStep) => void
   onCancel: () => void
 }) {
   const isEdit = step != null
@@ -92,7 +93,7 @@ export function StepForm({
   const {
     register,
     handleSubmit,
-    formState: { errors },
+    formState: { errors, isSubmitting },
   } = useForm<Values>({
     resolver: zodResolver(isFirstStep ? firstStepSchema : followUpSchema),
     defaultValues: {
@@ -115,11 +116,11 @@ export function StepForm({
     }
     if (isEdit && step?.id) {
       const result = await updateStep({ id: campaignId, stepId: step.id, stepRequest })
-      if ('data' in result) onDone()
+      if ('data' in result) onDone(result.data)
       return
     }
     const result = await createStep({ id: campaignId, stepRequest })
-    if ('data' in result) onDone()
+    if ('data' in result) onDone(result.data)
   }
 
   return (
@@ -250,7 +251,9 @@ export function StepForm({
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" size="sm" disabled={isSaving}>
+        {/* `isSubmitting` covers the validation tick before the mutation
+            starts, so a quick double click can't create the step twice. */}
+        <Button type="submit" variant="primary" size="sm" disabled={isSaving || isSubmitting}>
           {isSaving && <Loader2 className="animate-spin" />}
           {isEdit ? 'Save step' : 'Add step'}
         </Button>

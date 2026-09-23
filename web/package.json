@@ -15,6 +15,7 @@
     "gen:api": "rtk-query-codegen-openapi openapi-codegen.cjs"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.1.1",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
@@ -35,6 +36,7 @@
     "@tanstack/react-router": "^1.170.38",
     "@types/dompurify": "^3.2.0",
     "@types/qrcode": "^1.5.6",
+    "@xyflow/react": "^12.11.6",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dompurify": "^3.4.15",

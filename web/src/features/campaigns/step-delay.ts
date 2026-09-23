@@ -23,13 +23,12 @@ export function secondsToDelay(seconds: number): { days: number; hours: number }
 }
 
 /**
- * Human label for a step card: `0`/absent → "Immediately", otherwise the
- * coarsest useful breakdown ("3 days after previous", "5 hours after previous",
- * "1 day 2 hours after previous"). Minutes only surface below an hour so a
+ * The coarsest useful breakdown of a delay ("3 days", "5 hours", "1 day 2
+ * hours"), or `null` for no wait. Minutes only surface below an hour so a
  * back-end-set sub-hour delay still reads sensibly.
  */
-export function humanizeDelay(seconds: number | undefined): string {
-  if (!seconds || seconds <= 0) return 'Immediately'
+function delayPhrase(seconds: number | undefined): string | null {
+  if (!seconds || seconds <= 0) return null
   const days = Math.floor(seconds / SECONDS_PER_DAY)
   const hours = Math.floor((seconds % SECONDS_PER_DAY) / SECONDS_PER_HOUR)
   const minutes = Math.floor((seconds % SECONDS_PER_HOUR) / 60)
@@ -38,7 +37,23 @@ export function humanizeDelay(seconds: number | undefined): string {
   if (days > 0) parts.push(`${days} day${days === 1 ? '' : 's'}`)
   if (hours > 0) parts.push(`${hours} hour${hours === 1 ? '' : 's'}`)
   if (days === 0 && hours === 0 && minutes > 0) parts.push(`${minutes} minute${minutes === 1 ? '' : 's'}`)
+  return parts.length === 0 ? null : parts.join(' ')
+}
 
-  if (parts.length === 0) return 'Immediately'
-  return `${parts.join(' ')} after previous`
+/**
+ * Human label for a step card: `0`/absent → "Immediately", otherwise
+ * "3 days after previous".
+ */
+export function humanizeDelay(seconds: number | undefined): string {
+  const phrase = delayPhrase(seconds)
+  return phrase === null ? 'Immediately' : `${phrase} after previous`
+}
+
+/**
+ * The same delay as the chip on the canvas edge leading into a step: the edge
+ * already says "after the previous one", so the chip only names the wait.
+ */
+export function waitLabel(seconds: number | undefined): string {
+  const phrase = delayPhrase(seconds)
+  return phrase === null ? 'No wait' : `Wait ${phrase}`
 }

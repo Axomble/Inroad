@@ -22,6 +22,16 @@ export function stepErrorMessage(error: unknown): string {
 }
 
 /**
+ * Maps an RTK Query error from `reorderSteps`. Shared by the list's drag handle
+ * and the canvas's move/connect gestures so one failure reads the same way
+ * from either view.
+ */
+export function reorderErrorMessage(error: unknown): string {
+  if (httpStatus(error) === 409) return 'Reorder is only allowed while the campaign is a draft.'
+  return "Couldn't reorder steps — try again."
+}
+
+/**
  * Maps an RTK Query error from `testSendCampaign` to a human message. Mirrors
  * the status codes `internal/app/campaign/handler.go`'s `testSend` actually
  * returns: 400 is either a malformed step id or a `to` that failed the
