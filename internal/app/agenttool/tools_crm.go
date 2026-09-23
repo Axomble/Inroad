@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -206,35 +205,10 @@ func crmTools(deps Deps) []Tool {
 	}
 	for i := range tools {
 		if tools[i].Risk == RiskWrite {
-			tools[i] = withCRMWriteLimit(tools[i], deps.CRMWriteLimiter)
+			tools[i] = withWriteLimit(tools[i], deps.WriteLimiter, crmWriteBucket)
 		}
 	}
 	return tools
-}
-
-const crmWritesPerMinute = 30
-
-func withCRMWriteLimit(tool Tool, limiter RateLimiter) Tool {
-	if limiter == nil {
-		return tool
-	}
-	execute := tool.Execute
-	tool.Execute = func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
-		clientID := p.AgentClientID
-		if clientID == "" {
-			clientID = p.UserID.String()
-		}
-		key := fmt.Sprintf("agent-crm-write:%s:%s", p.WorkspaceID, clientID)
-		allowed, err := limiter.Allow(ctx, key, crmWritesPerMinute, time.Minute)
-		if err != nil {
-			return Result{}, fmt.Errorf("limit CRM agent writes: %w", err)
-		}
-		if !allowed {
-			return Fail("CRM write rate limit reached; wait briefly before trying again"), nil
-		}
-		return execute(ctx, p, raw)
-	}
-	return tool
 }
 
 func crmActor(p Principal) CRMActor {

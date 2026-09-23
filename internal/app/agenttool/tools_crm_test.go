@@ -136,7 +136,7 @@ func TestCRMWriteAttributesAgentDeal(t *testing.T) {
 
 func TestCRMWriteRateLimitIsPerWorkspaceAndClient(t *testing.T) {
 	limiter := &fakeRateLimiter{allowed: false}
-	reg := New(Deps{CRM: &fakeCRM{}, CRMWriteLimiter: limiter})
+	reg := New(Deps{CRM: &fakeCRM{}, WriteLimiter: limiter})
 	p := Principal{WorkspaceID: uuid.New(), UserID: uuid.New(), Role: "member", AgentClientID: "mcp-client-1"}
 	result, err := reg.Execute(context.Background(), p, "inroad_company_write", json.RawMessage(`{"loading_message":"Creating company","method":"create","name":"Acme"}`))
 	if err != nil || result.Success || !strings.Contains(result.Error, "rate limit") {
@@ -145,14 +145,19 @@ func TestCRMWriteRateLimitIsPerWorkspaceAndClient(t *testing.T) {
 	if !strings.Contains(limiter.key, p.WorkspaceID.String()) || !strings.Contains(limiter.key, p.AgentClientID) {
 		t.Fatalf("unsafe limiter key %q", limiter.key)
 	}
-	if limiter.limit != crmWritesPerMinute || limiter.window != time.Minute {
+	// The CRM key is byte-identical to before the limiter was shared, so a
+	// deploy does not reset every in-flight window.
+	if !strings.HasPrefix(limiter.key, "agent-crm-write:") {
+		t.Fatalf("CRM bucket key changed: %q", limiter.key)
+	}
+	if limiter.limit != agentWritesPerMinute || limiter.window != time.Minute {
 		t.Fatalf("limit=%d window=%s", limiter.limit, limiter.window)
 	}
 }
 
 func TestCRMWriteRateLimiterFailsClosed(t *testing.T) {
 	limiterErr := errors.New("redis unavailable")
-	reg := New(Deps{CRM: &fakeCRM{}, CRMWriteLimiter: &fakeRateLimiter{allowed: true, err: limiterErr}})
+	reg := New(Deps{CRM: &fakeCRM{}, WriteLimiter: &fakeRateLimiter{allowed: true, err: limiterErr}})
 	result, err := reg.Execute(context.Background(), Principal{WorkspaceID: uuid.New(), UserID: uuid.New(), Role: "member"}, "inroad_company_write", json.RawMessage(`{"loading_message":"Creating company","method":"create","name":"Acme"}`))
 	if !errors.Is(err, limiterErr) || result.Success {
 		t.Fatalf("result=%+v err=%v", result, err)

@@ -36,6 +36,10 @@ type Deps struct {
 	CRM            CRMService
 	// CRMErrors classifies CRM write failures for the model. Nil means every
 	// failure aborts the run rather than being offered back as a retry prompt.
-	CRMErrors       ErrorClassifier
-	CRMWriteLimiter RateLimiter
+	CRMErrors ErrorClassifier
+	// WriteLimiter meters the agent's direct (RiskWrite) writes to CRM records
+	// and contacts, each family in its own bucket (see withWriteLimit). Nil
+	// means unmetered. Approval-gated tools are not metered: a human already
+	// reviews every call.
+	WriteLimiter RateLimiter
 }

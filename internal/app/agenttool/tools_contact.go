@@ -111,7 +111,10 @@ func contactTools(deps Deps) []Tool {
 		out = append(out, contactReadTool(deps.Contacts))
 	}
 	if deps.ContactWrites != nil {
-		out = append(out, contactWriteTool(deps.ContactWrites))
+		// Every method of this tool writes (create, add_to_list, link_company,
+		// unlink_company) and none is approval-gated, so the whole tool is
+		// metered, like the CRM write tools.
+		out = append(out, withWriteLimit(contactWriteTool(deps.ContactWrites), deps.WriteLimiter, contactWriteBucket))
 	}
 	if deps.ContactImports != nil {
 		out = append(out, contactsImportTool(deps.ContactImports))
