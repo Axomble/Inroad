@@ -157,6 +157,7 @@ var taskQueues = map[string]string{
 	TaskInboxSweep:             QueueControl,
 	TaskSweepEnrollments:       QueueControl,
 	TaskMaintenanceCleanup:     QueueControl,
+	TaskMaintenanceRetention:   QueueControl,
 	TaskDomainAuthSweep:        QueueControl,
 	TaskRecipientESPSweep:      QueueControl,
 	TaskFleetRotate:            QueueControl,
@@ -248,6 +249,15 @@ const TaskWarmupSweep = "warmup:sweep"
 // TaskMaintenanceCleanup is the daily retention job for expired security
 // artifacts (sessions, challenges, one-time codes, and OAuth credentials).
 const TaskMaintenanceCleanup = "maintenance:cleanup"
+
+// TaskMaintenanceRetention is the hourly, operator-configured retention sweep
+// over the recipient-identifying tables (sends, tracking events, deliverability
+// events, inbox threads) and captured dead letters — INROAD_RETENTION_*_DAYS.
+// Separate from maintenance:cleanup because its windows are the operator's
+// rather than fixed by the code, and because it runs in bounded batches often
+// enough to keep up with the busiest tables in the schema, where the daily
+// cleanup purges tables that grow slowly.
+const TaskMaintenanceRetention = "maintenance:retention"
 
 // TaskDomainAuthSweep re-checks the SPF/DKIM/DMARC records of every sending
 // domain whose last completed check is older than the staleness window.
@@ -1136,6 +1146,16 @@ func RegisterWarmupSweep(sch *asynq.Scheduler) error {
 // handler is idempotent, so scheduler restarts and retries are safe.
 func RegisterMaintenanceCleanup(sch *asynq.Scheduler) error {
 	return registerControlSweep(sch, "@every 24h", TaskMaintenanceCleanup)
+}
+
+// RegisterMaintenanceRetention registers the recipient-data retention sweep.
+// Hourly rather than daily: each run is capped (internal/worker/maintenance
+// RetentionOptions) so no single run holds a worker slot for long, and the cap
+// times 24 runs is what lets the sweep keep pace with sends and tracking_events,
+// which can grow by millions of rows a day. A tick with every table disabled or
+// nothing aged out costs one indexed probe per enabled table.
+func RegisterMaintenanceRetention(sch *asynq.Scheduler) error {
+	return registerControlSweep(sch, "@every 1h", TaskMaintenanceRetention)
 }
 
 // RegisterDomainAuthSweep registers the periodic domain-authentication sweep.

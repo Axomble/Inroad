@@ -27,19 +27,15 @@ type Cleaner interface {
 	// window plus the mailbox assignments pinned to them. Separate again: this is
 	// global infrastructure state, not a security artifact or an HTTP concern.
 	PurgeDeadWorkers(ctx context.Context) (deleted int64, err error)
-	// PurgeDeadLetters removes captured retry-exhausted tasks past their 90-day
-	// retention. Separate for the same reason as the two above: a dead letter is
-	// a record of dropped work, neither a security artifact nor an HTTP concern.
-	// It is here at all because the table had no sweep and grows with failures
-	// nobody schedules — the reasoning behind invariant 55's warmup purge.
-	PurgeDeadLetters(ctx context.Context) (deleted int64, err error)
 	// PurgeWebhookDeliveries removes webhook_deliveries rows past their 30-day
-	// retention. Same reasoning as PurgeDeadLetters: append-only in practice,
-	// grows one row per (event, endpoint), and had no sweep of its own.
+	// retention. Append-only in practice, grows one row per (event, endpoint),
+	// and had no sweep of its own — the reasoning behind invariant 55's warmup
+	// purge. (Captured dead letters used to be purged here too, on a hard-coded
+	// 90 days; they moved to the configurable retention sweep, retention.go.)
 	PurgeWebhookDeliveries(ctx context.Context) (deleted int64, err error)
 	// PurgeScheduledJobRuns removes scheduled_job_runs rows past their 30-day
-	// retention. Same reasoning as PurgeDeadLetters/PurgeWebhookDeliveries:
-	// append-only from internal/platform/jobrun.Record, eight jobs writing a row
+	// retention. Same reasoning as PurgeWebhookDeliveries:
+	// append-only from internal/platform/jobrun.Record, nine jobs writing a row
 	// per run (several every five minutes), and no sweep of its own until this
 	// one — see the table's migration for why it needed one from day one rather
 	// than growing unbounded first.
@@ -60,8 +56,8 @@ type Cleaner interface {
 
 // CleanupHandler purges, in order: expired security artifacts, expired
 // Idempotency-Key replay-cache rows, warmup evidence past its retention window,
-// dead workers with their mailbox assignments, captured dead letters past
-// theirs, expired webhook deliveries, scheduled-job-run ledger rows past theirs,
+// dead workers with their mailbox assignments, expired webhook deliveries,
+// scheduled-job-run ledger rows past theirs,
 // per-worker provider signal windows, and fleet decision-log rows. Returning a
 // database error from any purge lets asynq retry; successful runs log each
 // affected count for observability.
@@ -90,12 +86,6 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "dead workers and their assignments purged", "rows", workersDeleted)
-
-		deadLettersDeleted, err := core.PurgeDeadLetters(ctx)
-		if err != nil {
-			return err
-		}
-		slog.InfoContext(ctx, "expired dead letters purged", "rows", deadLettersDeleted)
 
 		webhookDeliveriesDeleted, err := core.PurgeWebhookDeliveries(ctx)
 		if err != nil {

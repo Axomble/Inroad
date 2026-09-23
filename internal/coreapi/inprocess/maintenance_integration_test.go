@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/coreapi"
 	"github.com/inroad/inroad/internal/platform/jobrun"
 )
 
@@ -191,12 +192,15 @@ func TestPurgeDeadLettersPurgesOnlyOutsideRetentionWindow(t *testing.T) {
 	expiredA, freshA := seed(wsA.ID, "91 days"), seed(wsA.ID, "89 days")
 	expiredB, freshB := seed(wsB.ID, "91 days"), seed(wsB.ID, "89 days")
 
-	deleted, err := (client{q: q}).PurgeDeadLetters(ctx)
+	// The default window (config.DefaultRetentionDeadLettersDays), which the
+	// retention sweep now passes in rather than the query hard-coding.
+	req := coreapi.RetentionRequest{OlderThan: 90 * 24 * time.Hour, Limit: 5000}
+	res, err := (client{pool: pool, q: q}).PurgeDeadLetters(ctx, req)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
-	if deleted < 2 {
-		t.Fatalf("deleted rows = %d, want at least the 2 expired rows (one per workspace)", deleted)
+	if res.Deleted < 2 {
+		t.Fatalf("deleted rows = %d, want at least the 2 expired rows (one per workspace)", res.Deleted)
 	}
 
 	exists := func(id uuid.UUID) bool {
@@ -224,7 +228,7 @@ func TestPurgeDeadLettersPurgesOnlyOutsideRetentionWindow(t *testing.T) {
 
 	// Idempotent: the sweep runs daily, so "nothing left in window" is its steady
 	// state rather than an edge case.
-	if _, err := (client{q: q}).PurgeDeadLetters(ctx); err != nil {
+	if _, err := (client{pool: pool, q: q}).PurgeDeadLetters(ctx, req); err != nil {
 		t.Fatalf("second purge: %v", err)
 	}
 	if !exists(freshA) || !exists(freshB) {
@@ -272,7 +276,7 @@ func TestRecordJobRunPersistsWhatTheDecoratorObserved(t *testing.T) {
 	}
 }
 
-// task_dead_letters / webhook_deliveries reasoning (invariant 55): eight jobs
+// task_dead_letters / webhook_deliveries reasoning (invariant 55): nine jobs
 // write a row per run through jobrun.Record, several every five minutes, so
 // scheduled_job_runs needed a retention sweep from day one. Global and
 // unpinned like the other purges in this file — deployment maintenance, not

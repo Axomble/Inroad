@@ -41,6 +41,7 @@ func TestExpositionListsEveryInroadSeries(t *testing.T) {
 	m.JobRunCompleted("domain auth sweep", "ok", time.Second)
 	m.WorkerAssignmentStale()
 	m.FleetRotated("unhealthy")
+	m.RetentionRowsDeleted("sends", 1, 1)
 	if err := m.RegisterPool(realPoolStat(t)); err != nil {
 		t.Fatalf("register pool: %v", err)
 	}
@@ -80,6 +81,7 @@ func TestExpositionListsEveryInroadSeries(t *testing.T) {
 		"inroad_http_requests_total",
 		"inroad_job_run_seconds",
 		"inroad_queue_depth",
+		"inroad_retention_rows_deleted_total",
 		"inroad_send_claims_total",
 		"inroad_sends_total",
 		"inroad_sweep_rows_total",

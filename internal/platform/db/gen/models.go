@@ -898,6 +898,14 @@ type ReplyLabel struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+type RetentionCursor struct {
+	TableName      string             `json:"table_name"`
+	AfterAt        pgtype.Timestamptz `json:"after_at"`
+	AfterID        uuid.UUID          `json:"after_id"`
+	CycleStartedAt pgtype.Timestamptz `json:"cycle_started_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ScheduledJobRun struct {
 	ID           uuid.UUID          `json:"id"`
 	JobName      string             `json:"job_name"`
@@ -1049,6 +1057,17 @@ type TaskTarget struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type TrackingEngagement struct {
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CampaignID  uuid.UUID          `json:"campaign_id"`
+	SendID      uuid.UUID          `json:"send_id"`
+	Kind        TrackingEventKind  `json:"kind"`
+	IsMachine   bool               `json:"is_machine"`
+	Events      int64              `json:"events"`
+	FirstAt     pgtype.Timestamptz `json:"first_at"`
+	LastAt      pgtype.Timestamptz `json:"last_at"`
+}
+
 type TrackingEvent struct {
 	ID            uuid.UUID          `json:"id"`
 	WorkspaceID   uuid.UUID          `json:"workspace_id"`
@@ -1061,6 +1080,17 @@ type TrackingEvent struct {
 	IsMachine     bool               `json:"is_machine"`
 	MachineReason string             `json:"machine_reason"`
 	ClientIp      *netip.Addr        `json:"client_ip"`
+}
+
+type TrackingEventRollup struct {
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	CampaignID  uuid.UUID          `json:"campaign_id"`
+	SendID      uuid.UUID          `json:"send_id"`
+	Kind        TrackingEventKind  `json:"kind"`
+	IsMachine   bool               `json:"is_machine"`
+	Events      int64              `json:"events"`
+	FirstAt     pgtype.Timestamptz `json:"first_at"`
+	LastAt      pgtype.Timestamptz `json:"last_at"`
 }
 
 type TwoFactorChallenge struct {

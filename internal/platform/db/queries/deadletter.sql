@@ -128,27 +128,43 @@ WHERE workspace_id = @workspace_id AND id = @id AND status = 'pending';
 --
 -- Invariant 55's reasoning applies unchanged: warmup_observations was bounded at
 -- 90 days because it is append-only and written by events nobody schedules, and
--- this is the same shape. 90 days is comfortably beyond any triage window — a
--- dropped send nobody has looked at in three months is not going to be replayed
--- — and it keeps the audit answer migration 000069 exists for ("what did we
--- re-run last week") intact by a wide margin.
+-- this is the same shape. 90 days — INROAD_RETENTION_DEAD_LETTERS_DAYS' default —
+-- is comfortably beyond any triage window: a dropped send nobody has looked at in
+-- three months is not going to be replayed, and it keeps the audit answer
+-- migration 000069 exists for ("what did we re-run last week") intact by a wide
+-- margin.
 --
--- Batched at 5000 rows like every other purge in queries/maintenance.sql, to cap
--- one sweep's lock/IO footprint. Deleting oldest-first (ORDER BY created_at)
--- means repeated sweeps make monotonic progress rather than re-reading the same
--- head of the table.
+-- Every status is eligible, 'pending' included, and that is deliberate: the
+-- table's indexes are not partial on 'pending' because terminal rows ARE the
+-- audit trail, and the window is what bounds how long that trail is kept. A
+-- 'pending' row past the window is work nobody triaged in the whole window.
+--
+-- One bounded batch of the retention sweep (queries/retention.sql has the shared
+-- shape: database clock, SKIP LOCKED for overlapping replicas, a keyset cursor).
+-- Oldest-first on idx_task_dead_letters_created.
 --
 -- Global (no workspace pin), for the same reason PurgeExpiredSecurityArtifacts
 -- is: retention is deployment maintenance, not a tenant read. It removes rows by
 -- age alone and returns only a count, so it can neither surface nor cross tenant
 -- data.
-WITH deleted AS (
-    DELETE FROM task_dead_letters
-    WHERE id IN (
-        SELECT id FROM task_dead_letters
-        WHERE created_at < now() - interval '90 days'
-        ORDER BY created_at LIMIT 5000
-    )
-    RETURNING 1
+WITH doomed AS (
+    SELECT id, created_at
+    FROM task_dead_letters
+    WHERE created_at < now() - make_interval(secs => sqlc.arg(older_than_seconds)::bigint)
+      AND (created_at, id) > (sqlc.arg(after_at)::timestamptz, sqlc.arg(after_id)::uuid)
+    ORDER BY created_at, id
+    LIMIT sqlc.arg(batch_limit)::int
+    FOR UPDATE SKIP LOCKED
+),
+deleted AS (
+    DELETE FROM task_dead_letters t
+    USING doomed d
+    WHERE t.id = d.id
+    RETURNING t.id, t.created_at
+),
+last_row AS (
+    SELECT created_at, id FROM deleted ORDER BY created_at DESC, id DESC LIMIT 1
 )
-SELECT count(*)::bigint AS deleted_rows FROM deleted;
+SELECT (SELECT count(*) FROM deleted)::bigint AS deleted_rows,
+       COALESCE((SELECT created_at FROM last_row), '0001-01-01T00:00:00Z'::timestamptz)::timestamptz AS last_at,
+       COALESCE((SELECT id FROM last_row), '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS last_id;

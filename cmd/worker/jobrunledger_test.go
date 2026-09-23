@@ -27,6 +27,7 @@ var scheduledSweeps = map[string]string{
 	queue.TaskInboxSweep:            jobrun.NameInboxSweep,
 	queue.TaskWarmupSweep:           jobrun.NameWarmupSweep,
 	queue.TaskMaintenanceCleanup:    jobrun.NameMaintenanceCleanup,
+	queue.TaskMaintenanceRetention:  jobrun.NameRetention,
 	queue.TaskDomainAuthSweep:       jobrun.NameDomainAuthSweep,
 	queue.TaskRecipientESPSweep:     jobrun.NameRecipientESPSweep,
 	queue.TaskFleetRotate:           jobrun.NameFleetRotate,
@@ -40,9 +41,9 @@ var scheduledSweeps = map[string]string{
 // loudly if one were reached, which is the assertion: a periodic reconcile
 // should do nothing here but be counted. The methods that ARE overridden are
 // exactly the sweeps' entry points, each answering "nothing due", plus the
-// four capability interfaces Register resolves by type assertion
-// (maintenance.Cleaner, recipientesp.Core, fleet.Rotator and — reached via
-// inbox.RegisterScheduled — inbox.PendingSweepCore). Without those the handlers
+// five capability interfaces Register resolves by type assertion
+// (maintenance.Cleaner, maintenance.Retainer, recipientesp.Core, fleet.Rotator
+// and — reached via inbox.RegisterScheduled — inbox.PendingSweepCore). Without those the handlers
 // are never registered at all and ProcessTask would report "handler not found",
 // which is itself a failure this test should catch.
 type recordingCore struct {
@@ -79,13 +80,43 @@ func (c *recordingCore) CleanupExpired(context.Context) (int64, error)          
 func (c *recordingCore) PurgeIdempotencyKeys(context.Context) (int64, error)    { return 0, nil }
 func (c *recordingCore) PurgeWarmupObservations(context.Context) (int64, error) { return 0, nil }
 func (c *recordingCore) PurgeDeadWorkers(context.Context) (int64, error)        { return 0, nil }
-func (c *recordingCore) PurgeDeadLetters(context.Context) (int64, error)        { return 0, nil }
 func (c *recordingCore) PurgeWebhookDeliveries(context.Context) (int64, error)  { return 0, nil }
 func (c *recordingCore) PurgeScheduledJobRuns(context.Context) (int64, error)   { return 0, nil }
 func (c *recordingCore) PurgeWorkerProviderSignals(context.Context) (int64, error) {
 	return 0, nil
 }
 func (c *recordingCore) PurgeFleetDecisions(context.Context) (int64, error) { return 0, nil }
+
+// --- maintenance.Retainer (resolved by type assertion in Register) ---
+//
+// Each answers "nothing aged out". The Deps below enable every table, so the
+// retention handler really does call each of these — a sweep that registered
+// but skipped every table would record a row while exercising nothing.
+
+func (c *recordingCore) PurgeDeliverabilityEvents(context.Context, coreapi.RetentionRequest) (coreapi.RetentionBatch, error) {
+	return coreapi.RetentionBatch{}, nil
+}
+func (c *recordingCore) PurgeInboxThreads(context.Context, coreapi.RetentionRequest) (coreapi.RetentionBatch, error) {
+	return coreapi.RetentionBatch{}, nil
+}
+func (c *recordingCore) RollupTrackingEvents(context.Context, coreapi.RetentionRequest) (coreapi.RetentionBatch, error) {
+	return coreapi.RetentionBatch{}, nil
+}
+func (c *recordingCore) PurgeSends(context.Context, coreapi.RetentionRequest) (coreapi.RetentionBatch, error) {
+	return coreapi.RetentionBatch{}, nil
+}
+func (c *recordingCore) PurgeDeadLetters(context.Context, coreapi.RetentionRequest) (coreapi.RetentionBatch, error) {
+	return coreapi.RetentionBatch{}, nil
+}
+func (c *recordingCore) LoadRetentionProgress(context.Context, string) (coreapi.RetentionProgress, error) {
+	return coreapi.RetentionProgress{}, nil
+}
+func (c *recordingCore) SaveRetentionProgress(context.Context, string, coreapi.RetentionCursor, bool) error {
+	return nil
+}
+func (c *recordingCore) TryRetentionSweepLock(context.Context) (func() error, bool, error) {
+	return func() error { return nil }, true, nil
+}
 
 // --- recipientesp.Core (resolved by type assertion in Register) ---
 
@@ -113,6 +144,7 @@ var (
 	_ coreapi.Client               = (*recordingCore)(nil)
 	_ jobrun.Recorder              = (*recordingCore)(nil)
 	_ maintenance.Cleaner          = (*recordingCore)(nil)
+	_ maintenance.Retainer         = (*recordingCore)(nil)
 	_ recipientesp.Core            = (*recordingCore)(nil)
 	_ fleet.Rotator                = (*recordingCore)(nil)
 	_ workerinbox.PendingSweepCore = (*recordingCore)(nil)
@@ -141,7 +173,11 @@ func TestEverySweepDispatchedThroughRegisterRecordsOneLedgerRow(t *testing.T) {
 	// nil senders/readers/resolvers/enqueuer: a sweep with nothing due reaches
 	// none of them, and a nil dereference here would mean a reconcile did more
 	// than scan-and-count. jobrun.Record re-panics, so it would fail loudly.
-	worker.Register(mux, worker.Deps{Role: worker.RoleAll, Core: core, PublicURL: "https://app.test"})
+	worker.Register(mux, worker.Deps{Role: worker.RoleAll, Core: core, PublicURL: "https://app.test",
+		Retention: maintenance.RetentionPolicy{
+			DeliverabilityEvents: 90 * 24 * time.Hour, InboxThreads: 30 * 24 * time.Hour,
+			TrackingEvents: 30 * 24 * time.Hour, Sends: 90 * 24 * time.Hour, DeadLetters: 90 * 24 * time.Hour,
+		}})
 
 	for taskType, wantName := range scheduledSweeps {
 		t.Run(taskType, func(t *testing.T) {

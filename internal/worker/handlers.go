@@ -79,10 +79,19 @@ type Deps struct {
 
 	WebhookAllowPrivate bool
 
+	// Retention is how long the retention sweep (maintenance:retention) keeps
+	// each recipient-identifying table and the dead-letter capture, built by the
+	// composition root from INROAD_RETENTION_*_DAYS and already validated there.
+	// Its zero value disables every table INCLUDING dead letters, so a Deps
+	// literal that omits it runs a sweep that deletes nothing — the safe
+	// direction for a destructive job, and cmd/worker's own test pins that the
+	// real composition root does set it.
+	Retention maintenance.RetentionPolicy
+
 	// Metrics records inroad_sends_total at the campaign and warmup send
 	// handlers' finalize points, inroad_sweep_seconds / inroad_sweep_rows_total
 	// at the enrollment, inbox, warmup and stranded-pending-send sweeps, and
-	// (via jobrun.Record below) inroad_job_run_seconds at all eight of the
+	// (via jobrun.Record below) inroad_job_run_seconds at all nine of the
 	// periodic reconciles in cmd/worker/scheduler.go's sweepRegistrars(); a nil
 	// Metrics (metrics disabled) no-ops throughout.
 	Metrics *metrics.Metrics
@@ -114,7 +123,7 @@ func Register(mux *asynq.ServeMux, d Deps) {
 	}
 }
 
-// registerScheduled wires the eight periodic reconciles and the campaign breaker.
+// registerScheduled wires the nine periodic reconciles and the campaign breaker.
 // These scan or delete ACROSS TENANTS, so they are registered on the control
 // role only: a send host runs no handler that enumerates every workspace's due
 // enrollments (fleet design §1.2).
@@ -129,13 +138,23 @@ func registerScheduled(mux *asynq.ServeMux, d Deps, recorder jobrun.Recorder) {
 	if cleaner, ok := d.Core.(maintenance.Cleaner); ok {
 		mux.HandleFunc(queue.TaskMaintenanceCleanup, jobrun.Record(recorder, d.Metrics, jobrun.NameMaintenanceCleanup, maintenance.CleanupHandler(cleaner)))
 	}
+	// Recipient-data retention: the operator-configured windows over sends,
+	// tracking events, deliverability events, inbox threads and dead letters.
+	// Same comma-ok as the cleaner, and the absence is the point for one of the
+	// two implementations: *remote.Client does not satisfy Retainer, because
+	// every batch is a cross-tenant delete (coreapi/retention.go), so a fleet
+	// host is never handed this sweep even if its role were misconfigured.
+	if retainer, ok := d.Core.(maintenance.Retainer); ok {
+		mux.HandleFunc(queue.TaskMaintenanceRetention, jobrun.Record(recorder, d.Metrics, jobrun.NameRetention,
+			maintenance.RetentionHandler(retainer, d.Retention, d.Metrics, maintenance.RetentionOptions{})))
+	}
 	// Campaign circuit breaker. Registered by type assertion for the same reason
 	// as the cleaner above: the capability is consumed through a one-method
 	// interface rather than widening coreapi.Client (and its 13 test fakes) to
 	// carry it. A Client that does not implement it simply has no breaker, which
 	// is what a future HTTP coreapi would report until it grows the endpoint.
 	//
-	// Not one of the eight jobrun.Record wraps: deliverability:evaluate is not in
+	// Not one of the nine jobrun.Record wraps: deliverability:evaluate is not in
 	// cmd/worker/scheduler.go's sweepRegistrars() (it fires per-send-batch, not
 	// on a fixed schedule), so it is outside this ledger's scope. It is still
 	// control-plane work despite that: it reads campaign-wide aggregates and
@@ -168,7 +187,7 @@ func registerScheduled(mux *asynq.ServeMux, d Deps, recorder jobrun.Recorder) {
 		mux.HandleFunc(queue.TaskFleetRotate, jobrun.Record(recorder, d.Metrics, jobrun.NameFleetRotate,
 			fleet.RotateHandler(fr)))
 	}
-	// Warmup: the fan-out/health sweep. Only warmup:sweep is one of the eight
+	// Warmup: the fan-out/health sweep. Only warmup:sweep is one of the nine
 	// periodic reconciles; warmup:tick and warmup:engage are per-message
 	// follow-ups, not scheduled sweeps, so they are outside the ledger the same
 	// way warmup send/finalize is (see registerPerMessage).

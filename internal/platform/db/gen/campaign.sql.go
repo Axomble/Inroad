@@ -326,13 +326,13 @@ WITH sent AS (
 ),
 opened AS (
     SELECT campaign_id, COUNT(DISTINCT send_id)::bigint AS n
-    FROM tracking_events
+    FROM tracking_engagement
     WHERE workspace_id = $1 AND kind = 'open' AND NOT is_machine
     GROUP BY 1
 ),
 clicked AS (
     SELECT campaign_id, COUNT(DISTINCT send_id)::bigint AS n
-    FROM tracking_events
+    FROM tracking_engagement
     WHERE workspace_id = $1 AND kind = 'click' AND NOT is_machine
     GROUP BY 1
 ),
@@ -407,6 +407,8 @@ type ListCampaignPerformanceRow struct {
 // click side gained a bot filter it never had: before this, a link scanner's
 // prefetch counted as a click here even while the open side filtered proxies,
 // so a scanned campaign could report more clicks than opens.
+// tracking_engagement includes events retention has rolled up (migration
+// 20260923110315), so this ranking agrees with CountEngagedSendsByKind.
 // One pass over the enrollments gives both the denominator (every enrollment
 // row is one contact, for the campaign's lifetime) and the stop-reason counts.
 func (q *Queries) ListCampaignPerformance(ctx context.Context, workspaceID uuid.UUID) ([]ListCampaignPerformanceRow, error) {

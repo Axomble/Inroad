@@ -25,6 +25,11 @@ const (
 	DefaultDBMinConns = db.DefaultPoolMinConns
 )
 
+// DefaultRetentionDeadLettersDays is INROAD_RETENTION_DEAD_LETTERS_DAYS' default:
+// the 90 days task_dead_letters was purged at, hard-coded, before the window
+// became configurable — so an upgrade changes no deployment's behaviour.
+const DefaultRetentionDeadLettersDays = 90
+
 type Config struct {
 	Env         string
 	HTTPAddr    string
@@ -212,6 +217,27 @@ type Config struct {
 	// duplicating the valid-value list would give it two sources of truth. Empty
 	// means the default single-process topology.
 	WorkerRole string
+
+	// Retention windows for the maintenance:retention sweep, in whole DAYS. Zero
+	// disables that table's sweep; it never means "keep nothing".
+	//
+	// The four recipient-data windows (sends; inbox threads with their
+	// messages; tracking events; deliverability events) default to 0 —
+	// DISABLED — and that default
+	// is a decision, not an omission: how long to keep data about the people a
+	// workspace emails is a Privacy/Legal call for each deployment, and a code
+	// default would be this project making it for them. Dead letters default to
+	// the 90 days they were purged at before the window was configurable.
+	//
+	// Only the shape is checked here (a whole number, not negative). Each table's
+	// MINIMUM window is domain knowledge — which rate reads it, over how long — so
+	// it lives with the sweep (internal/worker/maintenance.RetentionPolicy.Validate)
+	// and cmd/worker refuses to start below it.
+	RetentionSendsDays                int
+	RetentionInboxDays                int
+	RetentionTrackingEventsDays       int
+	RetentionDeliverabilityEventsDays int
+	RetentionDeadLettersDays          int
 
 	// --- Fleet credential brokering (internal/platform/credbroker) ---
 	//
@@ -560,6 +586,12 @@ func Load() (*Config, error) {
 	cfg.RunScheduler = env.boolVal("INROAD_RUN_SCHEDULER", true)
 	cfg.WorkerRole = os.Getenv("INROAD_WORKER_ROLE")
 
+	cfg.RetentionSendsDays = env.daysVal("INROAD_RETENTION_SENDS_DAYS", 0)
+	cfg.RetentionInboxDays = env.daysVal("INROAD_RETENTION_INBOX_DAYS", 0)
+	cfg.RetentionTrackingEventsDays = env.daysVal("INROAD_RETENTION_TRACKING_EVENTS_DAYS", 0)
+	cfg.RetentionDeliverabilityEventsDays = env.daysVal("INROAD_RETENTION_DELIVERABILITY_EVENTS_DAYS", 0)
+	cfg.RetentionDeadLettersDays = env.daysVal("INROAD_RETENTION_DEAD_LETTERS_DAYS", DefaultRetentionDeadLettersDays)
+
 	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
 	switch {
 	case os.Getenv("INROAD_WORKER_ID") != "":
@@ -776,6 +808,34 @@ func (r *envReader) intVal(key string, fallback int) int {
 	}
 	return n
 }
+
+// daysVal returns the whole number of days in key, or fallback when it is unset
+// or blank. Zero is a real value (it disables a retention window), so it is
+// accepted; a negative number is refused rather than clamped, because every
+// variable this reads controls a DELETE and a sign typo must not be quietly
+// reinterpreted as something the operator did not write.
+//
+// Days rather than a Go duration because a retention window is a policy stated
+// in days ("keep sends for 400 days"), and time.ParseDuration has no day unit —
+// an operator would otherwise have to write 9600h and hope they multiplied right.
+func (r *envReader) daysVal(key string, fallback int) int {
+	v, ok := trimmedEnv(key)
+	if !ok {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || n > maxRetentionDays {
+		r.errs = append(r.errs, fmt.Errorf("%s must be a whole number of days from 0 (disabled) to %d, got %q", key, maxRetentionDays, v))
+		return fallback
+	}
+	return n
+}
+
+// maxRetentionDays caps a retention window at a century. Not a policy opinion:
+// the window becomes a time.Duration downstream, which overflows past ~292 years
+// and would wrap to a NEGATIVE window, and a window longer than a century is a
+// disabled one that says so less clearly than 0 does.
+const maxRetentionDays = 36500
 
 // durationVal returns the Go duration in key, or fallback when it is unset or
 // blank. The unit is not optional: INROAD_ACCESS_TOKEN_TTL=5 is not five of
