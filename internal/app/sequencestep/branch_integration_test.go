@@ -110,7 +110,7 @@ func TestBranchSaveAndReadBack(t *testing.T) {
 		t.Fatalf("graph branches = %+v", g.Branches)
 	}
 
-	if err := b.svc.DeleteBranch(ctx, b.ws, b.campaign, b.steps[0]); err != nil {
+	if err := b.svc.DeleteBranch(ctx, b.ws, b.campaign, b.steps[0], BranchPrecondition{}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if g, _ := b.svc.Graph(ctx, b.ws, b.campaign); len(g.Branches) != 0 {
@@ -214,7 +214,7 @@ func TestBranchWritesAreWorkspacePinned(t *testing.T) {
 	if _, err := store.UpsertBranch(ctx, intruder.ID, BranchInput{CampaignID: b.campaign, StepID: b.steps[0], Condition: "always"}, checkGraph); !errors.Is(err, ErrCampaignNotFound) {
 		t.Fatalf("store: want ErrCampaignNotFound, got %v", err)
 	}
-	if err := store.DeleteBranch(ctx, intruder.ID, b.campaign, b.steps[0], checkGraph); !errors.Is(err, ErrCampaignNotFound) {
+	if err := store.DeleteBranch(ctx, intruder.ID, b.campaign, b.steps[0], BranchPrecondition{}, checkGraph); !errors.Is(err, ErrCampaignNotFound) {
 		t.Fatalf("store delete: want ErrCampaignNotFound, got %v", err)
 	}
 	if rows, _ := b.q.ListBranchesByCampaign(ctx, gen.ListBranchesByCampaignParams{CampaignID: b.campaign, WorkspaceID: intruder.ID}); len(rows) != 0 {

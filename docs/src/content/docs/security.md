@@ -2256,6 +2256,24 @@ write history that never happened.
     inside the transaction. The send path has a runtime loop backstop that ends
     the path rather than recovering-forward forever.
 
+    **Write preconditions do not widen tenancy.** A branch PUT/DELETE may carry
+    `expected_updated_at` (optimistic concurrency, so two editors cannot
+    silently overwrite each other). It is enforced in the write's own `WHERE`
+    clause (`InsertBranchIfAbsent`, `UpdateBranchIfUnchanged`,
+    `DeleteBranchIfUnchanged`) under the same graph lock, and the lock still
+    runs first: a foreign workspace gets the same 404 whatever it expects, and
+    never reaches the 409. The 409's `current` branch is read with the same
+    `(step_id, campaign_id, workspace_id)` pin as every other branch read, so it
+    can only ever show the caller its own workspace's row. The token is
+    `updated_at`, advanced by a trigger on every insert and update (including
+    the `ON DELETE SET NULL` of an exit) to a strictly later value than the
+    row's previous one, so a live row's token cannot repeat and let a stale
+    write through. (A branch deleted and re-created starts from the database
+    clock; only a clock stepping back to the exact microsecond of the deleted
+    row's token could collide.) It is a lost-update guard between
+    cooperating editors, not an access control: a client that omits it gets
+    last-writer-wins, exactly as before.
+
     **A branch never overrides reply-label automation.** A reply whose label
     stops the enrollment still stops it; compliance dispatch (invariants 20, 45)
     is untouched. A branch only routes enrollments the labels leave active, and

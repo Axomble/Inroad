@@ -20,6 +20,18 @@ const (
 	preBranchVersion = 20260921111415
 )
 
+// triggerExists reports whether the trigger that makes updated_at the branch's
+// concurrency token (20260923161044) is installed.
+func triggerExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool) bool {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_trigger
+		WHERE tgname = 'sequence_step_branches_advance_updated_at'`).Scan(&n); err != nil {
+		t.Fatalf("trigger lookup: %v", err)
+	}
+	return n == 1
+}
+
 // indexState reports whether the named index exists and, if so, whether it is
 // VALID — a failed CREATE INDEX CONCURRENTLY leaves an invalid index behind
 // rather than rolling back, and IF NOT EXISTS would skip it on every re-run.
@@ -56,10 +68,16 @@ func TestInboxThreadsCampaignContactIndexIsValid(t *testing.T) {
 	if exists, valid := indexState(t, ctx, pool, idx); !exists || !valid {
 		t.Fatalf("%s after a fresh migrate: exists=%v valid=%v", idx, exists, valid)
 	}
+	if !triggerExists(t, ctx, pool) {
+		t.Fatal("updated_at trigger missing after a fresh migrate")
+	}
 
 	// Down past both branching migrations, then up again.
 	if err := db.MigrateTo(dsn, branchIndexVersion); err != nil {
 		t.Fatalf("migrate to %d: %v", branchIndexVersion, err)
+	}
+	if triggerExists(t, ctx, pool) {
+		t.Fatal("updated_at trigger survived its own down migration")
 	}
 	if err := db.MigrateTo(dsn, branchTablesVersion); err != nil {
 		t.Fatalf("roll back the index migration: %v", err)
@@ -85,5 +103,8 @@ func TestInboxThreadsCampaignContactIndexIsValid(t *testing.T) {
 	}
 	if exists, valid := indexState(t, ctx, pool, idx); !exists || !valid {
 		t.Fatalf("%s after up/down/up: exists=%v valid=%v", idx, exists, valid)
+	}
+	if !triggerExists(t, ctx, pool) {
+		t.Fatal("updated_at trigger missing after up/down/up")
 	}
 }

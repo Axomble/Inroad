@@ -3,7 +3,9 @@ package sequencestep
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -25,6 +27,8 @@ type fakeBranchStore struct {
 	// trackingOff models a campaign with tracking disabled.
 	trackingOff bool
 	upserts     int
+	// expects records every precondition the store was handed, in call order.
+	expects []BranchPrecondition
 }
 
 func (f *fakeBranchStore) ListBranches(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStepBranch, error) {
@@ -41,6 +45,7 @@ func (f *fakeBranchStore) TrackingEnabled(context.Context, uuid.UUID, uuid.UUID)
 }
 
 func (f *fakeBranchStore) UpsertBranch(_ context.Context, ws uuid.UUID, in BranchInput, check GraphCheck) (gen.SequenceStepBranch, error) {
+	f.expects = append(f.expects, in.Expect)
 	row := gen.SequenceStepBranch{
 		StepID: in.StepID, WorkspaceID: ws, CampaignID: in.CampaignID, Condition: in.Condition,
 		WithinDays: in.WithinDays, ReplyLabelKey: in.ReplyLabelKey,
@@ -63,7 +68,8 @@ func (f *fakeBranchStore) UpsertBranch(_ context.Context, ws uuid.UUID, in Branc
 	return row, nil
 }
 
-func (f *fakeBranchStore) DeleteBranch(_ context.Context, _, _, stepID uuid.UUID, check GraphCheck) error {
+func (f *fakeBranchStore) DeleteBranch(_ context.Context, _, _, stepID uuid.UUID, expect BranchPrecondition, check GraphCheck) error {
+	f.expects = append(f.expects, expect)
 	prev, had := f.branches[stepID]
 	delete(f.branches, stepID)
 	if err := check(f.steps, f.list()); err != nil {
@@ -171,7 +177,7 @@ func TestGraphEndpointsDoNotReportADatabaseErrorAsNotFound(t *testing.T) {
 	ctx := context.Background()
 	_, gerr := svc.Graph(ctx, f.ws, f.campaign)
 	_, serr := svc.SetBranch(ctx, f.ws, f.campaign, BranchInput{StepID: f.step[0], Condition: "always"})
-	derr := svc.DeleteBranch(ctx, f.ws, f.campaign, f.step[0])
+	derr := svc.DeleteBranch(ctx, f.ws, f.campaign, f.step[0], BranchPrecondition{})
 	for name, err := range map[string]error{"Graph": gerr, "SetBranch": serr, "DeleteBranch": derr} {
 		if !errors.Is(err, boom) || errors.Is(err, ErrCampaignNotFound) {
 			t.Errorf("%s: got %v, want the wrapped database error", name, err)
@@ -335,7 +341,7 @@ func TestDeleteBranchRefusedWhenFallThroughClosesLoop(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("2 -> 1 while 1 ends is acyclic: %v", err)
 	}
-	err := f.svc.DeleteBranch(ctx, f.ws, f.campaign, f.step[0])
+	err := f.svc.DeleteBranch(ctx, f.ws, f.campaign, f.step[0], BranchPrecondition{})
 	if seqgraph.CodeOf(err) != seqgraph.CodeCycle {
 		t.Fatalf("want a cycle refusal, got %v", err)
 	}
@@ -346,7 +352,7 @@ func TestDeleteBranchRefusedWhenFallThroughClosesLoop(t *testing.T) {
 
 func TestDeleteBranchIsIdempotent(t *testing.T) {
 	f := newBranchFixture(t, "running")
-	if err := f.svc.DeleteBranch(context.Background(), f.ws, f.campaign, f.step[0]); err != nil {
+	if err := f.svc.DeleteBranch(context.Background(), f.ws, f.campaign, f.step[0], BranchPrecondition{}); err != nil {
 		t.Fatalf("deleting a router that does not exist is a no-op: %v", err)
 	}
 }
@@ -399,5 +405,37 @@ func TestCheckGraphAcceptsEveryLinearCampaign(t *testing.T) {
 	}
 	if err := checkGraph(nil, nil); err != nil {
 		t.Fatalf("empty campaign refused: %v", err)
+	}
+}
+
+// The precondition is enforced by the store, in the write; the service's job is
+// to hand it over untouched on both writes, and to refuse a malformed branch
+// before any precondition is consulted.
+func TestBranchPreconditionReachesTheStore(t *testing.T) {
+	ctx := context.Background()
+	f := newBranchFixture(t, "running")
+	at := time.Date(2026, 9, 23, 16, 10, 44, 123456000, time.UTC)
+
+	if _, err := f.svc.SetBranch(ctx, f.ws, f.campaign, BranchInput{
+		StepID: f.step[0], Condition: "always", Expect: ExpectNoBranch(),
+	}); err != nil {
+		t.Fatalf("SetBranch: %v", err)
+	}
+	if err := f.svc.DeleteBranch(ctx, f.ws, f.campaign, f.step[0], ExpectBranchAt(at)); err != nil {
+		t.Fatalf("DeleteBranch: %v", err)
+	}
+	want := []BranchPrecondition{ExpectNoBranch(), ExpectBranchAt(at)}
+	if !slices.Equal(f.branches.expects, want) {
+		t.Fatalf("store saw %+v, want %+v", f.branches.expects, want)
+	}
+
+	f = newBranchFixture(t, "running")
+	if _, err := f.svc.SetBranch(ctx, f.ws, f.campaign, BranchInput{
+		StepID: f.step[0], Condition: "bounced", Expect: ExpectBranchAt(at),
+	}); seqgraph.CodeOf(err) != seqgraph.CodeInvalidCondition {
+		t.Fatalf("a malformed branch is refused as malformed, got %v", err)
+	}
+	if len(f.branches.expects) != 0 {
+		t.Fatal("a malformed branch must not reach the store")
 	}
 }

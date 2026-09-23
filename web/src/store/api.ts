@@ -1017,6 +1017,9 @@ const injectedRtkApi = api.injectEndpoints({
       query: (queryArg) => ({
         url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/branch`,
         method: "DELETE",
+        params: {
+          expected_updated_at: queryArg.expectedUpdatedAt,
+        },
       }),
     }),
     launchCampaign: build.mutation<
@@ -2547,6 +2550,8 @@ export type DeleteStepBranchApiResponse = unknown;
 export type DeleteStepBranchApiArg = {
   id: string;
   stepId: string;
+  /** The branch's updated_at exactly as this API returned it (URL-encoded). Omit for an unconditional delete. */
+  expectedUpdatedAt?: string;
 };
 export type LaunchCampaignApiResponse =
   /** status 200 Enrollment + queue counts */ {
@@ -4417,6 +4422,23 @@ export type StepRequest = {
   body_text?: string;
   body_html?: string;
 };
+export type StepBranchCondition =
+  "always" | "opened" | "clicked" | "replied" | "not_opened" | "not_replied";
+export type StepBranch = {
+  /** The step this branch routes out of */
+  step_id: string;
+  condition: StepBranchCondition;
+  /** Evaluation window in days after the step's send; null exactly when condition is always */
+  within_days: number | null;
+  /** replied / not_replied only: count only replies classified with this reply label key (always a label that does not stop the sequence) */
+  reply_label_key: string | null;
+  /** Where a true condition (or always) goes; null ends the path */
+  yes_step_id: string | null;
+  /** Where a false condition goes; null ends the path; always null for always */
+  no_step_id: string | null;
+  /** When the branch last changed, at microsecond precision. Also its concurrency token - send it back verbatim as expected_updated_at (re-formatting through a millisecond clock such as a JS Date loses digits and never matches). Advances on every change, including an exit nulled because its target step was deleted. */
+  updated_at: string;
+};
 export type BranchValidationError = {
   /** Human-readable message */
   error: string;
@@ -4429,9 +4451,12 @@ export type BranchValidationError = {
     | "no_exit_not_allowed"
     | "unknown_step"
     | "unknown_target"
-    | "cycle";
+    | "cycle"
+    | "branch_changed";
   /** code cycle only: the steps on the loop, in path order */
   step_ids?: string[];
+  /** code branch_changed only, and always present then: the step's branch as it is now, or null if it has none */
+  current?: StepBranch | null;
 };
 export type StepVariant = {
   id: string;
@@ -4459,22 +4484,6 @@ export type ReorderStepsRequest = {
   /** the FULL ordered list of the campaign's step ids, in the desired order */
   step_ids: string[];
 };
-export type StepBranchCondition =
-  "always" | "opened" | "clicked" | "replied" | "not_opened" | "not_replied";
-export type StepBranch = {
-  /** The step this branch routes out of */
-  step_id: string;
-  condition: StepBranchCondition;
-  /** Evaluation window in days after the step's send; null exactly when condition is always */
-  within_days: number | null;
-  /** replied / not_replied only: count only replies classified with this reply label key (always a label that does not stop the sequence) */
-  reply_label_key: string | null;
-  /** Where a true condition (or always) goes; null ends the path */
-  yes_step_id: string | null;
-  /** Where a false condition goes; null ends the path; always null for always */
-  no_step_id: string | null;
-  updated_at: string;
-};
 export type CampaignGraphNode = {
   step_id: string;
   step_order: number;
@@ -4499,6 +4508,8 @@ export type StepBranchRequest = {
   yes_step_id?: string | null;
   /** As yes_step_id; must be null or absent for always */
   no_step_id?: string | null;
+  /** Optional precondition. Absent - no check (last writer wins). null - apply only if the step has no branch. A timestamp - apply only if the branch's updated_at is still exactly this (the StepBranch.updated_at value verbatim). A failed check is 409 code branch_changed. */
+  expected_updated_at?: string | null;
 };
 export type CampaignPreflightCheck = {
   /** `personalization_tokens` FAILS (does not warn) when a step contains a `{{...}}` placeholder nothing will substitute, which is harsher than the neighbouring content checks on purpose: an empty body is visible the moment an operator looks at it, whereas a bad token produces an email that looks fine in the editor and arrives reading "Hi {{firstname}}" or "Hi ,". A token nothing resolves is always a typo or a since-archived field, never an intent. */
