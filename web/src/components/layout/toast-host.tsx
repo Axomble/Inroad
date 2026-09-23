@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { Link } from '@tanstack/react-router'
 import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -52,17 +52,16 @@ export function ToastHost() {
 function ToastRow({ toast }: { toast: Toast }) {
   const dispatch = useAppDispatch()
   const Icon = TONE_ICON[toast.tone]
-  // Read the id through a ref so the effect depends only on the id itself:
-  // re-running it on a re-render would restart the countdown every time the
-  // stack above this toast changed.
-  const dismiss = useRef(() => dispatch(dismissToast(toast.id)))
-  dismiss.current = () => dispatch(dismissToast(toast.id))
+  const { id, tone } = toast
 
+  // Every dependency is stable for this row's lifetime — the row is keyed by
+  // `id`, and `dispatch` never changes — so a re-render (the stack above this
+  // toast changing) never restarts the countdown.
   useEffect(() => {
-    if (toast.tone === 'error') return
-    const timer = setTimeout(() => dismiss.current(), DISMISS_AFTER_MS)
+    if (tone === 'error') return
+    const timer = setTimeout(() => dispatch(dismissToast(id)), DISMISS_AFTER_MS)
     return () => clearTimeout(timer)
-  }, [toast.tone])
+  }, [tone, id, dispatch])
 
   return (
     <div

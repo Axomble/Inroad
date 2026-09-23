@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from 'react'
+import { useEffect, useEffectEvent, useReducer } from 'react'
 import { useStore } from 'react-redux'
 import type { RootState } from '@/store'
 import { useAppDispatch, useAppSelector } from '@/store/hooks'
@@ -32,24 +32,19 @@ export function useRealtime(): RealtimeState {
 
   const [state, act] = useReducer(realtimeReducer, initialRealtimeState)
 
-  // Read through refs inside the socket callbacks: the client outlives any one
-  // render, and closing over the rendered values would pin it to the first one.
-  const lastSeqRef = useRef(0)
-  const userIdRef = useRef(userId)
-  userIdRef.current = userId
-  lastSeqRef.current = state.lastSeq
-
-  const handleEnvelope = useCallback(
-    (envelope: RealtimeEnvelope) => {
-      // Order matters: the seq must advance even for an echo we drop, or the
-      // next reconnect asks the server to replay a frame we deliberately
-      // ignored and the gap check trips on our own decision.
-      act({ kind: 'frame', envelope })
-      if (isSelfEcho(envelope, userIdRef.current)) return
-      applyEnvelopeToCache(envelope, dispatch, store.getState())
-    },
-    [dispatch, store],
-  )
+  // Effect events, not plain closures: the client outlives any one render, and
+  // closing over the rendered values would pin it to the first one. These always
+  // see the latest render's `lastSeq` and `userId` without being dependencies —
+  // a new seq or user must not tear the socket down.
+  const readLastSeq = useEffectEvent(() => state.lastSeq)
+  const handleEnvelope = useEffectEvent((envelope: RealtimeEnvelope) => {
+    // Order matters: the seq must advance even for an echo we drop, or the
+    // next reconnect asks the server to replay a frame we deliberately
+    // ignored and the gap check trips on our own decision.
+    act({ kind: 'frame', envelope })
+    if (isSelfEcho(envelope, userId)) return
+    applyEnvelopeToCache(envelope, dispatch, store.getState())
+  })
 
   useEffect(() => {
     if (!token || !workspaceId) {
@@ -59,9 +54,9 @@ export function useRealtime(): RealtimeState {
     act({ kind: 'connecting' })
     const client = new RealtimeClient({
       token,
-      lastSeq: () => lastSeqRef.current,
+      lastSeq: () => readLastSeq(),
       onOpen: () => act({ kind: 'open' }),
-      onEnvelope: handleEnvelope,
+      onEnvelope: (envelope) => handleEnvelope(envelope),
       onClose: () => act({ kind: 'closed' }),
       onFatal: (message) => act({ kind: 'failed', error: message }),
     })
@@ -70,7 +65,7 @@ export function useRealtime(): RealtimeState {
     // is a new socket, not a resubscribe. Token loss (useAuthGuard's trigger) is
     // the disconnect.
     return () => client.stop()
-  }, [token, workspaceId, handleEnvelope])
+  }, [token, workspaceId])
 
   return state
 }

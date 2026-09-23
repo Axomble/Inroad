@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -78,7 +78,7 @@ export function WarmupSettingsForm({
   const {
     register,
     handleSubmit,
-    watch,
+    control,
     formState: { errors },
   } = useForm<WarmupSettingsValues>({
     resolver: zodResolver(warmupSettingsSchema),
@@ -95,7 +95,7 @@ export function WarmupSettingsForm({
 
   // Live echo of the reply-rate decimal as a percentage so the 0–1 field reads
   // clearly ("0.3 = 30% of sends are replies").
-  const replyRate = watch('reply_rate')
+  const replyRate = useWatch({ control, name: 'reply_rate' })
   const replyPct = Number.isFinite(Number(replyRate))
     ? `${Math.round(Number(replyRate) * 100)}%`
     : '—'

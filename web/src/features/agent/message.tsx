@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useEffect, useState } from 'react'
+import { lazy, memo, Suspense, useState } from 'react'
 import { Check, ChevronDown, ChevronRight, Copy, Info, Wrench } from 'lucide-react'
 import { formatTime } from '@/lib/datetime'
 import { cn } from '@/lib/utils'
@@ -104,9 +104,13 @@ function ToolRow({ part, approval }: { part: PartView; approval?: AgentApproval 
 
 function ToolSteps({ parts, streaming, hasText, approvalsByCall }: { parts: PartView[]; streaming: boolean; hasText: boolean; approvalsByCall: ReadonlyMap<string, AgentApproval> }) {
   const [open, setOpen] = useState(streaming && !hasText)
-  useEffect(() => {
+  // Collapse the steps once the answer's text starts arriving. Adjusted during
+  // render (tracking the last-seen `hasText`) rather than in an effect.
+  const [sawText, setSawText] = useState(hasText)
+  if (sawText !== hasText) {
+    setSawText(hasText)
     if (hasText) setOpen(false)
-  }, [hasText])
+  }
   if (parts.length === 0) return null
   return (
     <div className="mb-3 overflow-hidden rounded-lg border border-border bg-surface">

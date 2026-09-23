@@ -45,9 +45,8 @@ export function useListKeyboardNav({
 
   // A shrinking list (a filter narrowed it) must not leave the cursor pointing
   // past the end, which would make Enter a no-op with a highlight still shown.
-  useEffect(() => {
-    setActiveIndex((current) => (current >= count ? count - 1 : current))
-  }, [count])
+  // Clamped during render so no frame ever commits with the stale index.
+  if (activeIndex >= count) setActiveIndex(count - 1)
 
   const move = useCallback(
     (delta: number) => {

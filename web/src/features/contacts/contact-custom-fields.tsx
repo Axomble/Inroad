@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -34,21 +34,17 @@ export function ContactCustomFields({ contactId }: { contactId: string }) {
   const { data, isLoading, isError, refetch } = useGetContactCustomFieldsQuery({ id: contactId })
   const [saveFields, { isLoading: saving }] = useSetContactCustomFieldsMutation()
   const [notice, setNotice] = useState<Notice | null>(null)
-  const [draft, setDraft] = useState<Record<string, string> | null>(null)
+  // The draft remembers the server response it was edited from. It is only
+  // honoured while that response is still current, so a changed response re-seeds
+  // the form — an edit elsewhere (or a definition being archived) is reflected
+  // rather than overwritten by a stale form. Keying on the fetched rows' identity
+  // rather than on `isLoading` means a background refetch that changes nothing
+  // (RTK Query keeps the same reference) leaves in-progress typing alone.
+  const [draft, setDraft] = useState<{ source: CustomFieldValue[]; values: Record<string, string> } | null>(null)
 
   const rows = data ?? []
   const editable = rows.filter((r) => r.def !== null && r.def !== undefined)
   const orphans = rows.filter((r) => r.def === null || r.def === undefined)
-
-  // The draft is seeded from the server response and re-seeded whenever it
-  // changes, so an edit elsewhere (or a definition being archived) is reflected
-  // rather than overwritten by a stale form. Keying on the fetched rows rather
-  // than on `isLoading` means a background refetch that changes nothing leaves
-  // in-progress typing alone.
-  useEffect(() => {
-    if (!data) return
-    setDraft(Object.fromEntries(data.map((row) => [row.key, row.value])))
-  }, [data])
 
   if (isLoading) return <LoadingFields />
   if (isError) {
@@ -70,7 +66,10 @@ export function ContactCustomFields({ contactId }: { contactId: string }) {
     )
   }
 
-  const values = draft ?? {}
+  const values =
+    draft !== null && draft.source === rows
+      ? draft.values
+      : Object.fromEntries(rows.map((row) => [row.key, row.value]))
 
   async function onSubmit() {
     // Only LIVE keys are submitted: the API refuses a write to an archived or
@@ -101,7 +100,7 @@ export function ContactCustomFields({ contactId }: { contactId: string }) {
             key={row.key}
             row={row}
             value={values[row.key] ?? ''}
-            onChange={(next) => setDraft({ ...values, [row.key]: next })}
+            onChange={(next) => setDraft({ source: rows, values: { ...values, [row.key]: next } })}
           />
         ))}
 

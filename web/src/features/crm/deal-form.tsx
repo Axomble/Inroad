@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { crmErrorMessage } from './error-copy'
 import { QueryErrorBanner } from '@/components/shared/record-page'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -45,12 +45,13 @@ export function DealForm({ companyId = '', onDone }: { companyId?: string; onDon
   const amountId = useId()
   const currencyId = useId()
   const closeId = useId()
-  const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<DealValues>({
+  const { register, handleSubmit, control, setValue, formState: { errors } } = useForm<DealValues>({
     resolver: zodResolver(dealSchema),
     defaultValues: { currency: 'USD', company_id: companyId, amount: '', close_date: '', pipeline_id: '', stage_id: '' },
   })
   const pipelines = pipelinesQuery.data?.items ?? []
-  const selectedPipeline = pipelines.find((pipeline) => pipeline.id === watch('pipeline_id'))
+  const selectedPipelineId = useWatch({ control, name: 'pipeline_id' })
+  const selectedPipeline = pipelines.find((pipeline) => pipeline.id === selectedPipelineId)
 
   const submit = handleSubmit(async (values) => {
     const result = await create({

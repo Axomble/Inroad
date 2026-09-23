@@ -102,6 +102,9 @@ const SORTS: readonly SortOption<Mailbox>[] = [
   { id: 'provider', label: 'Provider', compare: byText((m) => m.provider) },
 ]
 
+/** Module scope for the same reason as SORTS: the list memo keys off its identity. */
+const searchFields = (m: Mailbox) => [m.email, m.display_name, m.provider, m.smtp_host]
+
 export function MailboxesPage() {
   const [showConnect, setShowConnect] = useState(false)
   // Track which provider's start failed so the banner shows provider-correct
@@ -140,14 +143,16 @@ export function MailboxesPage() {
 
   const controls = useListControls({
     items: mailboxes,
-    searchFields: (m) => [m.email, m.display_name, m.provider, m.smtp_host],
+    searchFields,
     sorts: SORTS,
   })
 
   // Grouping never drops a mailbox, so the flat row count keyboard nav walks is
   // still the filtered list's length; only the visual order changes.
   const groups = groupMailboxesByDomain(controls.items, domains ?? [])
-  const nav = useListKeyboardNav({ count: controls.items.length })
+  // Destructured, not held as `nav`: the ref inside would make every `nav.*` read
+  // in render look like a ref read to the React Compiler lint.
+  const { containerRef, isActive, onRowHover } = useListKeyboardNav({ count: controls.items.length })
 
   const count = (s: string) => mailboxes.filter((m) => m.status === s).length
   const isEmpty = mailboxes.length === 0
@@ -317,7 +322,7 @@ export function MailboxesPage() {
             <ListHeaderCell className="w-8" aria-label="Actions" />
           </ListHeader>
 
-          <PageBody ref={nav.containerRef}>
+          <PageBody ref={containerRef}>
             {controls.items.length === 0 ? (
               <EmptyBlock
                 title="No mailboxes match this search"
@@ -343,8 +348,8 @@ export function MailboxesPage() {
                             warmup={warmupByMailbox.get(m.id ?? '')}
                             poolIdle={poolIdle}
                             index={index}
-                            active={nav.isActive(index)}
-                            onHover={nav.onRowHover}
+                            active={isActive(index)}
+                            onHover={onRowHover}
                           />
                         )
                       })}

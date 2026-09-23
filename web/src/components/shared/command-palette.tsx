@@ -63,11 +63,6 @@ export function CommandPalette({ onClose, onOpenAgent = noop }: { onClose: () =>
     )
   }, [query])
 
-  // A narrowed list must not leave the cursor pointing past the end.
-  useEffect(() => {
-    setActiveIndex(0)
-  }, [query])
-
   const run = (command: Command | undefined) => {
     if (!command) return
     if (command.id === 'assistant') onOpenAgent()
@@ -107,7 +102,12 @@ export function CommandPalette({ onClose, onOpenAgent = noop }: { onClose: () =>
           ref={inputRef}
           type="search"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value)
+            // Reset alongside the edit (not in an effect): a narrowed list must
+            // not leave the cursor pointing past the end.
+            setActiveIndex(0)
+          }}
           placeholder="Go to…"
           aria-label="Search commands"
           className="h-12 w-full border-b border-border bg-transparent px-4 text-sm text-foreground outline-none placeholder:text-faint"

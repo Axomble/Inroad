@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Archive, Check, MessageSquarePlus, Pencil, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -49,13 +49,17 @@ function HistoryRow({
   onError: (message: string) => void
 }) {
   const [editing, setEditing] = useState(false)
-  const [title, setTitle] = useState(thread.title || 'New conversation')
+  // The rename draft. Only shown while editing, and seeded from the live title
+  // when editing starts — so a title that changed in the meantime is what the
+  // input opens with, and a change while editing doesn't clobber the typing.
+  const [title, setTitle] = useState('')
   const [rename] = useRenameAgentThreadMutation()
   const [remove] = useDeleteAgentThreadMutation()
 
-  useEffect(() => {
-    if (!editing) setTitle(thread.title || 'New conversation')
-  }, [editing, thread.title])
+  const startEditing = () => {
+    setTitle(thread.title || 'New conversation')
+    setEditing(true)
+  }
 
   // A rename that fails is silently undone by the tag invalidation that
   // refetches the list, so the failure has to be reported or the title just
@@ -92,7 +96,6 @@ function HistoryRow({
           onKeyDown={(event) => {
             if (event.key === 'Escape') {
               event.stopPropagation()
-              setTitle(thread.title || 'New conversation')
               setEditing(false)
             }
             if (event.key === 'Enter' && title.trim()) void commitRename()
@@ -104,10 +107,7 @@ function HistoryRow({
         <button
           type="button"
           aria-label="Cancel rename"
-          onClick={() => {
-            setTitle(thread.title || 'New conversation')
-            setEditing(false)
-          }}
+          onClick={() => setEditing(false)}
         >
           <X className="size-3.5 text-faint" />
         </button>
@@ -126,7 +126,7 @@ function HistoryRow({
         </span>
       </button>
       <div className="mr-1 flex opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-        <button type="button" className="p-1 text-faint hover:text-foreground" aria-label="Rename thread" onClick={() => setEditing(true)}>
+        <button type="button" className="p-1 text-faint hover:text-foreground" aria-label="Rename thread" onClick={startEditing}>
           <Pencil className="size-3" />
         </button>
         <button

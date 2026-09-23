@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import { Copy, Plus, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MINUTES_PER_DAY } from './schedule-time'
@@ -73,48 +73,45 @@ export function WeekScheduleCalendar({
 }) {
   const [drag, setDrag] = useState<DragState | null>(null)
 
-  // Refs so the window-level move/up listeners read the freshest state without
-  // re-subscribing on every pointer move (which would drop the gesture).
-  const weekRef = useRef(week)
-  weekRef.current = week
-  const changeRef = useRef(onChange)
-  changeRef.current = onChange
-
   const setDayBlocks = (day: number, blocks: Block[]) => {
-    changeRef.current(weekRef.current.map((d, i) => (i === day ? blocks : d)))
+    onChange(week.map((d, i) => (i === day ? blocks : d)))
   }
   const setBlock = (day: number, index: number, block: Block) => {
-    setDayBlocks(day, (weekRef.current[day] ?? []).map((b, i) => (i === index ? block : b)))
+    setDayBlocks(day, (week[day] ?? []).map((b, i) => (i === index ? block : b)))
   }
+
+  // Effect events so the window-level move/up listeners read the freshest
+  // `week` and `onChange` without re-subscribing on every pointer move (which
+  // would drop the gesture).
+  const onGestureMove = useEffectEvent((gesture: DragState, event: PointerEvent) => {
+    if (gesture.mode === 'draw') {
+      const minute = clampMinute(((event.clientY - gesture.rectTop) / gesture.rectHeight) * MINUTES_PER_DAY)
+      setBlock(gesture.day, gesture.index, drawBlock(gesture.anchorMinute, minute))
+      return
+    }
+    const deltaMinutes = ((event.clientY - gesture.startY) / gesture.rectHeight) * MINUTES_PER_DAY
+    if (gesture.mode === 'move') setBlock(gesture.day, gesture.index, moveBlock(gesture.original, deltaMinutes))
+    else if (gesture.mode === 'start') setBlock(gesture.day, gesture.index, resizeStart(gesture.original, deltaMinutes))
+    else setBlock(gesture.day, gesture.index, resizeEnd(gesture.original, deltaMinutes))
+  })
+
+  const onGestureEnd = useEffectEvent((gesture: DragState) => {
+    let blocks = week[gesture.day] ?? []
+    if (gesture.mode === 'draw') {
+      // A flick is almost always a mis-click; grow it rather than discard the
+      // gesture. Merging happens on release, not during — a block briefly
+      // overlapping a neighbour mid-drag must not eat it irreversibly.
+      blocks = blocks.map((b, i) => (i === gesture.index ? growToMinimum(b) : b))
+    }
+    setDayBlocks(gesture.day, mergeBlocks(blocks))
+    setDrag(null)
+  })
 
   useEffect(() => {
     if (!drag) return
 
-    const yToMinute = (clientY: number) =>
-      clampMinute(((clientY - drag.rectTop) / drag.rectHeight) * MINUTES_PER_DAY)
-
-    const onMove = (event: PointerEvent) => {
-      if (drag.mode === 'draw') {
-        setBlock(drag.day, drag.index, drawBlock(drag.anchorMinute, yToMinute(event.clientY)))
-        return
-      }
-      const deltaMinutes = ((event.clientY - drag.startY) / drag.rectHeight) * MINUTES_PER_DAY
-      if (drag.mode === 'move') setBlock(drag.day, drag.index, moveBlock(drag.original, deltaMinutes))
-      else if (drag.mode === 'start') setBlock(drag.day, drag.index, resizeStart(drag.original, deltaMinutes))
-      else setBlock(drag.day, drag.index, resizeEnd(drag.original, deltaMinutes))
-    }
-
-    const onUp = () => {
-      let blocks = weekRef.current[drag.day] ?? []
-      if (drag.mode === 'draw') {
-        // A flick is almost always a mis-click; grow it rather than discard the
-        // gesture. Merging happens on release, not during — a block briefly
-        // overlapping a neighbour mid-drag must not eat it irreversibly.
-        blocks = blocks.map((b, i) => (i === drag.index ? growToMinimum(b) : b))
-      }
-      setDayBlocks(drag.day, mergeBlocks(blocks))
-      setDrag(null)
-    }
+    const onMove = (event: PointerEvent) => onGestureMove(drag, event)
+    const onUp = () => onGestureEnd(drag)
 
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
@@ -130,8 +127,7 @@ export function WeekScheduleCalendar({
       document.body.style.userSelect = ''
     }
     // `drag` is the whole dependency: the listeners close over the gesture that
-    // started, and setBlock/setDayBlocks read live state through refs.
-    // oxlint-disable-next-line exhaustive-deps -- see above; re-subscribing per move would drop the gesture
+    // started, and the effect events read live props.
   }, [drag])
 
   const beginBlockDrag = (event: React.PointerEvent, day: number, index: number, mode: DragMode) => {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { EmptyBlock, SectionBar } from '@/components/layout/page'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -28,6 +28,17 @@ function formatRepliedAt(iso: string | null): string {
 export function CampaignEnrollmentsList({ campaignId }: { campaignId: string }) {
   const [offset, setOffset] = useState(0)
   const pageSize = 50
+
+  // Reset to the first page when the selected campaign changes (the parent
+  // reuses this component's slot rather than remounting per campaign). Adjusted
+  // during render, before the query reads `offset`, so the new campaign is never
+  // requested at the previous campaign's page.
+  const [pagedCampaignId, setPagedCampaignId] = useState(campaignId)
+  if (pagedCampaignId !== campaignId) {
+    setPagedCampaignId(campaignId)
+    setOffset(0)
+  }
+
   // Look-ahead: request one extra row so we can distinguish "exactly a full
   // page" from "there's a next page" without a separate count endpoint (mirrors
   // the contacts list). The extra row is trimmed off before render.
@@ -43,12 +54,6 @@ export function CampaignEnrollmentsList({ campaignId }: { campaignId: string }) 
   const fetched = data ?? []
   const hasMore = fetched.length > pageSize
   const enrollments = hasMore ? fetched.slice(0, pageSize) : fetched
-
-  // Reset to the first page when the selected campaign changes (the parent
-  // reuses this component's slot rather than remounting per campaign).
-  useEffect(() => {
-    setOffset(0)
-  }, [campaignId])
 
   return (
     <div className="border-b border-border bg-surface/40">

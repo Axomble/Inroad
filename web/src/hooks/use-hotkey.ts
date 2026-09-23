@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useEffectEvent } from 'react'
 
 /** A keystroke to match, normalised so callers don't repeat modifier plumbing. */
 export interface Hotkey {
@@ -46,17 +46,17 @@ function matches(e: KeyboardEvent, hotkey: Hotkey): boolean {
  * Bind a document-level keyboard shortcut for as long as the component is
  * mounted.
  *
- * The handler is held in a ref so an inline arrow function doesn't detach and
- * re-attach the listener on every render — callers get to pass `() => ...`
- * without wrapping it in `useCallback`, which is the mistake this hook exists
- * to make impossible.
+ * The handler is wrapped in `useEffectEvent` so an inline arrow function
+ * doesn't detach and re-attach the listener on every render — callers get to
+ * pass `() => ...` without wrapping it in `useCallback`, which is the mistake
+ * this hook exists to make impossible — while a keypress still runs the latest
+ * render's handler.
  *
  * Pass `enabled: false` to bind nothing (e.g. a shortcut that only applies
  * while a panel is open) rather than conditionally calling the hook.
  */
 export function useHotkey(hotkey: Hotkey, handler: (e: KeyboardEvent) => void, enabled = true): void {
-  const handlerRef = useRef(handler)
-  handlerRef.current = handler
+  const onHotkey = useEffectEvent(handler)
 
   const { key, mod, shift, whileTyping } = hotkey
 
@@ -67,7 +67,7 @@ export function useHotkey(hotkey: Hotkey, handler: (e: KeyboardEvent) => void, e
       if (!whileTyping && isTypingTarget(e.target)) return
       if (!matches(e, { key, mod, shift })) return
       e.preventDefault()
-      handlerRef.current(e)
+      onHotkey(e)
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)

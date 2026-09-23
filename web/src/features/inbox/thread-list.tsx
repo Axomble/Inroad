@@ -42,7 +42,8 @@ export function ThreadList({
   /** A mailbox's display label for its id, so a row still says which mailbox
    * it came from even in the "All mail" scope. */
   mailboxLabel: (mailboxId: string) => string
-  nav: ListKeyboardNav
+  // Only the row-facing half of the nav: the container ref stays with the page.
+  nav: Pick<ListKeyboardNav, 'isActive' | 'onRowHover'>
   onOpen: (thread: InboxThreadSummary) => void
   onToggleRead: (thread: InboxThreadSummary) => void
   /** The thread open in the reader pane, highlighted as the current one. */

@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
@@ -94,7 +94,7 @@ export function ReplyLabelDialog({
   const {
     register,
     handleSubmit,
-    watch,
+    control,
     setValue,
     setError,
     clearErrors,
@@ -122,7 +122,7 @@ export function ReplyLabelDialog({
         },
   })
 
-  const color = watch('color')
+  const color = useWatch({ control, name: 'color' })
 
   const submit = handleSubmit(async (values) => {
     clearErrors('root')

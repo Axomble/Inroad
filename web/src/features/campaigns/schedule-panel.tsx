@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Clock, Plus, X, LayoutGrid, ListOrdered } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -54,19 +54,39 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
    */
   const [mode, setMode] = useState<'board' | 'times'>('board')
 
+  /**
+   * The calendar's own state, NOT derived from `week`.
+   *
+   * It cannot be: `DraftWeek` holds "HH:MM" strings, and a day ending at 1440
+   * (exclusive midnight) has no such representation — minutesToTime clamps it
+   * to "23:59" and timeToMinutes rejects hour 24. Round-tripping through the
+   * draft would silently shorten every full day by a minute, on load AND on
+   * every save.
+   *
+   * So each editor owns its own shape and the ACTIVE one is authoritative:
+   * `blocks` while the calendar shows, `week` while the inputs do. Switching
+   * mode converts once, in that direction only (see switchMode), which is the
+   * one place precision can be lost — and only into the editor that genuinely
+   * cannot express it.
+   */
+  const [blocks, setBlocks] = useState<BlockWeek>(emptyWeek)
+
   // Seed the editor from the server once it arrives, and re-seed after a save so
   // the form reflects what was actually persisted. Guarded on `dirty` so a
-  // background refetch can't discard edits in progress.
-  useEffect(() => {
-    if (!data || dirty) return
+  // background refetch can't discard edits in progress. Adjusted during render
+  // (remembering which response was seeded; a save forgets it) rather than in an
+  // effect, so the editor never paints a frame of the previous values.
+  const [seededFrom, setSeededFrom] = useState<CampaignSchedule | null>(null)
+  if (data && !dirty && seededFrom !== data) {
+    setSeededFrom(data)
     setTimezone(data.timezone)
     setWeek(toDraft(data.days))
     setBlocks(toBlockWeek(data.days))
     setDailyLimit(dailyLimitToDraft(data.daily_limit))
     setMaxNewLeads(maxNewLeadsToDraft(data.max_new_leads_per_day))
-  }, [data, dirty])
+  }
 
-  const zones = useMemo(supportedTimezones, [])
+  const zones = useMemo(() => supportedTimezones(), [])
 
   function edit(next: DraftWeek) {
     setWeek(next)
@@ -99,23 +119,6 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
 
   /** The time inputs show only when the operator asks for them. */
   const showTimeInputs = mode === 'times'
-
-  /**
-   * The calendar's own state, NOT derived from `week`.
-   *
-   * It cannot be: `DraftWeek` holds "HH:MM" strings, and a day ending at 1440
-   * (exclusive midnight) has no such representation — minutesToTime clamps it
-   * to "23:59" and timeToMinutes rejects hour 24. Round-tripping through the
-   * draft would silently shorten every full day by a minute, on load AND on
-   * every save.
-   *
-   * So each editor owns its own shape and the ACTIVE one is authoritative:
-   * `blocks` while the calendar shows, `week` while the inputs do. Switching
-   * mode converts once, in that direction only (see switchMode), which is the
-   * one place precision can be lost — and only into the editor that genuinely
-   * cannot express it.
-   */
-  const [blocks, setBlocks] = useState<BlockWeek>(emptyWeek)
 
   function onBlocksChange(next: BlockWeek) {
     setBlocks(next)
@@ -176,6 +179,9 @@ export function SchedulePanel({ campaignId }: { campaignId: string }) {
         },
       }).unwrap()
       setDirty(false)
+      // Forget the seeded response so the editor re-seeds from the server even
+      // when the refetch hasn't replaced `data` yet — exactly as before.
+      setSeededFrom(null)
       setProblem(null)
     } catch {
       // The rejected promise is surfaced through `saveError` below; swallowing it
