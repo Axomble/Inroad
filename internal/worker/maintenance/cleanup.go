@@ -58,14 +58,49 @@ type Cleaner interface {
 	PurgeFleetDecisions(ctx context.Context) (deleted int64, err error)
 }
 
+// AuditPurger is the audit-log retention capability. Separate from Cleaner,
+// and consumed only when retention is configured, because it is the one purge
+// here with NO default window: how long a security log is kept is a
+// Privacy/Legal decision (INROAD_AUDIT_RETENTION_DAYS, unset = keep forever),
+// so a deployment that has not made it must never delete an audit row.
+type AuditPurger interface {
+	PurgeAuditEvents(ctx context.Context, retentionDays int) (deleted int64, err error)
+}
+
+// CleanupOption configures an optional purge.
+type CleanupOption func(*cleanupConfig)
+
+type cleanupConfig struct {
+	audit           AuditPurger
+	auditRetainDays int
+}
+
+// WithAuditRetention adds the audit-log purge, deleting rows older than
+// retentionDays. retentionDays <= 0 (retention disabled) or a nil purger adds
+// nothing, so the composition root can pass the configured value through
+// unconditionally.
+func WithAuditRetention(p AuditPurger, retentionDays int) CleanupOption {
+	return func(c *cleanupConfig) {
+		if p == nil || retentionDays <= 0 {
+			return
+		}
+		c.audit, c.auditRetainDays = p, retentionDays
+	}
+}
+
 // CleanupHandler purges, in order: expired security artifacts, expired
 // Idempotency-Key replay-cache rows, warmup evidence past its retention window,
 // dead workers with their mailbox assignments, captured dead letters past
 // theirs, expired webhook deliveries, scheduled-job-run ledger rows past theirs,
-// per-worker provider signal windows, and fleet decision-log rows. Returning a
-// database error from any purge lets asynq retry; successful runs log each
-// affected count for observability.
-func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
+// per-worker provider signal windows, fleet decision-log rows, and — only when
+// WithAuditRetention configured it — audit events past their retention.
+// Returning a database error from any purge lets asynq retry; successful runs
+// log each affected count for observability.
+func CleanupHandler(core Cleaner, opts ...CleanupOption) func(context.Context, *asynq.Task) error {
+	var cfg cleanupConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	return func(ctx context.Context, _ *asynq.Task) error {
 		deleted, err := core.CleanupExpired(ctx)
 		if err != nil {
@@ -120,6 +155,15 @@ func CleanupHandler(core Cleaner) func(context.Context, *asynq.Task) error {
 			return err
 		}
 		slog.InfoContext(ctx, "expired fleet decisions purged", "rows", decisionsDeleted)
+
+		if cfg.audit == nil {
+			return nil
+		}
+		auditDeleted, err := cfg.audit.PurgeAuditEvents(ctx, cfg.auditRetainDays)
+		if err != nil {
+			return err
+		}
+		slog.InfoContext(ctx, "audit events past retention purged", "rows", auditDeleted, "retention_days", cfg.auditRetainDays)
 		return nil
 	}
 }

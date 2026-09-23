@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/validate"
 )
@@ -31,7 +32,11 @@ func (s *Service) Pause(ctx context.Context, ws, id uuid.UUID) error {
 	if c.Status != string(StatusRunning) {
 		return ErrNotPausable
 	}
-	return s.store.SetStatus(ctx, ws, id, StatusPaused)
+	if err := s.store.SetStatus(ctx, ws, id, StatusPaused); err != nil {
+		return err
+	}
+	s.recordLifecycle(ctx, ws, c, audit.ActionCampaignPaused, nil)
+	return nil
 }
 
 // Resume restarts a paused campaign. Allowed only from paused; anything else
@@ -58,7 +63,11 @@ func (s *Service) Resume(ctx context.Context, ws, id uuid.UUID) error {
 	if c.Status != string(StatusPaused) {
 		return ErrNotResumable
 	}
-	return s.store.SetStatus(ctx, ws, id, StatusRunning)
+	if err := s.store.SetStatus(ctx, ws, id, StatusRunning); err != nil {
+		return err
+	}
+	s.recordLifecycle(ctx, ws, c, audit.ActionCampaignResumed, nil)
+	return nil
 }
 
 // renameInput carries just the field Rename validates, so it can reuse

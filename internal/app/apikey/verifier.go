@@ -125,10 +125,11 @@ func (v *Verifier) Verify(ctx context.Context, r *http.Request) (auth.Principal,
 	v.touch(key.ID) // best-effort last-use stamp; never blocks or fails the request
 
 	return auth.Principal{
-		Kind:        auth.KindAPIKey,
-		WorkspaceID: key.WorkspaceID.String(),
-		UserID:      createdByString(key.CreatedByUserID),
-		Scopes:      key.Scopes,
+		Kind:         auth.KindAPIKey,
+		CredentialID: key.ID.String(),
+		WorkspaceID:  key.WorkspaceID.String(),
+		UserID:       createdByString(key.CreatedByUserID),
+		Scopes:       key.Scopes,
 		// Role is intentionally empty: a machine principal is scope-gated, never
 		// role-gated, so it cannot reach RequireRole-guarded (admin) surfaces.
 	}, true, nil

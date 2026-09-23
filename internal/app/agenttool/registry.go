@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+
+	"github.com/inroad/inroad/internal/platform/audit"
 )
 
 // roleRank mirrors auth.roleRank. It is duplicated as literals rather than
@@ -106,7 +108,11 @@ func (r *Reg) Execute(ctx context.Context, p Principal, name string, args json.R
 			err = fmt.Errorf("agenttool: tool %s panicked: %v", name, rec)
 		}
 	}()
-	return t.Execute(ctx, p, args)
+	// Every audit event the tool causes is attributed to the AGENT, on the
+	// delegating user's authority — never to the user as if they had clicked
+	// it. Set here, the one door every tool call (chat and MCP) goes through,
+	// so no tool can forget it.
+	return t.Execute(audit.WithActor(ctx, p.AuditActor()), p, args)
 }
 
 // validateArgsObject checks the syntactic shape the ExecuteFunc contract

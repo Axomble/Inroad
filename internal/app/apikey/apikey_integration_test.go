@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/dbtest"
 )
@@ -163,7 +164,7 @@ func TestExpiredKeyRejected(t *testing.T) {
 	if _, err := store.Create(context.Background(), CreateParams{
 		WorkspaceID: ws, CreatedBy: uid, Name: "expired", Prefix: prefix, SecretHash: hash,
 		Scopes: []string{auth.ScopeListsRead}, ExpiresAt: &past,
-	}); err != nil {
+	}, audit.New(context.Background(), ws, audit.ActionAPIKeyCreated, auditTarget, "", nil)); err != nil {
 		t.Fatalf("store.Create: %v", err)
 	}
 	if _, ok, err := verifier.Verify(context.Background(), bearer(token, "")); ok || !errors.Is(err, auth.ErrUnauthorized) {

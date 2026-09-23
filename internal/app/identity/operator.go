@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -28,7 +29,7 @@ type operatorStoreIface interface {
 	ListWorkspaces(ctx context.Context) ([]gen.Workspace, error)
 	ListUsers(ctx context.Context) ([]gen.User, error)
 	SetPasswordTx(ctx context.Context, userID uuid.UUID, newHash string) ([]uuid.UUID, error)
-	UpsertMemberRole(ctx context.Context, wsID, userID uuid.UUID, role gen.MemberRole) (gen.WorkspaceMember, error)
+	UpsertMemberRole(ctx context.Context, wsID, userID uuid.UUID, role gen.MemberRole, ev audit.Event) (gen.WorkspaceMember, error)
 	CreateMemberTx(ctx context.Context, wsID uuid.UUID, email, passwordHash string, role gen.MemberRole) (uuid.UUID, error)
 }
 
@@ -105,7 +106,11 @@ func (s *Service) GrantRole(ctx context.Context, email string, workspace uuid.UU
 		}
 		return Membership{}, err
 	}
-	m, err := s.store.UpsertMemberRole(ctx, workspace, user.ID, gen.MemberRole(role))
+	// The operator CLI is the only caller and runs with no principal, so the
+	// actor names the tool. The store adds from_role inside its transaction.
+	ev := audit.New(ctx, workspace, audit.ActionMemberRoleChanged, "user", user.ID.String(), audit.Metadata{"email": user.Email, "to_role": role})
+	ev.Actor = audit.SystemActor("inroadctl")
+	m, err := s.store.UpsertMemberRole(ctx, workspace, user.ID, gen.MemberRole(role), ev)
 	if err != nil {
 		return Membership{}, err
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
 )
@@ -106,7 +107,7 @@ func (s *Service) completeOAuth(
 		return MailboxSafe{}, err
 	}
 
-	return s.store.Create(ctx, gen.CreateMailboxParams{
+	box, err := s.store.Create(ctx, gen.CreateMailboxParams{
 		WorkspaceID:      workspaceID,
 		Provider:         provider,
 		Email:            email,
@@ -119,6 +120,16 @@ func (s *Service) completeOAuth(
 		RampStartCap:       defaultRampStartCap,
 		RampDays:           defaultRampDays,
 	})
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	// The callback is a provider redirect with no session: the signed state
+	// names the workspace only (invariant 10), so WHO started the connect is
+	// not knowable here and the actor says so rather than guessing.
+	ev := mailboxEvent(ctx, workspaceID, audit.ActionMailboxConnected, box)
+	ev.Actor = audit.SystemActor("oauth_callback")
+	audit.Emit(ctx, s.audit, ev)
+	return box, nil
 }
 
 // googleExchanger is the production TokenExchanger: it exchanges the code with

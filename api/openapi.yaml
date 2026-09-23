@@ -3960,6 +3960,79 @@ paths:
         '401': { description: Unauthorized }
         '403': { description: Insufficient role (admin/owner required) }
         '404': { description: No such endpoint in this workspace }
+  /audit-events:
+    get:
+      operationId: listAuditEvents
+      tags: [audit]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        The workspace audit log: security- and governance-relevant actions
+        (sign-ins, membership, api keys, mailboxes, campaign state, exports,
+        settings), newest first. Append-only — nothing in the API can change or
+        delete an entry; the only deletion is the operator-configured retention
+        purge (INROAD_AUDIT_RETENTION_DAYS, off by default).
+
+        OWNER/ADMIN ONLY, session only. No scope grants it, so no api key or
+        OAuth client can read it.
+
+        Keyset-paged. A cursor is bound to the exact filter set it was minted
+        under; changing any filter means starting again from page one.
+      parameters:
+        - name: action
+          in: query
+          required: false
+          description: >-
+            A full action name (`campaign.paused`) or a dotted prefix of one on a
+            segment boundary (`campaign` matches every `campaign.*`, not
+            `campaigns.*`). Lower-case letters, underscores and dots only.
+          schema: { type: string, maxLength: 100 }
+        - name: actor_type
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/AuditActorType' }
+        - name: actor_id
+          in: query
+          required: false
+          description: Exact actor id (a user id, api key id, OAuth client id, agent run id, or system component name).
+          schema: { type: string, maxLength: 200 }
+        - name: actor_user_id
+          in: query
+          required: false
+          description: >-
+            Every event done on this user's authority — directly, through
+            their api keys, or by an agent they delegated to.
+          schema: { type: string, format: uuid }
+        - name: target_type
+          in: query
+          required: false
+          schema: { type: string, maxLength: 50 }
+        - name: target_id
+          in: query
+          required: false
+          schema: { type: string, maxLength: 200 }
+        - name: since
+          in: query
+          required: false
+          description: Inclusive lower bound (RFC3339).
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          required: false
+          description: Exclusive upper bound (RFC3339). Must be after `since`.
+          schema: { type: string, format: date-time }
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageCursor'
+      responses:
+        '200':
+          description: Audit events
+          content: { application/json: { schema: { $ref: '#/components/schemas/AuditEventList' } } }
+        '400':
+          description: >-
+            A malformed filter (bad action prefix, unknown actor_type, bad uuid
+            or timestamp, since not before until, non-positive limit), or a
+            cursor this server did not mint for this filter set.
+        '401': { description: Unauthorized }
+        '403': { description: Insufficient role (admin/owner required) }
   /fleet/workers:
     get:
       operationId: listFleetWorkers
@@ -6703,6 +6776,75 @@ components:
       required: [labels]
       properties:
         labels: { type: array, items: { $ref: '#/components/schemas/ReplyLabel' } }
+    AuditActorType:
+      type: string
+      description: >-
+        Who acted. `user` with a null actor_id is an unauthenticated attempt
+        (a failed sign-in); `system` covers the worker, the operator CLI and
+        OAuth callbacks that carry no user.
+      enum: [user, api_key, oauth_client, agent, system]
+    AuditAction:
+      type: string
+      description: Stable dotted action name. New values may be added; none is ever renamed.
+      enum:
+        - auth.login
+        - auth.login_failed
+        - member.invited
+        - member.invite_revoked
+        - member.joined
+        - member.role_changed
+        - mailbox.connected
+        - mailbox.disconnected
+        - mailbox.paused
+        - mailbox.resumed
+        - campaign.started
+        - campaign.paused
+        - campaign.resumed
+        - apikey.created
+        - apikey.revoked
+        - data.exported
+        - settings.changed
+    AuditEvent:
+      type: object
+      required: [id, action, actor_type, actor_id, actor_user_id, actor_email, target_type, target_id, ip, user_agent, metadata, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        action: { $ref: '#/components/schemas/AuditAction' }
+        actor_type: { $ref: '#/components/schemas/AuditActorType' }
+        actor_id:
+          type: string
+          nullable: true
+          description: The acting principal's id for its type; null for an unauthenticated actor.
+        actor_user_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The human on whose authority the actor acted (the user, a key's creator, an agent's delegating user).
+        actor_email:
+          type: string
+          nullable: true
+          description: actor_user_id's current email; null when there is none or the user was deleted.
+        target_type: { type: string, nullable: true }
+        target_id: { type: string, nullable: true }
+        ip: { type: string, nullable: true, description: 'Client address, when the action came from a request.' }
+        user_agent: { type: string, nullable: true }
+        metadata:
+          type: object
+          description: >-
+            Small, flat, string-valued context (e.g. `name`, `email`, `role`,
+            `from_role`, `to_role`, `prefix`, `scopes`, `reason`). Never a
+            secret, token, password or message body.
+          additionalProperties: { type: string }
+        created_at: { type: string, format: date-time }
+    AuditEventList:
+      type: object
+      required: [events, next_cursor]
+      properties:
+        events: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
+        next_cursor:
+          type: string
+          nullable: true
+          description: Cursor for the next page; null on the last page.
     TaskDeadLetterList:
       type: object
       required: [items]

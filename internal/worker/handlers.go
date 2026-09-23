@@ -86,6 +86,10 @@ type Deps struct {
 	// periodic reconciles in cmd/worker/scheduler.go's sweepRegistrars(); a nil
 	// Metrics (metrics disabled) no-ops throughout.
 	Metrics *metrics.Metrics
+
+	// AuditRetentionDays is INROAD_AUDIT_RETENTION_DAYS: 0 (the default) keeps
+	// audit events forever and registers no audit purge at all.
+	AuditRetentionDays int
 }
 
 // Register attaches this role's execution-plane handlers to the mux. A zero
@@ -127,7 +131,12 @@ func Register(mux *asynq.ServeMux, d Deps) {
 // (docs/security.md invariant 4).
 func registerScheduled(mux *asynq.ServeMux, d Deps, recorder jobrun.Recorder) {
 	if cleaner, ok := d.Core.(maintenance.Cleaner); ok {
-		mux.HandleFunc(queue.TaskMaintenanceCleanup, jobrun.Record(recorder, d.Metrics, jobrun.NameMaintenanceCleanup, maintenance.CleanupHandler(cleaner)))
+		// The audit purge rides the same daily job. A Client without the
+		// capability yields a nil purger, which WithAuditRetention treats as
+		// "no audit purge" — the safe direction for a destructive job.
+		purger, _ := d.Core.(maintenance.AuditPurger)
+		mux.HandleFunc(queue.TaskMaintenanceCleanup, jobrun.Record(recorder, d.Metrics, jobrun.NameMaintenanceCleanup,
+			maintenance.CleanupHandler(cleaner, maintenance.WithAuditRetention(purger, d.AuditRetentionDays))))
 	}
 	// Campaign circuit breaker. Registered by type assertion for the same reason
 	// as the cleaner above: the capability is consumed through a one-method

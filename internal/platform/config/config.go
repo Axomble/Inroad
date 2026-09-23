@@ -207,6 +207,14 @@ type Config struct {
 	// with replica count. Scaling out means setting this false on all but one.
 	RunScheduler bool
 
+	// AuditRetentionDays is how long workspace audit events are kept
+	// (INROAD_AUDIT_RETENTION_DAYS). ZERO — the default — means keep forever:
+	// how long a security log is retained is a Privacy/Legal decision, not one
+	// a default should make on an operator's behalf, and deleting evidence is
+	// the one mistake that cannot be undone. Read by the worker's maintenance
+	// job; a value outside [0, MaxAuditRetentionDays] is a startup error.
+	AuditRetentionDays int
+
 	// WorkerRole is the RAW value of INROAD_WORKER_ROLE. It is parsed by cmd/worker
 	// (worker.ParseRole), not here: platform must not import internal/worker, and
 	// duplicating the valid-value list would give it two sources of truth. Empty
@@ -558,6 +566,7 @@ func Load() (*Config, error) {
 	cfg.DBMinConns = env.intVal("INROAD_DB_MIN_CONNS", DefaultDBMinConns)
 
 	cfg.RunScheduler = env.boolVal("INROAD_RUN_SCHEDULER", true)
+	cfg.AuditRetentionDays = env.intVal("INROAD_AUDIT_RETENTION_DAYS", 0)
 	cfg.WorkerRole = os.Getenv("INROAD_WORKER_ROLE")
 
 	hostname, _ := os.Hostname() // "" on the rare lookup failure; handled below
@@ -690,8 +699,27 @@ func Load() (*Config, error) {
 	if err := poolBudget(cfg.DBMaxConns, cfg.DBMinConns); err != nil {
 		return nil, err
 	}
+	if err := auditRetention(cfg.AuditRetentionDays); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+// MaxAuditRetentionDays is the largest accepted INROAD_AUDIT_RETENTION_DAYS. A
+// century is "forever" by any practical measure; an operator who means forever
+// leaves the setting unset, which is the default.
+const MaxAuditRetentionDays = 36500
+
+// auditRetention rejects a retention window that is not a whole number of days
+// in [0, MaxAuditRetentionDays]. Negative is refused rather than read as
+// "disabled": a sign typo on a setting that deletes evidence must stop the
+// process, not quietly mean something.
+func auditRetention(days int) error {
+	if days < 0 || days > MaxAuditRetentionDays {
+		return fmt.Errorf("INROAD_AUDIT_RETENTION_DAYS must be between 0 (keep forever) and %d, got %d", MaxAuditRetentionDays, days)
+	}
+	return nil
 }
 
 // poolBudget rejects a pgx pool size that cannot work. Separate from the reads

@@ -304,6 +304,21 @@ type ApiKey struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 }
 
+type AuditEvent struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	ActorType   string             `json:"actor_type"`
+	ActorID     string             `json:"actor_id"`
+	ActorUserID pgtype.UUID        `json:"actor_user_id"`
+	Action      string             `json:"action"`
+	TargetType  string             `json:"target_type"`
+	TargetID    string             `json:"target_id"`
+	Ip          *netip.Addr        `json:"ip"`
+	UserAgent   string             `json:"user_agent"`
+	Metadata    []byte             `json:"metadata"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type Campaign struct {
 	ID                  uuid.UUID          `json:"id"`
 	WorkspaceID         uuid.UUID          `json:"workspace_id"`

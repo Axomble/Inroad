@@ -49,7 +49,7 @@ func (v *Verifier) VerifyToken(ctx context.Context, r *http.Request) (auth.Princ
 	if tok.RevokedAt.Valid || !v.now().Before(tok.ExpiresAt.Time) {
 		return auth.Principal{}, time.Time{}, "", false, auth.ErrUnauthorized
 	}
-	return auth.Principal{Kind: auth.KindOAuth, UserID: tok.UserID.String(), WorkspaceID: tok.WorkspaceID.String(), Scopes: tok.Scopes}, tok.ExpiresAt.Time, tok.ClientID, true, nil
+	return auth.Principal{Kind: auth.KindOAuth, UserID: tok.UserID.String(), WorkspaceID: tok.WorkspaceID.String(), Scopes: tok.Scopes, CredentialID: tok.ClientID}, tok.ExpiresAt.Time, tok.ClientID, true, nil
 }
 
 // NewVerifier builds a Verifier over the access-token store seam.

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/notify"
 )
@@ -112,9 +113,9 @@ type storeIface interface {
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
 	IsEmailVerified(ctx context.Context, userID uuid.UUID) (bool, error)
 	ResetPasswordTx(ctx context.Context, rawToken, kind, newHash string) ([]uuid.UUID, error)
-	CreateInvite(ctx context.Context, arg gen.CreateInviteParams) (gen.WorkspaceInvite, error)
+	CreateInvite(ctx context.Context, arg gen.CreateInviteParams, ev audit.Event) (gen.WorkspaceInvite, error)
 	ListPendingInvites(ctx context.Context, wsID uuid.UUID) ([]gen.WorkspaceInvite, error)
-	RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams) error
+	RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams, ev audit.Event) error
 	GetWorkspace(ctx context.Context, id uuid.UUID) (gen.Workspace, error)
 	AcceptInviteTx(ctx context.Context, arg AcceptInviteTxParams) (AcceptInviteTxResult, error)
 }
@@ -144,6 +145,11 @@ type Service struct {
 	// time than an unknown one - defaults to a bare goroutine in production;
 	// tests override it to run inline for determinism.
 	dispatch func(func())
+
+	// audit records the best-effort identity events (sign-in, sign-in
+	// failure, invite accepted). Nil is "audit not wired" — audit.Emit no-ops.
+	// The in-transaction events (invites, role changes) go through the store.
+	audit audit.Recorder
 }
 
 // NewService constructs a Service backed by store, issuing refresh tokens
@@ -167,6 +173,9 @@ func NewService(store storeIface, refreshTTL time.Duration, sender notify.Sender
 
 // Option configures an optional Service collaborator at construction.
 type Option func(*Service)
+
+// WithAudit wires the best-effort audit recorder.
+func WithAudit(r audit.Recorder) Option { return func(s *Service) { s.audit = r } }
 
 // WithGoogleSignIn enables the federated Google sign-in/sign-up flow.
 // stateSecret signs the `state` parameter. Without this option the flow reports
@@ -436,9 +445,11 @@ func (s *Service) Authenticate(ctx context.Context, email, pw string) (uuid.UUID
 	// account an address is.
 	if user.PasswordHash == nil {
 		auth.CheckPassword(dummyHash, pw)
+		s.recordLoginFailed(ctx, user.ID, "no_password")
 		return uuid.Nil, ErrInvalidCredentials
 	}
 	if !auth.CheckPassword(*user.PasswordHash, pw) {
+		s.recordLoginFailed(ctx, user.ID, "bad_password")
 		return uuid.Nil, ErrInvalidCredentials
 	}
 	mems, err := s.memberships(ctx, user.ID)
@@ -446,6 +457,50 @@ func (s *Service) Authenticate(ctx context.Context, email, pw string) (uuid.UUID
 		return uuid.Nil, ErrNoWorkspace
 	}
 	return user.ID, nil
+}
+
+// recordLoginFailed records auth.login_failed for a password attempt against a
+// KNOWN account, in ONE workspace: the most-recently-seen one, which is exactly
+// the workspace a successful sign-in would have activated (StartSessionForUser
+// takes mems[0] of the same ordering), so the failure and the success of the
+// same attempt land side by side. Deliberately not every workspace the account
+// belongs to: the row carries the attempt's IP, user agent, timing and reason,
+// and fanning it out would hand that to the admins of every other tenant the
+// person happens to be a member of. An unknown email records nothing: there is
+// no workspace to put it in.
+//
+// It runs through s.dispatch, off the request path, for the same reason
+// ForgotPassword defers its work: the membership lookup and the writes would
+// otherwise make a wrong password on a real account measurably slower than an
+// unknown email, undoing the constant-time dummy comparison above and turning
+// the audit log into an account-enumeration oracle. The detached context keeps
+// the request's values (client IP, user agent) but not its cancellation, and
+// carries a deadline of its own.
+//
+// The actor is a user with no id: whoever tried is by definition not
+// authenticated. The account attacked is the target.
+func (s *Service) recordLoginFailed(ctx context.Context, userID uuid.UUID, reason string) {
+	if s.audit == nil {
+		return
+	}
+	detached := context.WithoutCancel(ctx)
+	s.dispatch(func() {
+		bg, cancel := context.WithTimeout(detached, 10*time.Second)
+		defer cancel()
+		rows, err := s.store.ListMembersByUser(bg, userID)
+		if err != nil {
+			slog.ErrorContext(bg, "identity: audit login_failed membership lookup", "err", err)
+			return
+		}
+		if len(rows) == 0 {
+			return // no workspace to record into
+		}
+		// rows[0]: ListMembersByUser orders by last_seen desc, created asc —
+		// the same pick StartSessionForUser makes for the active workspace.
+		ev := audit.New(bg, rows[0].WorkspaceID, audit.ActionAuthLoginFailed, "user", userID.String(), audit.Metadata{"reason": reason})
+		ev.Actor = audit.Actor{Type: audit.ActorUser}
+		audit.Emit(bg, s.audit, ev)
+	})
 }
 
 // StartSessionForUser activates the user's most-recently-seen workspace and
@@ -469,6 +524,12 @@ func (s *Service) StartSessionForUser(ctx context.Context, userID uuid.UUID, ua,
 	if err != nil {
 		return Session{}, err
 	}
+	// Every sign-in method (password, 2FA, passkey, email code, Google) mints
+	// its session here, so this one call covers them all. There is no principal
+	// on the context yet, so the actor is set explicitly.
+	ev := audit.New(ctx, active.WorkspaceID, audit.ActionAuthLogin, "user", userID.String(), nil)
+	ev.Actor = audit.UserActor(userID)
+	audit.Emit(ctx, s.audit, ev)
 	return Session{
 		UserID: userID, WorkspaceID: active.WorkspaceID, Role: active.Role, SessionID: sid,
 		RawRefresh: raw, Memberships: mems, Email: user.Email,

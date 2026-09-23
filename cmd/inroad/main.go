@@ -31,6 +31,7 @@ import (
 	"github.com/inroad/inroad/internal/app/agenttool"
 	"github.com/inroad/inroad/internal/app/aisettings"
 	"github.com/inroad/inroad/internal/app/apikey"
+	"github.com/inroad/inroad/internal/app/auditlog"
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/campaign"
 	"github.com/inroad/inroad/internal/app/contact"
@@ -62,6 +63,7 @@ import (
 	"github.com/inroad/inroad/internal/coreapi/inprocess"
 	"github.com/inroad/inroad/internal/coreapi/remote"
 	"github.com/inroad/inroad/internal/platform/ai"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/captcha"
 	"github.com/inroad/inroad/internal/platform/config"
 	"github.com/inroad/inroad/internal/platform/crypto"
@@ -175,6 +177,11 @@ func run() error {
 		return err
 	}
 	identStore := identity.NewStore(pool)
+	// The workspace audit log's best-effort writer, shared by every domain that
+	// records outside its own transaction (security.md invariant 82). The
+	// in-transaction events (api keys, invites, role changes) are written by
+	// those domains' stores through audit.Insert and need no wiring here.
+	auditRecorder := audit.NewPgRecorder(pool)
 	// The store-backed verifier makes access tokens revocable: every request is
 	// validated against the session's live revocation/expiry/token_version. It
 	// is both the auth.Verifier for the protected group AND the cache-buster the
@@ -190,7 +197,8 @@ func run() error {
 			ClientID:     cfg.GoogleSignInClientID,
 			ClientSecret: cfg.GoogleSignInClientSecret,
 			RedirectURL:  cfg.GoogleSignInRedirectURL,
-		}), cfg.JWTSecret))
+		}), cfg.JWTSecret),
+		identity.WithAudit(auditRecorder))
 	// TOTP 2FA. The secret is USER-level, sealed under a server-level HKDF subkey
 	// of the master key (crypto.ServerKeyring) — NOT a per-workspace DEK, since a
 	// user's second factor spans every workspace they belong to. The twofa service
@@ -259,7 +267,8 @@ func run() error {
 		msOAuth, mailbox.NewMicrosoftExchanger(msOAuth),
 		// Announces mailbox.changed on pause/resume/delete, so the console's
 		// mailbox counts move without waiting for the 45s pulse poll.
-		mailbox.WithEvents(realtimeEvents))
+		mailbox.WithEvents(realtimeEvents),
+		mailbox.WithAudit(auditRecorder))
 	mbHandler := mailbox.NewHandler(
 		mailboxSvc,
 		cfg.JWTSecret, cfg.AppBaseURL,
@@ -363,7 +372,10 @@ func run() error {
 	// Custom field definitions are a second narrow seam on the same domain
 	// (workspace-defined typed fields whose values live in contacts.custom_fields).
 	contactFieldStore := contact.NewPgFieldStore(queries)
-	contactSvc := contact.NewService(contactStore, listCheckerAdapter{lists: listSvc}, contactFieldStore)
+	contactSvc := contact.NewService(contactStore, listCheckerAdapter{lists: listSvc}, contactFieldStore,
+		// data.exported is written BEFORE a CSV export streams, and a failed
+		// write refuses the export (fail-closed, invariant 82).
+		contact.WithAudit(auditRecorder))
 	contactHandler := contact.NewHandler(contactSvc)
 	// Sending-domain authentication (SPF/DKIM/DMARC). Built here (not inline at
 	// its mount below) because campaign preflight's domain_auth check also
@@ -488,6 +500,7 @@ func run() error {
 		campaign.WithDomainAuth(domainAuthAdapter{domains: sendingdomainSvc}),
 		// Announces campaign.launched to the workspace's open tabs.
 		campaign.WithEvents(realtimeEvents),
+		campaign.WithAudit(auditRecorder),
 		// The personalization_tokens preflight check needs to know which
 		// {{custom.*}} keys the workspace actually defines; contact owns them.
 		campaign.WithCustomFields(customFieldAdapter{contacts: contactSvc}),
@@ -569,6 +582,7 @@ func run() error {
 		Discoverer:          ai.NewHTTPDiscoverer(cfg.AIAllowPrivateBaseURL, 0),
 		ClassifyHost:        mail.ClassifyHost,
 		AllowPrivateBaseURL: cfg.AIAllowPrivateBaseURL,
+		Audit:               auditRecorder,
 	}))
 	agentStore := agentchat.NewPgStore(pool)
 	if recovered, err := agentStore.RecoverStuckRuns(ctx, "API restarted while the agent was running"); err != nil {
@@ -858,6 +872,11 @@ func run() error {
 		// hanging the per-mailbox decision log there would expose worker ids to
 		// exactly the caller the gate excludes.
 		{pattern: "/api/v1/fleet", handler: fleet.NewHandler(fleetSvc).Routes()},
+		// The workspace audit log viewer. Session-only AND owner/admin-gated
+		// inside Routes(): it shows who did what from which address, the same
+		// class of information as member and api-key management. No scope
+		// exists for it, so no api key or OAuth grant can ever be given it.
+		{pattern: "/api/v1/audit-events", handler: auditlog.NewHandler(auditlog.NewService(auditlog.NewPgStore(pool))).Routes()},
 		// The realtime socket, for the same reason as agentchat above: it acts on
 		// behalf of a human session, so an `inrd_` key or an OAuth client cannot
 		// open one. The workspace it fans out comes from the signed connect ticket,
@@ -910,7 +929,10 @@ func run() error {
 		logger.Warn("web app directory unavailable; API-only mode", "dir", cfg.WebDir)
 	}
 
-	srv := httpx.NewServer(cfg.HTTPAddr, router)
+	// Outermost, so every request — public sign-in routes included — carries
+	// its client IP and user agent for the audit events it records. The same
+	// trusted-proxy resolver the session rows and api-key allowlist use.
+	srv := httpx.NewServer(cfg.HTTPAddr, audit.RequestMiddleware(ipResolver)(router))
 	logger.Info("api listening", "version", version.String(), "addr", cfg.HTTPAddr)
 	if err := httpx.Run(ctx, srv); err != nil {
 		logger.Error("server error", "err", err)

@@ -146,6 +146,8 @@ func TestBothCoreAPIImplementationsCarryEveryOptionalCapability(t *testing.T) {
 					assertsAs[deliverability.Breaker](impl.core)},
 				{"maintenance.Cleaner", "maintenance:cleanup is never registered; nothing is ever purged",
 					assertsAs[maintenance.Cleaner](impl.core)},
+				{"maintenance.AuditPurger", "INROAD_AUDIT_RETENTION_DAYS is silently ignored; audit events are never purged",
+					assertsAs[maintenance.AuditPurger](impl.core)},
 				{"recipientesp.Core", "the recipient-ESP cache is never refreshed; sender matching degrades to unmatched",
 					assertsAs[recipientesp.Core](impl.core)},
 				{"fleet.Rotator", "a mailbox on a provider-blocked worker is never moved off it",

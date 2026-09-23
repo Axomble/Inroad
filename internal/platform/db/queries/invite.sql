@@ -8,7 +8,7 @@ SELECT * FROM workspace_invites WHERE token_hash = $1;
 -- name: ListPendingInvites :many
 SELECT * FROM workspace_invites WHERE workspace_id = $1 AND status = 'pending' ORDER BY created_at DESC;
 
--- name: RevokeInvite :exec
+-- name: RevokeInvite :execrows
 UPDATE workspace_invites SET status = 'revoked'
 WHERE id = $1 AND workspace_id = $2 AND status = 'pending';
 

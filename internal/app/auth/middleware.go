@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/httpx"
 )
 
@@ -37,6 +38,29 @@ type Principal struct {
 	SessionID   string
 	Kind        PrincipalKind
 	Scopes      []string
+	// CredentialID identifies the machine credential a non-session principal
+	// presented: the api key id for KindAPIKey, the OAuth client id for
+	// KindOAuth. Empty for a session. It exists so the audit log can say WHICH
+	// key acted, not merely whose; it authorizes nothing.
+	CredentialID string
+}
+
+// AuditActor maps the principal to the audit log's actor model. UserID is the
+// human on whose authority the principal acts — for a key, its creator (nil
+// when the creator was deleted), for an OAuth grant, the granting user.
+func (p Principal) AuditActor() audit.Actor {
+	var uid *uuid.UUID
+	if id, err := uuid.Parse(p.UserID); err == nil {
+		uid = &id
+	}
+	switch p.Kind {
+	case KindAPIKey:
+		return audit.Actor{Type: audit.ActorAPIKey, ID: p.CredentialID, UserID: uid}
+	case KindOAuth:
+		return audit.Actor{Type: audit.ActorOAuthClient, ID: p.CredentialID, UserID: uid}
+	default:
+		return audit.Actor{Type: audit.ActorUser, ID: p.UserID, UserID: uid}
+	}
 }
 
 // HasScope reports whether the principal may exercise scope. A session
@@ -92,6 +116,10 @@ func RequireAuth(verifiers ...Verifier) func(http.Handler) http.Handler {
 				}
 				if ok {
 					ctx := context.WithValue(r.Context(), ctxKey{}, p)
+					// Attribution for every audit event this request records is
+					// set here, once, from the authenticated principal — not by
+					// each domain call site, which could forget or guess.
+					ctx = audit.WithActor(ctx, p.AuditActor())
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}

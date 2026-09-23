@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -46,7 +47,8 @@ func (f *fakeStore) SetPasswordTx(ctx context.Context, userID uuid.UUID, newHash
 // none exists for (wsID, userID), otherwise update its role in place — and
 // keep the members[userID] list (ListMembersByUser's fake backing store) in
 // sync either way, exactly as the real store's join would reflect.
-func (f *fakeStore) UpsertMemberRole(ctx context.Context, wsID, userID uuid.UUID, role gen.MemberRole) (gen.WorkspaceMember, error) {
+func (f *fakeStore) UpsertMemberRole(ctx context.Context, wsID, userID uuid.UUID, role gen.MemberRole, ev audit.Event) (gen.WorkspaceMember, error) {
+	f.auditEvents = append(f.auditEvents, ev)
 	key := [2]uuid.UUID{wsID, userID}
 	m, existed := f.memberByPair[key]
 	if !existed {

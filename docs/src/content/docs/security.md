@@ -2082,6 +2082,91 @@ write history that never happened.
     role's scheduler — there is no API surface that triggers a rotation, so no
     caller can steer a mailbox onto a worker of their choosing.
 
+## Workspace audit log
+
+82. **The audit log is append-only in the database, attributed centrally, and
+    readable only by owners and admins.** `audit_events` (migration
+    `20260923105934`) is written ONLY through `platform/audit` (`Insert`, or a
+    `PgRecorder`), which validates every event first: a known dotted action, a
+    known actor type, and flat string metadata whose keys may not look like a
+    secret or content (`password`, `token`, `secret`, `body`, ...) — a
+    backstop behind the real rule, which is that call sites pass ids, names,
+    counts and enums only. It never carries a password, token, credential,
+    search text or message body.
+
+    - **Append-only.** A trigger refuses every `UPDATE`, `DELETE` and
+      `TRUNCATE`, except (a) the retention purge, which opens the door with a
+      transaction-local setting (`EnableAuditRetentionPurge`, `SET LOCAL`
+      semantics) inside its own transaction, and (b) the cascade from deleting
+      the workspace itself — a delete issued from inside another trigger
+      (`pg_trigger_depth() > 1`) AND whose workspace row no longer exists
+      (migration `20260923144934`). A trigger that deletes audit rows while
+      their workspace lives is refused like any direct DELETE. Crypto-shredding
+      (invariant 18) still works. `actor_user_id` deliberately has no foreign
+      key: `ON DELETE SET NULL` would be an UPDATE. What this does NOT stop is
+      the table owner — the application's own database role can disable a
+      trigger. It guards against application bugs and stray SQL, not a
+      compromised database credential.
+    - **Attribution is set centrally, never by call sites.** `auth.RequireAuth`
+      stores the principal's actor (`user`, `api_key` with the key id,
+      `oauth_client` with the client id); the agent tool registry replaces it
+      with an `agent` actor for the duration of a tool call, so an agent's
+      action is never recorded as the delegating human's. An agent action that
+      needed human approval is attributed the same way when it executes — to
+      the agent, on the thread owner's authority — and the human who approved
+      it is recorded on the approval itself (`pending_action_audit`, event
+      `approved`, `actor_user_id`). Unauthenticated paths
+      set the actor explicitly (sign-in: the user; a failed sign-in: a user
+      with no id; the operator CLI, the OAuth callback and the deliverability
+      breaker: `system`). Client IP and user agent come from
+      `audit.RequestMiddleware`, through the same trusted-proxy resolver the
+      session rows and api-key allowlist use.
+    - **Read gate.** `GET /api/v1/audit-events` is in the session-only group and
+      behind `RequireRole("admin")`; there is no scope for it, so no api key or
+      OAuth grant can ever be given it. Every read is workspace-pinned from the
+      JWT, the pin sits outside every caller-controlled guard, and a cursor is
+      bound to the filter set it was minted under.
+    - **Failure policy.** Events that grant or remove authority — api key
+      created/revoked, member invited / invite revoked / role changed — are
+      written in the SAME transaction as the change, so the change cannot
+      commit without its record. `data.exported` is fail-closed the other way:
+      it is recorded BEFORE the first row streams, and the export is refused if
+      the record cannot be written. Everything else (sign-ins, sign-in
+      failures, invite accepted, mailbox and campaign state, AI settings) is
+      best-effort: written after the action commits, detached from the
+      request's cancellation, and logged at ERROR on failure. An audit outage
+      must not lock every user out or stop an operator pausing a campaign.
+    - **A failed sign-in never becomes an enumeration oracle.** It is recorded
+      only for a KNOWN account, in ONE workspace — the most-recently-seen one,
+      the same workspace a successful sign-in would activate — never fanned out
+      to every tenant the account belongs to, because the row carries the
+      attempt's IP, user agent and reason. The lookup and
+      write run off the request path (`Service.dispatch`), so a wrong password
+      on a real account costs the same wall-clock time as an unknown email.
+      Consequence to know about: an attacker who knows a member's email can
+      add `auth.login_failed` rows to that member's sign-in workspace at the
+      sign-in rate limit (`INROAD_RATELIMIT_LOGIN_*`).
+    - **Personal data it holds (Privacy/Legal item, not decided in code).**
+      Audit rows contain personal information: the client IP address and user
+      agent of the request; the invitee's email on `member.invited`; the
+      member's email on `member.role_changed`; the mailbox address on
+      `mailbox.*`; and, at read time, the acting user's current email (joined
+      from `users`, not stored). Rows deliberately SURVIVE the deletion of the
+      user they name (no foreign key), and there is NO per-person erasure or
+      redaction path — the append-only trigger admits only the age-based
+      retention purge and whole-workspace deletion. Canadian privacy law
+      (PIPEDA) and Quebec's Law 25 may impose retention limits and
+      access/erasure obligations on this data; how long to keep it, and how to
+      answer an individual's erasure request against an append-only log, are
+      decisions for the operator's Privacy/Legal function, not defaults this
+      code makes.
+    - **Retention is off by default.** `INROAD_AUDIT_RETENTION_DAYS` unset or `0`
+      keeps every row forever; how long a security log is kept is a
+      privacy/legal decision, not a default. When set, the control-role
+      worker's daily maintenance job purges past it in 5000-row batches through
+      `coreapi` (the worker holds no database access of its own). A malformed
+      or out-of-range value stops the process at startup.
+
 ## Deferred (documented, not yet built)
 - **Conditional branching on a sequence step must gate on HUMAN events only**
   (invariant 63). This is written down BEFORE the feature exists because getting
@@ -2110,7 +2195,12 @@ write history that never happened.
 - Eager re-seal/rotation CLI: backfill pre-DEK v1 blobs to v2 and re-encrypt DEKs
   under a rotated KEK (today v1→v2 migration is lazy, on next write).
 - Rate limiting / abuse controls on auth and connect endpoints.
-- Audit log for sensitive actions (mailbox connect/disconnect, settings changes).
+- Audit log gaps (the log itself is invariant 82): failed 2FA / passkey /
+  email-code attempts, Google sign-in failures, logout and session revocation,
+  password reset, operator-CLI member creation, member removal (no such feature
+  yet), and the campaign results CSV export are not yet recorded. The
+  mailbox-connect OAuth callback records `system` as the actor, because its
+  signed state names the workspace only (invariant 10).
 - Server-side single-use nonce store for the MAILBOX-CONNECT OAuth `state` (see
   invariant 10). The LOGIN flow has one (invariant 50); mailbox connect still relies
   on the 10-minute TTL alone, where the residual risk is an attacker binding their
