@@ -1,0 +1,28 @@
+-- Whether a send carried tracking is a fact about THAT message, fixed the moment
+-- it was built. Until now nothing recorded it: ContactSendStats derived
+-- opens_measurable from campaigns.tracking_enabled, which is the campaign's
+-- CURRENT setting. Turning tracking off therefore retroactively declared every
+-- past tracked send unmeasurable (and turning it on declared never-tracked sends
+-- measurable) — a toggle rewrote a contact's history.
+--
+-- From this migration on, ClaimStepSend stamps sends.tracked from the job being
+-- claimed (coreapi.StepSendJob.CarriesTracking: the campaign had tracking on AND
+-- the step had an HTML body, since the pixel and the link rewriting only exist
+-- in HTML), and the aggregates read the row.
+--
+-- NULLABLE, with no default, on purpose. NULL means "not recorded", and every
+-- reader falls back to the campaign's flag for it
+-- (COALESCE(s.tracked, c.tracking_enabled)) — exactly the old answer, never a
+-- new wrong one. That matters during a ROLLING DEPLOY: workers still running the
+-- previous binary keep claiming after this migration with the old INSERT, which
+-- does not name the column. A DEFAULT false would silently record every one of
+-- those tracked sends as untracked, and nothing would ever correct them; a
+-- DEFAULT true would do the same to untracked campaigns. A column default
+-- cannot look at the campaign, and NULL is the only value that does not lie.
+--
+-- This file is ONLY the column, so it takes ACCESS EXCLUSIVE on sends for the
+-- instant a catalog change needs (a nullable column with no default rewrites no
+-- rows). The backfill is the next migration, 20260923142238, which runs in
+-- committed batches — golang-migrate executes a file as one statement batch, so
+-- a backfill in this file would hold this lock for its whole duration.
+ALTER TABLE sends ADD COLUMN tracked BOOLEAN;

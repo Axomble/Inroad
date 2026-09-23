@@ -4,8 +4,11 @@ root = "."
 tmp_dir = "tmp/air-worker"
 
 [build]
-  cmd = "go build -o ./tmp/air-worker/worker ./cmd/worker"
+  # Build beside the binary and rename it into place, and fail loud rather than
+  # fall back to the previous binary — see .air.api.toml for why.
+  cmd = "go build -o ./tmp/air-worker/worker.next ./cmd/worker && mv -f ./tmp/air-worker/worker.next ./tmp/air-worker/worker || { echo '>>> air: worker BUILD FAILED - the worker is NOT running; fix the error above <<<' >&2; exit 1; }"
   bin = "./tmp/air-worker/worker"
+  stop_on_error = true
   include_ext = ["go", "sql", "yaml"]
   exclude_dir = ["web", "tmp", "bin", "dist", "node_modules", ".git", "docs"]
   exclude_regex = ["_test\\.go"]

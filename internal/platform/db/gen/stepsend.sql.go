@@ -14,14 +14,14 @@ import (
 
 const claimStepSend = `-- name: ClaimStepSend :one
 INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
-                   step_order, references_header, status, claimed_at, variant_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), $9)
+                   step_order, references_header, status, claimed_at, variant_id, tracked)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), $9, $10::bool)
 ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
 DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
-              variant_id = EXCLUDED.variant_id
+              variant_id = EXCLUDED.variant_id, tracked = EXCLUDED.tracked
     WHERE sends.status = 'sending'
       AND sends.workspace_id = $2
-      AND sends.claimed_at < now() - make_interval(secs => $10::int)
+      AND sends.claimed_at < now() - make_interval(secs => $11::int)
 RETURNING id, (created_at = claimed_at) AS freshly_inserted
 `
 
@@ -35,6 +35,7 @@ type ClaimStepSendParams struct {
 	StepOrder        int32       `json:"step_order"`
 	ReferencesHeader string      `json:"references_header"`
 	VariantID        pgtype.UUID `json:"variant_id"`
+	Tracked          bool        `json:"tracked"`
 	LeaseSeconds     int32       `json:"lease_seconds"`
 }
 
@@ -59,6 +60,16 @@ type ClaimStepSendRow struct {
 // reclaim recomputes the same variant, but the weights could have been edited
 // between the two attempts. Re-stamping it keeps the row describing what is
 // actually about to be sent rather than what a previous attempt intended.
+//
+// tracked is re-stamped on the reclaim path for the same reason: it records
+// whether THIS message carries the open pixel and rewritten links, which is
+// decided by the job being claimed (coreapi.StepSendJob.CarriesTracking), and
+// the campaign's tracking toggle may have moved between the two attempts. It is
+// written here, at claim time, and never again: this row is what every
+// "could an open have been recorded" aggregate reads, so a later toggle of
+// campaigns.tracking_enabled cannot rewrite history. Cast to a plain bool: the
+// column is nullable (NULL = "not recorded", written only by a pre-column
+// binary during a rolling deploy), but this writer always knows the answer.
 // `freshly_inserted` distinguishes the two ways a claim is won, for
 // observability only (inroad_send_claims_total: a rising RECLAIM rate means
 // workers are dying mid-send, which a single "won" counter would hide). Both
@@ -80,6 +91,7 @@ func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (C
 		arg.StepOrder,
 		arg.ReferencesHeader,
 		arg.VariantID,
+		arg.Tracked,
 		arg.LeaseSeconds,
 	)
 	var i ClaimStepSendRow
@@ -231,4 +243,26 @@ func (q *Queries) LatestSentForContact(ctx context.Context, arg LatestSentForCon
 	var i LatestSentForContactRow
 	err := row.Scan(&i.MessageID, &i.ReferencesHeader)
 	return i, err
+}
+
+const stepSendNotYetDue = `-- name: StepSendNotYetDue :one
+SELECT COALESCE($1::timestamptz > now(), false)::bool AS not_yet_due
+`
+
+// The claim's not-due gate, evaluated on the DATABASE's clock. not_due_until is
+// the enrollment's next_due_at as the job read it — a value the database
+// stamped with its own now() — so the only sound clock to compare it against is
+// the same one. Comparing it against the Go process's time.Now() (as the gate
+// used to) made the outcome depend on app/DB clock skew: a database clock
+// running ahead turned a due-now enrollment into ClaimDeferred.
+//
+// Run on its own, just before the claim transaction opens, so a refusal never
+// holds a transaction; the database clock only moves forward, so a "due"
+// verdict still holds by the time the INSERT runs. A NULL not_due_until ("no
+// recorded due time") is never "not yet due", which is what the COALESCE says.
+func (q *Queries) StepSendNotYetDue(ctx context.Context, notDueUntil pgtype.Timestamptz) (bool, error) {
+	row := q.db.QueryRow(ctx, stepSendNotYetDue, notDueUntil)
+	var not_yet_due bool
+	err := row.Scan(&not_yet_due)
+	return not_yet_due, err
 }

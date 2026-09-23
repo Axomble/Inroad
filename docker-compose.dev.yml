@@ -140,7 +140,11 @@ services:
     <<: *go-build
     environment: *go-env
     # air only mkdirs one level, and tmp/ is gitignored so it may not exist.
-    command: sh -c "mkdir -p tmp/air-api && air -c .air.api.toml"
+    # tmp/ lives on the bind mount, so it OUTLIVES the container: after an
+    # unclean stop (clean_on_exit never ran) a binary from the previous session
+    # is still there. Delete it, so the first build either produces a fresh one
+    # or leaves nothing to run — never yesterday's code.
+    command: sh -c "mkdir -p tmp/air-api && rm -f tmp/air-api/inroad tmp/air-api/inroad.next && air -c .air.api.toml"
     ports: ["8080:8080"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -151,7 +155,8 @@ services:
   worker:
     <<: *go-build
     environment: *go-env
-    command: sh -c "mkdir -p tmp/air-worker && air -c .air.worker.toml"
+    # Same stale-binary reset as the api above.
+    command: sh -c "mkdir -p tmp/air-worker && rm -f tmp/air-worker/worker tmp/air-worker/worker.next && air -c .air.worker.toml"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

@@ -91,7 +91,8 @@ func (q *Queries) ContactEnrollmentCounts(ctx context.Context, arg ContactEnroll
 const contactSendStats = `-- name: ContactSendStats :one
 SELECT count(*) FILTER (WHERE s.status = 'sent')::bigint AS emails_sent,
        (max(s.sent_at) FILTER (WHERE s.status = 'sent'))::timestamptz AS last_sent_at,
-       COALESCE(bool_or(s.status = 'sent' AND c.tracking_enabled), false)::bool AS opens_measurable
+       COALESCE(bool_or(s.status = 'sent' AND COALESCE(s.tracked, c.tracking_enabled)), false)::bool
+           AS opens_measurable
 FROM sends s
 LEFT JOIN campaigns c ON c.workspace_id = s.workspace_id AND c.id = s.campaign_id
 WHERE s.workspace_id = $1 AND s.contact_id = $2
@@ -120,10 +121,19 @@ type ContactSendStatsRow struct {
 // campaign the contact was enrolled in but never sent to could not have produced
 // an open regardless of its tracking flag.
 //
-// LEFT JOIN so this addition provably cannot change emails_sent: a send whose
-// campaign row is missing still counts. sends.campaign_id is NOT NULL with an
-// ON DELETE CASCADE FK, so that cannot actually happen — the outer join is here
-// to make the count independent of the join rather than to handle a real case.
+// It reads sends.tracked — whether THAT message carried tracking, stamped at
+// claim time — and NOT campaigns.tracking_enabled. The campaign flag is the
+// CURRENT setting: reading it meant turning tracking off retroactively declared
+// every past tracked send unmeasurable (and turning it on declared untracked
+// ones measurable), rewriting a contact's history on every toggle.
+//
+// The campaign flag survives only as the fallback for a NULL tracked, which
+// means "not recorded": a row written by a pre-column binary during a rolling
+// deploy (see migration 20260923105515). For those rows this is the old answer.
+//
+// LEFT JOIN so the join provably cannot change emails_sent: a send whose
+// campaign row is missing still counts (sends.campaign_id is NOT NULL with an
+// ON DELETE CASCADE FK, so that cannot actually happen).
 func (q *Queries) ContactSendStats(ctx context.Context, arg ContactSendStatsParams) (ContactSendStatsRow, error) {
 	row := q.db.QueryRow(ctx, contactSendStats, arg.WorkspaceID, arg.ContactID)
 	var i ContactSendStatsRow
@@ -302,10 +312,17 @@ func (q *Queries) GetContactSuppression(ctx context.Context, arg GetContactSuppr
 }
 
 const listContactCampaigns = `-- name: ListContactCampaigns :many
-SELECT e.campaign_id, c.name AS campaign_name, c.tracking_enabled, e.status, e.current_step,
-       e.stop_reason, e.enrolled_at, e.last_sent_at
+SELECT e.campaign_id, c.name AS campaign_name,
+       COALESCE(sent.tracked, c.tracking_enabled)::bool AS tracking_enabled,
+       e.status, e.current_step, e.stop_reason, e.enrolled_at, e.last_sent_at
 FROM sequence_enrollments e
 JOIN campaigns c ON c.workspace_id = e.workspace_id AND c.id = e.campaign_id
+LEFT JOIN LATERAL (
+    SELECT bool_or(COALESCE(s.tracked, c.tracking_enabled)) AS tracked
+    FROM sends s
+    WHERE s.workspace_id = e.workspace_id AND s.campaign_id = e.campaign_id
+      AND s.contact_id = e.contact_id AND s.status = 'sent'
+) sent ON true
 WHERE e.workspace_id = $1 AND e.contact_id = $2
 ORDER BY e.enrolled_at DESC, e.campaign_id
 LIMIT $3
@@ -334,6 +351,15 @@ type ListContactCampaignsRow struct {
 // contribute opens or clicks. The rollup's counts deliberately do NOT adjust for
 // it (campaign.Metrics does not either, and the two must agree), so this flag is
 // how a caller explains a zero instead of guessing at it.
+//
+// It answers from this enrollment's SENT messages when there are any — did at
+// least one of them carry tracking (sends.tracked, with the same NULL fallback
+// as ContactSendStats) — so it agrees with the summary's opens_measurable and a
+// later toggle cannot rewrite it. Only an enrollment with nothing sent yet
+// reports the campaign's current setting, which is what its next send will do.
+// The lateral aggregate returns one row even when there are no sends (NULL),
+// which is what selects the fallback; the (campaign_id, contact_id, step_order)
+// unique index serves it.
 func (q *Queries) ListContactCampaigns(ctx context.Context, arg ListContactCampaignsParams) ([]ListContactCampaignsRow, error) {
 	rows, err := q.db.Query(ctx, listContactCampaigns, arg.WorkspaceID, arg.ContactID, arg.Limit)
 	if err != nil {

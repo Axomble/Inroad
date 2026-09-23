@@ -254,14 +254,14 @@ test('an unmeasured zero is labelled unmeasured, not reported as nobody opening'
 
   const engagementPanel = await panel('Email engagement')
   expect(await within(engagementPanel).findAllByText('Not measured')).toHaveLength(2)
-  // Present tense: the flag reports the campaigns' current setting, and nothing
-  // records what it was at send time, so the copy must not assert about the past.
-  expect(within(engagementPanel).getByText(/tracking is off for this contact's campaigns/i)).toBeInTheDocument()
+  // The copy describes the emails that went out: each send records whether it
+  // carried tracking, so a later toggle cannot falsify it.
+  expect(within(engagementPanel).getByText(/none of the emails sent to this contact carried open or click tracking/i)).toBeInTheDocument()
   expect(within(engagementPanel).queryByText(/never measured/i)).not.toBeInTheDocument()
   // A rate computed over an unmeasured zero would be a fabricated 0%.
   expect(within(engagementPanel).queryByText(/of sent/)).not.toBeInTheDocument()
   // And the campaign responsible is named, for whoever drills in.
-  expect(within(engagementPanel).getByText(/no open or click tracking on this campaign/i)).toBeInTheDocument()
+  expect(within(engagementPanel).getByText(/sent without open or click tracking/i)).toBeInTheDocument()
   // Replies do not depend on tracking, so that number stands.
   expect(within(engagementPanel).getByText('Replies')).toBeInTheDocument()
 })
@@ -297,10 +297,10 @@ test('a real zero is not explained away when the visible enrolments only look un
   const engagementPanel = await panel('Email engagement')
   expect(await within(engagementPanel).findByText(/prefetch images/i)).toBeInTheDocument()
   expect(within(engagementPanel).queryByText('Not measured')).not.toBeInTheDocument()
-  expect(within(engagementPanel).queryByText(/tracking is off for this contact's campaigns/i)).not.toBeInTheDocument()
+  expect(within(engagementPanel).queryByText(/none of the emails sent to this contact carried open or click tracking/i)).not.toBeInTheDocument()
   // The visible row is still marked, because which campaign was untracked is a
   // real detail — it just doesn't get to decide the summary.
-  expect(within(engagementPanel).getByText(/no open or click tracking on this campaign/i)).toBeInTheDocument()
+  expect(within(engagementPanel).getByText(/sent without open or click tracking/i)).toBeInTheDocument()
   // The cap itself is stated, against the true total the counts keep exact.
   expect(within(engagementPanel).getByText(/showing the 1 most recent of 37 enrolments/i)).toBeInTheDocument()
 })
@@ -335,7 +335,7 @@ test('the unmeasured hedge no longer depends on the enrolment window', async () 
 
   const engagementPanel = await panel('Email engagement')
   expect(await within(engagementPanel).findAllByText('Not measured')).toHaveLength(2)
-  expect(within(engagementPanel).getByText(/tracking is off for this contact's campaigns/i)).toBeInTheDocument()
+  expect(within(engagementPanel).getByText(/none of the emails sent to this contact carried open or click tracking/i)).toBeInTheDocument()
   expect(within(engagementPanel).queryByText(/of sent/)).not.toBeInTheDocument()
 })
 

@@ -458,16 +458,6 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 // became 'sent' (the sweeper/retry re-drives it) or ClaimAlreadySent on one that
 // just became 'sent' by another worker (the cursor advance is idempotent).
 func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
-	// Not-due guard, BEFORE any row is written: an advance task queued for an
-	// earlier due time must not deliver after next_due_at was pushed out (the
-	// out-of-office deferral). Enqueueing cannot be undone, so the claim — the
-	// single gate every step-send passes through — is where the push is made to
-	// stick. Reported as ClaimDeferred, the existing "wait and retry, don't
-	// advance" outcome.
-	if job.NotYetDue(time.Now()) {
-		c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeDeferred)
-		return coreapi.ClaimDeferred, nil
-	}
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return coreapi.ClaimSkip, err
@@ -488,6 +478,39 @@ func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob)
 	if err != nil {
 		return coreapi.ClaimSkip, err
 	}
+
+	// Not-due guard, BEFORE any row is written: an advance task queued for an
+	// earlier due time must not deliver after next_due_at was pushed out (the
+	// out-of-office deferral). Enqueueing cannot be undone, so the claim — the
+	// single gate every step-send passes through — is where the push is made to
+	// stick. Reported as ClaimDeferred, the existing "wait and retry, don't
+	// advance" outcome.
+	//
+	// Evaluated by the DATABASE, on the clock that stamped next_due_at. It used
+	// to be job.NotYetDue(time.Now()), which compared a database timestamp
+	// against this process's clock: with the database ahead by the skew, a
+	// due-now enrollment was refused and retried until the skew elapsed.
+	//
+	// On the pool, before the claim transaction opens, so a refusal — the common
+	// outcome for a task queued ahead of an out-of-office return — costs one
+	// read and never holds a transaction. Running it outside the claim's
+	// transaction is sound because the only thing between the two is time: the
+	// database clock moves forward, so a "due" verdict cannot become "not due"
+	// by the INSERT below, and a next_due_at pushed out in that gap is the same
+	// race the job's snapshot of it always had. The gate is read-only and can
+	// only turn a claim into a refusal that writes nothing, so it changes which
+	// clock decides, never what a won claim means.
+	notYetDue, err := c.q.StepSendNotYetDue(ctx, pgtype.Timestamptz{
+		Time: job.NotDueUntil, Valid: !job.NotDueUntil.IsZero(),
+	})
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	if notYetDue {
+		c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeDeferred)
+		return coreapi.ClaimDeferred, nil
+	}
+
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return coreapi.ClaimSkip, err
@@ -500,6 +523,7 @@ func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob)
 		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
 		ToEmail: job.ToEmail, StepOrder: int32(job.StepOrder), ReferencesHeader: job.References,
 		VariantID:    variantUUID(job.VariantID),
+		Tracked:      job.CarriesTracking(),
 		LeaseSeconds: claimLeaseSeconds,
 	})
 	if err != nil {

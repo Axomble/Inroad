@@ -144,10 +144,16 @@ type TrackingStats struct {
 // CampaignEnrollment is one campaign the contact is (or was) enrolled in.
 //
 // TrackingEnabled is the only thing that tells a zero open count apart from an
-// unmeasured one: a campaign with tracking off contributes sends but cannot
-// contribute opens or clicks. The rollup's counts do not adjust for it (neither
-// does campaign.Metrics, and the two must agree), so this is how a caller
-// explains a zero rather than guessing at it.
+// unmeasured one: an untracked email contributes sends but cannot contribute
+// opens or clicks. The rollup's counts do not adjust for it (neither does
+// campaign.Metrics, and the two must agree), so this is how a caller explains a
+// zero rather than guessing at it.
+//
+// Once the enrollment has sent anything it describes those emails — true when
+// at least one carried tracking, as stamped on the send (sends.tracked) — so it
+// agrees with Engagement.OpensMeasurable and a later toggle cannot rewrite it.
+// Before the first send it is the campaign's current setting
+// (queries/contact.sql ListContactCampaigns).
 type CampaignEnrollment struct {
 	CampaignID      uuid.UUID
 	CampaignName    string
@@ -181,9 +187,11 @@ type Engagement struct {
 	ClickRate         float64
 	CampaignsEnrolled int64
 	// OpensMeasurable reports whether an open COULD have been recorded for this
-	// contact: true when at least one send that actually went out belonged to a
-	// campaign with tracking on. False with EmailsSent > 0 means the zero opens
-	// and clicks above are unmeasured, not observed.
+	// contact: true when at least one send that actually went out carried
+	// tracking, as recorded on the send row when it was claimed (sends.tracked) —
+	// not the campaign's current flag, which a later toggle would rewrite. False
+	// with EmailsSent > 0 means the zero opens and clicks above are unmeasured,
+	// not observed.
 	//
 	// It is computed server-side over the whole history on purpose. A client can
 	// only see Campaigns, which is capped at CampaignCap — so for a contact with

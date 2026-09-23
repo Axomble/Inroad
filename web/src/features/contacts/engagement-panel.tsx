@@ -69,13 +69,12 @@ function Engagement({ engagement }: { engagement: ContactEngagement }) {
         <Metric label="Replies" value={engagement.replies} />
       </dl>
       {unmeasured ? (
-        // Present tense, deliberately. The flag reflects each campaign's *current*
-        // tracking setting — nothing records what it was at send time — so
-        // "tracking is off" is defensible where "this was never measured" would be
-        // a claim about the past that a later toggle could falsify.
+        // A statement about the emails that went out, not about the campaigns'
+        // settings today: each send records whether it carried tracking when it
+        // was sent, so a later toggle does not change this.
         <p className="mt-2 text-xs text-muted-foreground">
-          Open and click tracking is off for this contact's campaigns, so there is nothing to measure here — these are
-          not zeroes. Replies are counted either way.
+          None of the emails sent to this contact carried open or click tracking, so there is nothing to measure here —
+          these are not zeroes. Replies are counted either way.
         </p>
       ) : (
         <p className="mt-2 text-xs text-muted-foreground">
@@ -145,9 +144,15 @@ function Enrollment({ enrollment }: { enrollment: ContactCampaignEnrollment }) {
         <span className="text-xs font-medium text-muted-foreground">{statusLabel(enrollment.status)}</span>
       </div>
       {/* Which campaign had tracking off is the detail someone drills into after
-          the summary above tells them the opens look wrong. */}
+          the summary above tells them the opens look wrong. Once anything has
+          been sent the flag describes those emails, so the copy says so; before
+          that it is the campaign's setting for the first send. */}
       {!enrollment.tracking_enabled ? (
-        <p className="mt-1 text-xs text-muted-foreground">No open or click tracking on this campaign.</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {enrollment.current_step === 0
+            ? 'No open or click tracking on this campaign.'
+            : 'Sent without open or click tracking.'}
+        </p>
       ) : null}
       <p className="mt-1 text-xs text-muted-foreground">
         {enrollment.current_step === 0 ? 'Enrolled, not yet sent to' : `Step ${enrollment.current_step} was the last sent`}

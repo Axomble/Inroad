@@ -4,8 +4,25 @@ root = "."
 tmp_dir = "tmp/air-api"
 
 [build]
-  cmd = "go build -o ./tmp/air-api/inroad ./cmd/inroad"
+  # Build BESIDE the binary, then rename it into place. `go build -o` straight
+  # onto the path of a binary that may still be executing can fail with "text
+  # file busy" (the old process has not exited yet — air gives it at most 5s —
+  # and on a Docker Desktop bind mount the copy lands on the executing inode).
+  # A rename never writes to that inode, so it cannot hit ETXTBSY, and it is
+  # atomic: the path holds either the old binary or the whole new one.
+  #
+  # Any failure (compile error, or the mv itself) prints a banner and exits
+  # non-zero, which with stop_on_error below means NOTHING runs until the next
+  # good build. Air's default is to log "failed to build" and then start
+  # whatever binary is still on disk — the previous build — which is how a dev
+  # stack ended up silently serving stale code.
+  cmd = "go build -o ./tmp/air-api/inroad.next ./cmd/inroad && mv -f ./tmp/air-api/inroad.next ./tmp/air-api/inroad || { echo '>>> air: api BUILD FAILED - the api is NOT running; fix the error above <<<' >&2; exit 1; }"
   bin = "./tmp/air-api/inroad"
+  # Fail loud, not stale: on a failed build, do not run the old binary. Air
+  # (v1.63.0, pinned in deploy/docker/Dockerfile.dev-go) kills the previous
+  # process and deletes `bin` before it builds when this is set, and returns
+  # before running anything if the build fails.
+  stop_on_error = true
   include_ext = ["go", "sql", "yaml"]
   # web/ and its dist are the Vite container's business; tmp/ is our own output.
   # Excluding test files keeps a `_test.go` edit from bouncing the server.
