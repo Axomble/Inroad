@@ -119,10 +119,10 @@ export function docToText(doc: JSONContent): string {
 const PLAIN_NODES = new Set(['doc', 'paragraph', 'text', 'hardBreak', 'variable'])
 
 /**
- * Whether the document uses any formatting. A plain document is saved as text
- * only (body_html empty), which is what every step was before this editor —
- * so an untouched plain step keeps sending as plain text, with no HTML part
- * and no open pixel. HTML is produced only once someone actually formats.
+ * Whether the document uses any formatting. It decides when a body that began
+ * as plain text gains an HTML part: a plain step keeps sending as plain text
+ * (no HTML part, no open pixel) until someone actually formats it. A body that
+ * already had an HTML part keeps it regardless — see the body editor.
  */
 export function isRichDoc(node: JSONContent): boolean {
   if (node.type && !PLAIN_NODES.has(node.type)) return true

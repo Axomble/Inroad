@@ -19,7 +19,10 @@ import { useVariableEditor } from './use-variable-editor'
 import { VariableContext } from './variable-context'
 import { VariableMenu } from './variable-menu'
 
-/** The two stored forms of an email body. `html` is empty while nothing is formatted. */
+/**
+ * The two stored forms of an email body. `html` is empty only for a body that
+ * began as plain text and is still unformatted (or for an emptied body).
+ */
 export type EmailBody = { html: string; text: string }
 
 export type BodyEditorProps = {
@@ -119,6 +122,12 @@ function RichBody({
   reportOnMount,
 }: BodyEditorProps & { reportOnMount: boolean }) {
   const [content] = useState(() => (initialHtml ? wrapTokensInHtml(initialHtml) : textToDoc(initialText ?? '')))
+  // Plain stays plain, HTML stays HTML. A body loaded with an HTML part keeps
+  // one even when it carries no formatting (the demo seed's <p>…<br>…</p>):
+  // the HTML part is what the open pixel and link tracking ride on, so dropping
+  // it would silently switch tracking off for that step. Only a body that was
+  // plain text to begin with stays plain until someone formats it.
+  const [keepsHtml] = useState(() => (initialHtml ?? '').trim() !== '')
   const { editor, anchorProps, menu, menuId } = useVariableEditor({
     extensions: [bodyKit],
     content,
@@ -127,7 +136,10 @@ function RichBody({
     reportOnMount,
     onUpdate: (e) => {
       const doc = e.getJSON()
-      onChange({ text: docToText(doc), html: isRichDoc(doc) ? unwrapTokensInHtml(e.getHTML()) : '' })
+      // An emptied body has no HTML part either way, so the server's
+      // "body required" check still sees it as empty.
+      const wantsHtml = !e.isEmpty && (keepsHtml || isRichDoc(doc))
+      onChange({ text: docToText(doc), html: wantsHtml ? unwrapTokensInHtml(e.getHTML()) : '' })
     },
     attributes: {
       'aria-multiline': 'true',
