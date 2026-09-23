@@ -39,6 +39,7 @@ import { Route as AppInboxThreadIdRouteImport } from './routes/app.inbox.$thread
 import { Route as AppSettingsIndexRouteImport } from './routes/app.settings.index'
 import { Route as AppSettingsAiRouteImport } from './routes/app.settings.ai'
 import { Route as AppSettingsApiKeysRouteImport } from './routes/app.settings.api-keys'
+import { Route as AppSettingsAuditLogRouteImport } from './routes/app.settings.audit-log'
 import { Route as AppSettingsCustomFieldsRouteImport } from './routes/app.settings.custom-fields'
 import { Route as AppSettingsDeadLettersRouteImport } from './routes/app.settings.dead-letters'
 import { Route as AppSettingsFleetRouteImport } from './routes/app.settings.fleet'
@@ -204,6 +205,11 @@ const AppSettingsApiKeysRoute = AppSettingsApiKeysRouteImport.update({
   path: '/api-keys',
   getParentRoute: () => AppSettingsRoute,
 } as any)
+const AppSettingsAuditLogRoute = AppSettingsAuditLogRouteImport.update({
+  id: '/audit-log',
+  path: '/audit-log',
+  getParentRoute: () => AppSettingsRoute,
+} as any)
 const AppSettingsCustomFieldsRoute = AppSettingsCustomFieldsRouteImport.update({
   id: '/custom-fields',
   path: '/custom-fields',
@@ -301,6 +307,7 @@ export interface FileRoutesByFullPath {
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/audit-log': typeof AppSettingsAuditLogRoute
   '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/dead-letters': typeof AppSettingsDeadLettersRoute
   '/app/settings/fleet': typeof AppSettingsFleetRoute
@@ -344,6 +351,7 @@ export interface FileRoutesByTo {
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/audit-log': typeof AppSettingsAuditLogRoute
   '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/dead-letters': typeof AppSettingsDeadLettersRoute
   '/app/settings/fleet': typeof AppSettingsFleetRoute
@@ -391,6 +399,7 @@ export interface FileRoutesById {
   '/app/inbox/$threadId': typeof AppInboxThreadIdRoute
   '/app/settings/ai': typeof AppSettingsAiRoute
   '/app/settings/api-keys': typeof AppSettingsApiKeysRoute
+  '/app/settings/audit-log': typeof AppSettingsAuditLogRoute
   '/app/settings/custom-fields': typeof AppSettingsCustomFieldsRoute
   '/app/settings/dead-letters': typeof AppSettingsDeadLettersRoute
   '/app/settings/fleet': typeof AppSettingsFleetRoute
@@ -439,6 +448,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
+    | '/app/settings/audit-log'
     | '/app/settings/custom-fields'
     | '/app/settings/dead-letters'
     | '/app/settings/fleet'
@@ -482,6 +492,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
+    | '/app/settings/audit-log'
     | '/app/settings/custom-fields'
     | '/app/settings/dead-letters'
     | '/app/settings/fleet'
@@ -528,6 +539,7 @@ export interface FileRouteTypes {
     | '/app/inbox/$threadId'
     | '/app/settings/ai'
     | '/app/settings/api-keys'
+    | '/app/settings/audit-log'
     | '/app/settings/custom-fields'
     | '/app/settings/dead-letters'
     | '/app/settings/fleet'
@@ -774,6 +786,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsApiKeysRouteImport
       parentRoute: typeof AppSettingsRoute
     }
+    '/app/settings/audit-log': {
+      id: '/app/settings/audit-log'
+      path: '/audit-log'
+      fullPath: '/app/settings/audit-log'
+      preLoaderRoute: typeof AppSettingsAuditLogRouteImport
+      parentRoute: typeof AppSettingsRoute
+    }
     '/app/settings/custom-fields': {
       id: '/app/settings/custom-fields'
       path: '/custom-fields'
@@ -878,6 +897,7 @@ declare module '@tanstack/react-router' {
 interface AppSettingsRouteChildren {
   AppSettingsAiRoute: typeof AppSettingsAiRoute
   AppSettingsApiKeysRoute: typeof AppSettingsApiKeysRoute
+  AppSettingsAuditLogRoute: typeof AppSettingsAuditLogRoute
   AppSettingsCustomFieldsRoute: typeof AppSettingsCustomFieldsRoute
   AppSettingsDeadLettersRoute: typeof AppSettingsDeadLettersRoute
   AppSettingsFleetRoute: typeof AppSettingsFleetRoute
@@ -892,6 +912,7 @@ interface AppSettingsRouteChildren {
 const AppSettingsRouteChildren: AppSettingsRouteChildren = {
   AppSettingsAiRoute: AppSettingsAiRoute,
   AppSettingsApiKeysRoute: AppSettingsApiKeysRoute,
+  AppSettingsAuditLogRoute: AppSettingsAuditLogRoute,
   AppSettingsCustomFieldsRoute: AppSettingsCustomFieldsRoute,
   AppSettingsDeadLettersRoute: AppSettingsDeadLettersRoute,
   AppSettingsFleetRoute: AppSettingsFleetRoute,
