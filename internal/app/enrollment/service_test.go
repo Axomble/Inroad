@@ -17,6 +17,8 @@ type fakeStore struct {
 	completed     bool
 	stoppedReason StopReason
 	threadRoot    string
+	finished      bool
+	awaitAt       time.Time
 }
 
 func (f *fakeStore) Enroll(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error) {
@@ -38,6 +40,14 @@ func (f *fakeStore) Stop(_ context.Context, _, _ uuid.UUID, r StopReason) error 
 	return nil
 }
 func (f *fakeStore) SetDue(context.Context, uuid.UUID, uuid.UUID, time.Time) error { return nil }
+func (f *fakeStore) Finish(context.Context, uuid.UUID, uuid.UUID) error {
+	f.finished = true
+	return nil
+}
+func (f *fakeStore) AwaitCondition(_ context.Context, _, _ uuid.UUID, at time.Time) error {
+	f.awaitAt = at
+	return nil
+}
 func (f *fakeStore) SetThreadRoot(_ context.Context, _, _ uuid.UUID, mid string) error {
 	f.threadRoot = mid
 	return nil
@@ -102,5 +112,28 @@ func TestMarkStepStoppedPassesReason(t *testing.T) {
 	}
 	if f.stoppedReason != StopSuppressed {
 		t.Fatalf("want suppressed, got %s", f.stoppedReason)
+	}
+}
+
+// A routed end completes WITHOUT recording a send: FinishRoute must not go
+// through Complete (which stamps current_step and last_sent_at).
+func TestFinishRouteCompletesWithoutASend(t *testing.T) {
+	f := &fakeStore{}
+	if err := NewService(f).FinishRoute(context.Background(), uuid.New(), uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	if !f.finished || f.completed {
+		t.Fatalf("finished=%v completed=%v, want the no-send finish only", f.finished, f.completed)
+	}
+}
+
+func TestAwaitConditionStampsRecheck(t *testing.T) {
+	f := &fakeStore{}
+	at := time.Now().Add(time.Hour)
+	if err := NewService(f).AwaitCondition(context.Background(), uuid.New(), uuid.New(), at); err != nil {
+		t.Fatal(err)
+	}
+	if !f.awaitAt.Equal(at) {
+		t.Fatalf("recheck = %v, want %v", f.awaitAt, at)
 	}
 }

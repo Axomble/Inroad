@@ -521,7 +521,7 @@ func run() error {
 	// campaign status (draft-gating) via an adapter over the campaign store.
 	stepHandler := sequencestep.NewHandler(
 		sequencestep.NewService(sequencestep.NewPgStore(pool), campaignStatusChecker{campaigns: campaignStore},
-			sequencestep.NewPgVariantStore(queries)),
+			sequencestep.NewPgVariantStore(queries), sequencestep.NewPgBranchStore(pool)),
 		cfg.JWTSecret,
 	)
 	// Deliverability guardrails. One service backs BOTH the API endpoints and the

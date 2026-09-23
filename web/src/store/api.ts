@@ -994,6 +994,31 @@ const injectedRtkApi = api.injectEndpoints({
         body: queryArg.reorderStepsRequest,
       }),
     }),
+    getCampaignGraph: build.query<
+      GetCampaignGraphApiResponse,
+      GetCampaignGraphApiArg
+    >({
+      query: (queryArg) => ({ url: `/campaigns/${queryArg.id}/graph` }),
+    }),
+    setStepBranch: build.mutation<
+      SetStepBranchApiResponse,
+      SetStepBranchApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/branch`,
+        method: "PUT",
+        body: queryArg.stepBranchRequest,
+      }),
+    }),
+    deleteStepBranch: build.mutation<
+      DeleteStepBranchApiResponse,
+      DeleteStepBranchApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/campaigns/${queryArg.id}/steps/${queryArg.stepId}/branch`,
+        method: "DELETE",
+      }),
+    }),
     launchCampaign: build.mutation<
       LaunchCampaignApiResponse,
       LaunchCampaignApiArg
@@ -2505,6 +2530,23 @@ export type ReorderStepsApiResponse =
 export type ReorderStepsApiArg = {
   id: string;
   reorderStepsRequest: ReorderStepsRequest;
+};
+export type GetCampaignGraphApiResponse =
+  /** status 200 The graph */ CampaignGraph;
+export type GetCampaignGraphApiArg = {
+  id: string;
+};
+export type SetStepBranchApiResponse =
+  /** status 200 The saved branch */ StepBranch;
+export type SetStepBranchApiArg = {
+  id: string;
+  stepId: string;
+  stepBranchRequest: StepBranchRequest;
+};
+export type DeleteStepBranchApiResponse = unknown;
+export type DeleteStepBranchApiArg = {
+  id: string;
+  stepId: string;
 };
 export type LaunchCampaignApiResponse =
   /** status 200 Enrollment + queue counts */ {
@@ -4375,6 +4417,20 @@ export type StepRequest = {
   body_text?: string;
   body_html?: string;
 };
+export type BranchValidationError = {
+  /** Human-readable message */
+  error: string;
+  code:
+    | "invalid_condition"
+    | "invalid_within_days"
+    | "invalid_reply_label"
+    | "no_exit_not_allowed"
+    | "unknown_step"
+    | "unknown_target"
+    | "cycle";
+  /** code cycle only: the steps on the loop, in path order */
+  step_ids?: string[];
+};
 export type StepVariant = {
   id: string;
   step_id: string;
@@ -4400,6 +4456,47 @@ export type StepBaseWeightRequest = {
 export type ReorderStepsRequest = {
   /** the FULL ordered list of the campaign's step ids, in the desired order */
   step_ids: string[];
+};
+export type StepBranchCondition =
+  "always" | "opened" | "clicked" | "replied" | "not_opened" | "not_replied";
+export type StepBranch = {
+  /** The step this branch routes out of */
+  step_id: string;
+  condition: StepBranchCondition;
+  /** Evaluation window in days after the step's send; null exactly when condition is always */
+  within_days: number | null;
+  /** replied / not_replied only: count only replies classified with this reply label key */
+  reply_label_key: string | null;
+  /** Where a true condition (or always) goes; null ends the path */
+  yes_step_id: string | null;
+  /** Where a false condition goes; null ends the path; always null for always */
+  no_step_id: string | null;
+  updated_at: string;
+};
+export type CampaignGraphNode = {
+  step_id: string;
+  step_order: number;
+  /** The next step by step_order - where this step goes when branch is null. Null for the last step. Present even when a branch overrides it. */
+  default_next_step_id: string | null;
+  /** The step's branch, or null for linear fall-through to default_next_step_id. */
+  branch: StepBranch | null;
+};
+export type CampaignGraph = {
+  campaign_id: string;
+  /** The first step (lowest step_order) every enrollment starts at; null for a campaign with no steps */
+  entry_step_id: string | null;
+  nodes: CampaignGraphNode[];
+};
+export type StepBranchRequest = {
+  condition: StepBranchCondition;
+  /** Required for every condition except always; must be absent or null for always */
+  within_days?: number | null;
+  /** Optional, replied / not_replied only; must name a reply label key in the workspace. Empty string is treated as null. */
+  reply_label_key?: string | null;
+  /** A step of the same campaign */
+  yes_step_id?: string | null;
+  /** As yes_step_id; must be null or absent for always */
+  no_step_id?: string | null;
 };
 export type CampaignPreflightCheck = {
   /** `personalization_tokens` FAILS (does not warn) when a step contains a `{{...}}` placeholder nothing will substitute, which is harsher than the neighbouring content checks on purpose: an empty body is visible the moment an operator looks at it, whereas a bad token produces an email that looks fine in the editor and arrives reading "Hi {{firstname}}" or "Hi ,". A token nothing resolves is always a typo or a since-archived field, never an intent. */
@@ -5351,6 +5448,9 @@ export const {
   useDeleteStepVariantMutation,
   useSetStepBaseWeightMutation,
   useReorderStepsMutation,
+  useGetCampaignGraphQuery,
+  useSetStepBranchMutation,
+  useDeleteStepBranchMutation,
   useLaunchCampaignMutation,
   useGetCampaignPreflightQuery,
   useTestSendCampaignMutation,

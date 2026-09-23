@@ -33,13 +33,15 @@ type Service struct {
 	store    Store
 	checker  CampaignChecker
 	variants VariantStore
+	branches BranchStore
 }
 
 // NewService builds the step service. variants is a second, narrow seam for A/B
 // variants: a distinct responsibility with distinct callers, and keeping it
 // separate is what lets the weight invariant be tested without a database.
-func NewService(store Store, checker CampaignChecker, variants VariantStore) *Service {
-	return &Service{store: store, checker: checker, variants: variants}
+// branches is the third, for the routing graph, for the same reason.
+func NewService(store Store, checker CampaignChecker, variants VariantStore, branches BranchStore) *Service {
+	return &Service{store: store, checker: checker, variants: variants, branches: branches}
 }
 
 // Create appends a step at max(step_order)+1. Structural change → requires the
@@ -82,6 +84,11 @@ func (s *Service) Update(ctx context.Context, ws, campaignID uuid.UUID, in Updat
 
 // Delete removes a step. Structural change → requires the campaign to be
 // draft (running/paused/done return 409).
+//
+// Branch exits that pointed at the deleted step become path ends (the FK nulls
+// them), and the linear fall-through re-links around the gap. That re-link can
+// close a loop through a branch elsewhere, so the delete commits only if the
+// resulting graph validates — refused with a *seqgraph.CycleError otherwise.
 func (s *Service) Delete(ctx context.Context, ws, campaignID, stepID uuid.UUID) error {
 	if err := s.requireDraft(ctx, ws, campaignID); err != nil {
 		return err
@@ -89,7 +96,7 @@ func (s *Service) Delete(ctx context.Context, ws, campaignID, stepID uuid.UUID) 
 	if err := s.assertStepInCampaign(ctx, ws, campaignID, stepID); err != nil {
 		return err
 	}
-	return s.store.Delete(ctx, ws, stepID)
+	return s.store.Delete(ctx, ws, campaignID, stepID, checkGraph)
 }
 
 // Reorder rewrites the campaign's step_order to match stepIDs' order.
@@ -109,7 +116,9 @@ func (s *Service) Reorder(ctx context.Context, ws, campaignID uuid.UUID, stepIDs
 	if err := validatePermutation(current, stepIDs); err != nil {
 		return nil, err
 	}
-	return s.store.Reorder(ctx, ws, campaignID, stepIDs)
+	// Reordering moves every linear fall-through edge, so like a delete it is
+	// committed only if the resulting graph has no loop.
+	return s.store.Reorder(ctx, ws, campaignID, stepIDs, checkGraph)
 }
 
 // validatePermutation confirms stepIDs contains each of current's ids exactly

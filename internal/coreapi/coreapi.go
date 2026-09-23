@@ -730,6 +730,18 @@ type StepSendJob struct {
 	// whereas a pause is a condition that CLEARS. The enrollment has to wait and
 	// resume, so the worker defers it (see the blocked branch in advance.go).
 	CampaignPaused bool `json:"campaign_paused"`
+	// ConditionPending means the enrollment's next move waits on a branch
+	// condition that is not decided yet, or on a routed step that is not due
+	// yet. The control plane has ALREADY re-stamped next_due_at to RecheckAt;
+	// the worker's only job is to schedule the next advance for then.
+	//
+	// Skip is set alongside it, deliberately: a worker built before this field
+	// existed decodes it as false and must not treat the otherwise-empty job as
+	// a send. Such a worker skips instead, and the stamped next_due_at lets the
+	// sweeper re-drive the enrollment. A current worker checks ConditionPending
+	// FIRST, so it schedules the recheck rather than leaving it to the sweeper.
+	ConditionPending bool      `json:"condition_pending"`
+	RecheckAt        time.Time `json:"recheck_at"`
 	// NotDueUntil is the enrollment's persisted next_due_at, carried so the
 	// claim can refuse a step that is not due yet. It exists because pushing
 	// next_due_at out (DeferEnrollment, the out-of-office path) cannot cancel

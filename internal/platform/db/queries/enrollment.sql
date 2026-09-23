@@ -134,3 +134,46 @@ WHERE status = 'active' AND next_due_at IS NOT NULL
   AND next_due_at < now() - interval '5 minutes'
 ORDER BY next_due_at ASC
 LIMIT 500;
+
+-- name: FinishEnrollment :exec
+-- A branch routed this enrollment to the end of its path WITHOUT a send: mark it
+-- completed and drop it out of the due index. Unlike CompleteEnrollment it leaves
+-- current_step and last_sent_at alone, because nothing was sent — they still
+-- describe the last message the contact actually received. Guarded on
+-- status='active' for the reason CompleteEnrollment is: a stop is terminal and wins.
+UPDATE sequence_enrollments
+SET status = 'completed', completed_at = now(), next_due_at = NULL
+WHERE id = $1 AND workspace_id = $2 AND status = 'active';
+
+-- name: AwaitEnrollmentCondition :exec
+-- A branch condition on the enrollment's current step is still open (or its
+-- routed step is not due yet): record when to look again, and that this wait is
+-- governed by a condition at this step (see awaiting_condition_step in migration
+-- 20260923110214). Stamping next_due_at keeps the sweeper from re-driving the
+-- enrollment every tick while it legitimately waits. Guarded on status='active'.
+UPDATE sequence_enrollments
+SET next_due_at = $3, awaiting_condition_step = current_step
+WHERE id = $1 AND workspace_id = $2 AND status = 'active';
+
+-- name: NudgeEnrollmentAwaitingReply :exec
+-- A reply that did NOT stop the enrollment just arrived. If the enrollment is
+-- waiting on a reply condition at its current step, pull its due time to now so
+-- the next sweep evaluates the condition instead of waiting out the re-check
+-- interval. Automated replies (out-of-office, auto-reply) are excluded: they are
+-- the only replies that defer an enrollment, and pulling next_due_at forward
+-- would undo that deferral. Never pushes a due time LATER, and is a no-op for
+-- every enrollment without a reply condition — which is every linear campaign.
+UPDATE sequence_enrollments e
+SET next_due_at = now()
+WHERE e.id = $1 AND e.workspace_id = $2 AND e.status = 'active'
+  AND e.next_due_at > now()
+  AND NOT COALESCE(
+        (SELECT rl.is_automated FROM reply_labels rl
+         WHERE rl.workspace_id = e.workspace_id AND rl.key = sqlc.arg(reply_class)::text),
+        sqlc.arg(reply_class)::text IN ('auto_reply', 'out_of_office'))
+  AND EXISTS (
+        SELECT 1 FROM sequence_step_branches b
+        JOIN sequence_steps s ON s.id = b.step_id AND s.campaign_id = b.campaign_id
+        WHERE b.campaign_id = e.campaign_id AND b.workspace_id = e.workspace_id
+          AND s.step_order = e.current_step
+          AND b.condition IN ('replied', 'not_replied'));
