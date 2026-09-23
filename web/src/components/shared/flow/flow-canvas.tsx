@@ -121,7 +121,10 @@ function FlowCanvasInner<N extends Node>({
           >
             <Background variant={BackgroundVariant.Dots} gap={18} size={1.2} />
             <Controls showInteractive={false} position="bottom-left" />
-            <ReadableFit signature={nodes.map((node) => node.id).join('|')} />
+            {/* Keyed by the node set: adding or removing a node remounts it, which is
+                what triggers a refit. A node merely moving keeps the key, so the
+                viewport stays on the step a user is reordering. */}
+            <ReadableFit key={nodes.map((node) => node.id).join('|')} />
           </ReactFlow>
         </FlowInsertContext.Provider>
       </FlowRegistryContext.Provider>
@@ -173,11 +176,11 @@ function prefersReducedMotion(): boolean {
 }
 
 /**
- * Fits the graph when its nodes change (not when one merely moves — that would
- * yank the viewport away from the node a user is reordering) or the pane
- * resizes. A graph too tall to fit at a readable zoom is shown from the top.
+ * Fits the graph on mount — the caller keys it by the node set, so that means
+ * whenever nodes are added or removed — and whenever the pane resizes. A graph
+ * too tall to fit at a readable zoom is shown from the top.
  */
-function ReadableFit({ signature }: { signature: string }) {
+function ReadableFit() {
   const { fitView, setViewport, getNodes } = useReactFlow()
   const width = useStore((state) => state.width)
   const height = useStore((state) => state.height)
@@ -203,6 +206,6 @@ function ReadableFit({ signature }: { signature: string }) {
       y: FIT_PADDING - bounds.y * zoom,
       zoom,
     })
-  }, [fitView, getNodes, height, setViewport, signature, width])
+  }, [fitView, getNodes, height, setViewport, width])
   return null
 }
