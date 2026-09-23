@@ -53,6 +53,9 @@ type Service struct {
 	// the same terms as everything else here.
 	compose    ComposeStore
 	composeEnq ComposeEnqueuer
+	// search backs full-text search (see search.go). Optional on the same terms
+	// as everything else here.
+	search SearchStore
 	// clock is the Service's source of "now", injected so time-bounded rules
 	// (the snooze horizon) are testable at a fixed instant rather than
 	// reaching for the process clock. nil means time.Now — see now().

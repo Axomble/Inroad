@@ -3117,6 +3117,90 @@ paths:
               schema: { $ref: '#/components/schemas/InboxThreadPage' }
         '400': { description: "Malformed filter (bad UUID/timestamp, a half-set keyset cursor, an unknown scope, or an out-of-range tz_offset)" }
         '401': { description: Unauthorized }
+  /inbox/search:
+    get:
+      operationId: searchInboxThreads
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Full-text search over the workspace's threads, covering BOTH legs of
+        each conversation: the contact's replies and everything sent on the
+        thread — campaign steps (the copy, or A/B variant, that send actually
+        carried) and manual replies. Matches subjects and plain-text bodies,
+        with English stemming ("meetings" finds "meeting").
+
+
+        Results are ordered newest first (last_message_at, then id), like
+        listInboxThreads — not by relevance. Page forward with next_cursor.
+
+
+        Accepts the same `scope`, `tz_offset`, `mailbox_id`, `reply_class` and
+        `label` filters as listInboxThreads, so a search inside a scope returns
+        a subset of that scope. As with the list's `q`, snoozed threads are
+        INCLUDED unless scope is `snoozed` (which restricts to them).
+
+
+        A query with no searchable words (only stop words such as "the", or only
+        punctuation) is not an error; it matches nothing and returns an empty
+        page.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: >-
+            Web-search syntax: words are ANDed, "quoted phrases" match in order,
+            OR between words matches either, and a leading - excludes a word. Any
+            string is accepted as syntax — there is no query that is a syntax
+            error. Leading/trailing whitespace is trimmed; the trimmed query must
+            be non-empty and at most 256 characters, valid UTF-8, with no NUL.
+          schema: { type: string, minLength: 1, maxLength: 256 }
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            Opaque cursor from the previous page's next_cursor. Omit for the first
+            page. Keep every other parameter unchanged while paging.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 25, capped at 50 (a larger request is clamped, not rejected).
+          schema: { type: integer, minimum: 1 }
+        - name: scope
+          in: query
+          required: false
+          description: See listInboxThreads.
+          schema:
+            type: string
+            enum: [all, unread, today, this_week, awaiting_reply, snoozed]
+        - name: tz_offset
+          in: query
+          required: false
+          description: See listInboxThreads. Only read when scope is `today` or `this_week`.
+          schema: { type: integer, minimum: -720, maximum: 840 }
+        - name: mailbox_id
+          in: query
+          required: false
+          description: Restrict to one mailbox.
+          schema: { type: string, format: uuid }
+        - name: reply_class
+          in: query
+          required: false
+          description: Restrict to one reply classification.
+          schema: { type: string }
+        - name: label
+          in: query
+          required: false
+          description: Restrict to threads carrying one operator-assigned label.
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: One page of matching threads
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxSearchPage' }
+        '400': { description: "Missing, blank, over-long or malformed q; a malformed or foreign cursor; or a malformed filter (as listInboxThreads)" }
+        '401': { description: Unauthorized }
   /inbox/overview:
     get:
       operationId: getInboxOverview
@@ -7183,6 +7267,64 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    InboxSearchPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/InboxSearchHit' } }
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` to fetch the next page; null on the last page.
+    InboxSearchHit:
+      type: object
+      required: [thread, matched_legs, snippet]
+      properties:
+        thread: { $ref: '#/components/schemas/InboxThreadSummary' }
+        matched_legs:
+          type: array
+          description: >-
+            Which leg(s) of the thread matched, always non-empty and in this
+            order: `inbound` (the contact's replies), `outbound` (anything sent
+            on the thread — campaign steps and manual replies).
+          items: { type: string, enum: [inbound, outbound] }
+        snippet:
+          type: object
+          allOf: [{ $ref: '#/components/schemas/InboxSearchSnippet' }]
+          nullable: true
+          description: >-
+            The newest matching message on the thread, highlighted. Null only if
+            it could not be re-derived for a matched thread, which should not
+            happen; render the thread without a snippet rather than dropping it.
+    InboxSearchSnippet:
+      type: object
+      required: [direction, occurred_at, subject, body]
+      properties:
+        direction: { type: string, enum: [inbound, outbound], description: "Which leg the snippet's message is on." }
+        occurred_at: { type: string, format: date-time }
+        subject:
+          type: array
+          description: The message's whole subject, split into highlighted and plain runs.
+          items: { $ref: '#/components/schemas/InboxSearchHighlightSegment' }
+        body:
+          type: array
+          description: >-
+            Up to two fragments of the plain-text body around the matches (joined
+            by " … "), split into highlighted and plain runs. `[]` when the body
+            is empty. When the only matches lie far into a very long body, this
+            is the start of the body with no highlighted run.
+          items: { $ref: '#/components/schemas/InboxSearchHighlightSegment' }
+    InboxSearchHighlightSegment:
+      type: object
+      required: [text, match]
+      properties:
+        text:
+          type: string
+          description: >-
+            Plain text, NEVER HTML — it is message content and may contain
+            anything, including markup. Render it escaped (e.g. as a React text
+            node), wrapping runs where match is true in <mark>.
+        match: { type: boolean, description: "True for a run matching the query." }
     InboxComposeDraft:
       type: object
       required: [id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, updated_at]

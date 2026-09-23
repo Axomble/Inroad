@@ -658,8 +658,8 @@ func run() error {
 	// workspace AI configuration, one credential-unsealing path.
 	// One PgStore, handed in five times: it implements inbox.Store (threads and
 	// messages), inbox.SnoozeStore, inbox.LabelStore (triage state),
-	// inbox.PendingReplyStore (deferred replies) and inbox.ComposeStore (drafts
-	// + composed emails). The interfaces are separate so a caller needing only
+	// inbox.PendingReplyStore (deferred replies), inbox.ComposeStore (drafts
+	// + composed emails) and inbox.SearchStore (full-text search). The interfaces are separate so a caller needing only
 	// one need not satisfy the others, not because the persistence is.
 	inboxStore := inbox.NewPgStore(pool)
 	inboxHandler := inbox.NewHandler(inbox.NewService(inboxStore,
@@ -676,6 +676,7 @@ func run() error {
 		inbox.WithPendingReplyEnqueuer(enq),
 		inbox.WithComposeStore(inboxStore),
 		inbox.WithComposeEnqueuer(enq),
+		inbox.WithSearchStore(inboxStore),
 	))
 	// Per-IP and per-WORKSPACE cap on reply drafting. Unlike the pre-auth
 	// throttles above, the account key comes from the authenticated principal

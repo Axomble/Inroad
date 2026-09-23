@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -254,24 +255,9 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 // misleadingly "unfiltered" page instead of surfacing the caller's typo.
 func parseListFilter(r *http.Request) (ListFilter, error) {
 	q := r.URL.Query()
-	var filter ListFilter
-
-	if raw := q.Get("mailbox_id"); raw != "" {
-		id, err := uuid.Parse(raw)
-		if err != nil {
-			return ListFilter{}, errors.New("mailbox_id must be a UUID")
-		}
-		filter.MailboxID = &id
-	}
-	if raw := q.Get("reply_class"); raw != "" {
-		filter.ReplyClass = &raw
-	}
-	if raw := q.Get("label"); raw != "" {
-		id, err := uuid.Parse(raw)
-		if err != nil {
-			return ListFilter{}, errors.New("label must be a UUID")
-		}
-		filter.LabelID = &id
+	filter, err := parseFacets(q)
+	if err != nil {
+		return ListFilter{}, err
 	}
 	filter.Query = q.Get("q")
 	beforeAt := q.Get("before_last_message_at")
@@ -296,15 +282,40 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 		filter.BeforeLastMessageAt = &at
 		filter.BeforeID = &id
 	}
+	if err := applyScope(&filter, q.Get("scope"), filter.Query != "", r); err != nil {
+		return ListFilter{}, err
+	}
+	return filter, nil
+}
+
+// parseFacets reads the query controls the thread list and the search share:
+// ?mailbox_id=&reply_class=&label=&limit=. Scope is not among them because its
+// snooze rule depends on whether the caller is searching — see applyScope.
+func parseFacets(q url.Values) (ListFilter, error) {
+	var filter ListFilter
+	if raw := q.Get("mailbox_id"); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			return ListFilter{}, errors.New("mailbox_id must be a UUID")
+		}
+		filter.MailboxID = &id
+	}
+	if raw := q.Get("reply_class"); raw != "" {
+		filter.ReplyClass = &raw
+	}
+	if raw := q.Get("label"); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			return ListFilter{}, errors.New("label must be a UUID")
+		}
+		filter.LabelID = &id
+	}
 	if raw := q.Get("limit"); raw != "" {
 		limit, err := strconv.ParseInt(raw, 10, 32)
 		if err != nil || limit < 1 {
 			return ListFilter{}, errors.New("limit must be a positive integer")
 		}
 		filter.Limit = int32(limit)
-	}
-	if err := applyScope(&filter, q.Get("scope"), r); err != nil {
-		return ListFilter{}, err
 	}
 	return filter, nil
 }
@@ -330,13 +341,14 @@ const (
 // list agrees with the count the rail rendered beside it: computing the two
 // from different clocks would let a thread be counted in "today" but missing
 // from the list it links to.
-func applyScope(filter *ListFilter, scope string, r *http.Request) error {
+func applyScope(filter *ListFilter, scope string, searching bool, r *http.Request) error {
 	// Snoozed threads are hidden from every scope but `snoozed` itself — that
-	// is what snoozing means. The one exception is a SEARCH: a query is the
-	// operator asking for a specific thread by name, and answering "no results"
-	// because they snoozed it last week reads as data loss. Set before the
-	// switch so the `snoozed` case can override it.
-	filter.SnoozeHidden = filter.Query == ""
+	// is what snoozing means. The one exception is a SEARCH (the list's ?q= or
+	// GET /inbox/search): a query is the operator asking for a specific thread
+	// by name, and answering "no results" because they snoozed it last week
+	// reads as data loss. Set before the switch so the `snoozed` case can
+	// override it.
+	filter.SnoozeHidden = !searching
 
 	switch scope {
 	case "", scopeAll:

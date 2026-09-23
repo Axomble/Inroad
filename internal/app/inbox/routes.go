@@ -36,6 +36,9 @@ func (h *Handler) Routes(draftThrottle func(http.Handler) http.Handler) http.Han
 	r.With(read).Get("/overview", h.overview)
 	r.With(read).Get("/threads", h.list)
 	r.With(read).Get("/threads/{id}", h.get)
+	// Full-text search reads exactly what the list and reader already expose,
+	// so it is inbox:read like them.
+	r.With(read).Get("/search", h.search)
 	r.With(send).Post("/threads/{id}/reply", h.reply)
 	draft := []func(http.Handler) http.Handler{send}
 	if draftThrottle != nil {
