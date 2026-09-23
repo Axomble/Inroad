@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -18,16 +19,25 @@ import (
 type fakeBranchStore struct {
 	steps    []gen.SequenceStep
 	branches map[uuid.UUID]gen.SequenceStepBranch
-	labels   map[string]bool
-	upserts  int
+	// labels maps a label key to whether it stops the enrollment; a missing key
+	// is a label that does not exist.
+	labels map[string]bool
+	// trackingOff models a campaign with tracking disabled.
+	trackingOff bool
+	upserts     int
 }
 
 func (f *fakeBranchStore) ListBranches(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStepBranch, error) {
 	return f.list(), nil
 }
 
-func (f *fakeBranchStore) ReplyLabelExists(_ context.Context, _ uuid.UUID, key string) (bool, error) {
-	return f.labels[key], nil
+func (f *fakeBranchStore) ReplyLabelStops(_ context.Context, _ uuid.UUID, key string) (stops, found bool, err error) {
+	stops, found = f.labels[key]
+	return stops, found, nil
+}
+
+func (f *fakeBranchStore) TrackingEnabled(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return !f.trackingOff, nil
 }
 
 func (f *fakeBranchStore) UpsertBranch(_ context.Context, ws uuid.UUID, in BranchInput, check GraphCheck) (gen.SequenceStepBranch, error) {
@@ -78,6 +88,8 @@ func (f *fakeBranchStore) list() []gen.SequenceStepBranch {
 type branchFixture struct {
 	svc      *Service
 	branches *fakeBranchStore
+	variants *fakeVariantStore
+	steps    *stepsByID
 	campaign uuid.UUID
 	ws       uuid.UUID
 	step     []uuid.UUID
@@ -91,13 +103,16 @@ func newBranchFixture(t *testing.T, status string) branchFixture {
 	for i := range 3 {
 		id := uuid.New()
 		ids = append(ids, id)
-		steps = append(steps, gen.SequenceStep{ID: id, CampaignID: campaign, StepOrder: int32(i + 1)})
+		steps = append(steps, gen.SequenceStep{ID: id, CampaignID: campaign, StepOrder: int32(i + 1), BodyHtml: "<p>hi</p>"})
 	}
-	bs := &fakeBranchStore{steps: steps, labels: map[string]bool{"positive": true}}
+	// "positive" is a builtin label (stops the enrollment); "soft_yes" is a
+	// custom one that does not.
+	bs := &fakeBranchStore{steps: steps, labels: map[string]bool{"positive": true, "soft_yes": false}}
 	store := &stepsByID{steps: steps}
+	vs := &fakeVariantStore{}
 	return branchFixture{
-		svc:      NewService(store, fakeChecker{status: status}, &fakeVariantStore{}, bs),
-		branches: bs, campaign: campaign, ws: uuid.New(), step: ids,
+		svc:      NewService(store, fakeChecker{status: status}, vs, bs),
+		branches: bs, variants: vs, steps: store, campaign: campaign, ws: uuid.New(), step: ids,
 	}
 }
 
@@ -139,10 +154,83 @@ func TestSetBranchHappyPathOnRunningCampaign(t *testing.T) {
 
 func TestSetBranchRejectsMissingCampaign(t *testing.T) {
 	f := newBranchFixture(t, "draft")
-	svc := NewService(&fakeStore{}, fakeChecker{err: errors.New("no rows")}, &fakeVariantStore{}, f.branches)
+	svc := NewService(&fakeStore{}, fakeChecker{err: pgx.ErrNoRows}, &fakeVariantStore{}, f.branches)
 	_, err := svc.SetBranch(context.Background(), f.ws, f.campaign, BranchInput{StepID: f.step[0], Condition: "always"})
 	if !errors.Is(err, ErrCampaignNotFound) {
 		t.Fatalf("want ErrCampaignNotFound, got %v", err)
+	}
+}
+
+// Only a genuine miss is a 404. A database failure looking the campaign up is
+// a server error, and all three graph endpoints must say so rather than
+// telling the client the campaign does not exist.
+func TestGraphEndpointsDoNotReportADatabaseErrorAsNotFound(t *testing.T) {
+	f := newBranchFixture(t, "draft")
+	boom := errors.New("connection reset")
+	svc := NewService(f.steps, fakeChecker{err: boom}, &fakeVariantStore{}, f.branches)
+	ctx := context.Background()
+	_, gerr := svc.Graph(ctx, f.ws, f.campaign)
+	_, serr := svc.SetBranch(ctx, f.ws, f.campaign, BranchInput{StepID: f.step[0], Condition: "always"})
+	derr := svc.DeleteBranch(ctx, f.ws, f.campaign, f.step[0])
+	for name, err := range map[string]error{"Graph": gerr, "SetBranch": serr, "DeleteBranch": derr} {
+		if !errors.Is(err, boom) || errors.Is(err, ErrCampaignNotFound) {
+			t.Errorf("%s: got %v, want the wrapped database error", name, err)
+		}
+	}
+}
+
+// A reply condition may name a label only if replies with it leave the
+// enrollment running: a stopping label (every builtin human one) ends the
+// sequence before any branch is consulted, so the branch could never fire.
+func TestSetBranchReplyLabelMustNotStopTheSequence(t *testing.T) {
+	ctx := context.Background()
+	f := newBranchFixture(t, "running")
+	_, err := f.svc.SetBranch(ctx, f.ws, f.campaign, BranchInput{
+		StepID: f.step[0], Condition: "replied", WithinDays: ptr(int32(2)), ReplyLabelKey: ptr("positive"), YesStepID: &f.step[2],
+	})
+	if seqgraph.CodeOf(err) != seqgraph.CodeLabelStopsSequence {
+		t.Fatalf("stopping label: code %q (%v), want %q", seqgraph.CodeOf(err), err, seqgraph.CodeLabelStopsSequence)
+	}
+	if _, err := f.svc.SetBranch(ctx, f.ws, f.campaign, BranchInput{
+		StepID: f.step[0], Condition: "not_replied", WithinDays: ptr(int32(2)), ReplyLabelKey: ptr("soft_yes"), YesStepID: &f.step[2],
+	}); err != nil {
+		t.Fatalf("a non-stopping label is routable: %v", err)
+	}
+}
+
+// Open and click conditions need somewhere for an open or click to be recorded:
+// tracking on for the campaign, and an HTML body on the step and every variant.
+// Reply conditions need neither.
+func TestSetBranchOpenClickNeedTracking(t *testing.T) {
+	ctx := context.Background()
+	openIn := func(f branchFixture, cond string) BranchInput {
+		return BranchInput{StepID: f.step[0], Condition: cond, WithinDays: ptr(int32(1)), YesStepID: &f.step[1]}
+	}
+
+	f := newBranchFixture(t, "running")
+	f.branches.trackingOff = true
+	for _, cond := range []string{"opened", "clicked", "not_opened"} {
+		if _, err := f.svc.SetBranch(ctx, f.ws, f.campaign, openIn(f, cond)); seqgraph.CodeOf(err) != seqgraph.CodeTrackingRequired {
+			t.Errorf("%s with tracking off: %v", cond, err)
+		}
+	}
+	if _, err := f.svc.SetBranch(ctx, f.ws, f.campaign, openIn(f, "replied")); err != nil {
+		t.Errorf("replied does not need tracking: %v", err)
+	}
+
+	f = newBranchFixture(t, "running")
+	f.steps.steps[0].BodyHtml = ""
+	if _, err := f.svc.SetBranch(ctx, f.ws, f.campaign, openIn(f, "opened")); seqgraph.CodeOf(err) != seqgraph.CodeTrackingRequired {
+		t.Errorf("text-only step: %v", err)
+	}
+
+	f = newBranchFixture(t, "running")
+	f.variants.variants = []Variant{{ID: uuid.New(), StepID: f.step[0], BodyHTML: "<p>b</p>"}, {ID: uuid.New(), StepID: f.step[0]}}
+	if _, err := f.svc.SetBranch(ctx, f.ws, f.campaign, openIn(f, "clicked")); seqgraph.CodeOf(err) != seqgraph.CodeTrackingRequired {
+		t.Errorf("a text-only variant: %v", err)
+	}
+	if f.branches.upserts != 0 {
+		t.Fatal("a refused open/click branch must not be written")
 	}
 }
 
@@ -209,6 +297,9 @@ func TestSetBranchShapeErrors(t *testing.T) {
 		"label on an open": {func(f branchFixture) BranchInput {
 			return BranchInput{StepID: f.step[0], Condition: "opened", WithinDays: ptr(int32(1)), ReplyLabelKey: ptr("positive")}
 		}, seqgraph.CodeLabelNotAllowed},
+		"label that stops the sequence": {func(f branchFixture) BranchInput {
+			return BranchInput{StepID: f.step[0], Condition: "replied", WithinDays: ptr(int32(1)), ReplyLabelKey: ptr("positive")}
+		}, seqgraph.CodeLabelStopsSequence},
 		"label that does not exist": {func(f branchFixture) BranchInput {
 			return BranchInput{StepID: f.step[0], Condition: "replied", WithinDays: ptr(int32(1)), ReplyLabelKey: ptr("ghost")}
 		}, seqgraph.CodeLabelNotAllowed},
@@ -289,7 +380,7 @@ func TestGraphReturnsStepsAndBranches(t *testing.T) {
 }
 
 func TestGraphRejectsMissingCampaign(t *testing.T) {
-	svc := NewService(&fakeStore{}, fakeChecker{err: errors.New("no rows")}, &fakeVariantStore{}, &fakeBranchStore{})
+	svc := NewService(&fakeStore{}, fakeChecker{err: pgx.ErrNoRows}, &fakeVariantStore{}, &fakeBranchStore{})
 	if _, err := svc.Graph(context.Background(), uuid.New(), uuid.New()); !errors.Is(err, ErrCampaignNotFound) {
 		t.Fatalf("want ErrCampaignNotFound, got %v", err)
 	}

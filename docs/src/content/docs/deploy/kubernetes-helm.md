@@ -19,6 +19,10 @@ helm upgrade --install inroad ./deploy/helm/inroad \
   --set secrets.masterKey="$(openssl rand -base64 32)"
 ```
 
+## Database requirement
+
+If you point the chart at an existing or managed Postgres rather than the one it deploys, check the version first. PostgreSQL **15 or newer is required**; 16 is what every bundled deployment runs and what CI tests against. The schema uses column-list `ON DELETE SET NULL (column)` foreign keys (the conditional-branching migration, `20260923110214_sequence_step_branches`), which PostgreSQL 14 and older reject, so migrations stop there on an older server.
+
 ## Chart Components
 
 - **`deployment-api.yaml`:** API server pods with HTTP liveness/readiness probes.

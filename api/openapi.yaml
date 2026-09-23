@@ -2245,7 +2245,7 @@ paths:
         '404': { description: Campaign or step not found }
         '409': { description: Campaign not draft (reorder is a structural edit) }
         '422':
-          description: The new order's fall-through edges would close a loop through a branch (code cycle)
+          description: "The new order's fall-through edges would close a loop through a branch (code cycle)"
           content: { application/json: { schema: { $ref: '#/components/schemas/BranchValidationError' } } }
   /campaigns/{id}/graph:
     get:
@@ -2268,7 +2268,7 @@ paths:
         '200': { description: The graph, content: { application/json: { schema: { $ref: '#/components/schemas/CampaignGraph' } } } }
         '400': { description: Campaign id is not a uuid }
         '401': { description: Unauthorized }
-        '403': { description: Insufficient scope (campaigns:read) }
+        '403': { description: "Insufficient scope (campaigns:read)" }
         '404': { description: Campaign not found }
   /campaigns/{id}/steps/{stepId}/branch:
     parameters:
@@ -2291,14 +2291,25 @@ paths:
         never affected.
 
 
-        Conditions are evaluated against THIS step's send: opened / clicked
-        count HUMAN tracking events only (machine prefetches are ignored);
-        replied / not_replied count inbound replies from the contact on this
-        campaign, excluding automated ones (out-of-office, auto-reply) unless
-        reply_label_key names one explicitly. A reply whose label stops the
-        enrollment (the default for every human label) still stops it - a
-        branch never overrides a reply label's automation - so a replied branch
-        acts on replies whose label has stops_enrollment=false.
+        Conditions are evaluated against THIS step's send. opened / clicked /
+        not_opened count HUMAN tracking events only (machine prefetches are
+        ignored), so they are refused with 400 (code tracking_required) unless
+        the campaign has tracking on and the step and every one of its variants
+        has an HTML body.
+
+
+        replied / not_replied only ever route on replies whose reply label does
+        NOT stop the sequence. Reply labels decide what a reply does, and a
+        branch never overrides them: a reply whose label has
+        stops_enrollment=true - which by default is EVERY human label
+        (Interested, Not interested, Neutral, Unclassified, Unsubscribe) -
+        stops the sequence the moment it arrives, before any branch is
+        consulted. So with the default labels a replied branch never fires; to
+        route on replies, turn stops_enrollment off on the label (or create one
+        that does not stop) and name it in reply_label_key. Naming a stopping
+        label is refused with 400 (code reply_label_stops_sequence). Without a
+        label, replied counts any non-automated reply that leaves the sequence
+        running; out-of-office and auto-replies count only when named.
 
 
         Refused with 422 (code cycle) when the result would let any path revisit
@@ -2311,13 +2322,13 @@ paths:
       responses:
         '200': { description: The saved branch, content: { application/json: { schema: { $ref: '#/components/schemas/StepBranch' } } } }
         '400':
-          description: "Malformed branch (codes invalid_condition, invalid_within_days, invalid_reply_label, no_exit_not_allowed; cycle for an exit to the step itself). Invalid json or path ids return a plain {error} body."
+          description: "Malformed or unusable branch (codes invalid_condition, invalid_within_days, invalid_reply_label, reply_label_stops_sequence, tracking_required, no_exit_not_allowed; cycle for an exit to the step itself). Invalid json or path ids return a plain {error} body."
           content: { application/json: { schema: { $ref: '#/components/schemas/BranchValidationError' } } }
         '401': { description: Unauthorized }
-        '403': { description: Insufficient scope (campaigns:write) }
+        '403': { description: "Insufficient scope (campaigns:write)" }
         '404': { description: Campaign or step not found }
         '422':
-          description: The graph refuses the edit (codes cycle, unknown_target)
+          description: "The graph refuses the edit (codes cycle, unknown_target)"
           content: { application/json: { schema: { $ref: '#/components/schemas/BranchValidationError' } } }
     delete:
       operationId: deleteStepBranch
@@ -2332,7 +2343,7 @@ paths:
       responses:
         '204': { description: Removed (or there was none) }
         '401': { description: Unauthorized }
-        '403': { description: Insufficient scope (campaigns:write) }
+        '403': { description: "Insufficient scope (campaigns:write)" }
         '404': { description: Campaign or step not found }
         '422':
           description: The restored fall-through would close a loop (code cycle)
@@ -5158,7 +5169,7 @@ components:
         step_id: { type: string, format: uuid, description: The step this branch routes out of }
         condition: { $ref: '#/components/schemas/StepBranchCondition' }
         within_days: { type: integer, minimum: 1, maximum: 90, nullable: true, description: "Evaluation window in days after the step's send; null exactly when condition is always" }
-        reply_label_key: { type: string, nullable: true, description: "replied / not_replied only: count only replies classified with this reply label key" }
+        reply_label_key: { type: string, nullable: true, description: "replied / not_replied only: count only replies classified with this reply label key (always a label that does not stop the sequence)" }
         yes_step_id: { type: string, format: uuid, nullable: true, description: "Where a true condition (or always) goes; null ends the path" }
         no_step_id: { type: string, format: uuid, nullable: true, description: "Where a false condition goes; null ends the path; always null for always" }
         updated_at: { type: string, format: date-time }
@@ -5167,10 +5178,10 @@ components:
       required: [condition]
       properties:
         condition: { $ref: '#/components/schemas/StepBranchCondition' }
-        within_days: { type: integer, minimum: 1, maximum: 90, nullable: true, description: Required for every condition except always; must be absent or null for always }
-        reply_label_key: { type: string, nullable: true, description: "Optional, replied / not_replied only; must name a reply label key in the workspace. Empty string is treated as null." }
+        within_days: { type: integer, minimum: 1, maximum: 90, nullable: true, description: "Required for every condition except always; must be absent or null for always" }
+        reply_label_key: { type: string, nullable: true, description: "Optional, replied / not_replied only. Must name a reply label key in the workspace whose stops_enrollment is false (a stopping label ends the sequence before any branch runs). Empty string is treated as null." }
         yes_step_id: { type: string, format: uuid, nullable: true, description: "A step of the same campaign, not this step; null or absent ends the path" }
-        no_step_id: { type: string, format: uuid, nullable: true, description: As yes_step_id; must be null or absent for always }
+        no_step_id: { type: string, format: uuid, nullable: true, description: "As yes_step_id; must be null or absent for always" }
     CampaignGraphNode:
       type: object
       required: [step_id, step_order, default_next_step_id, branch]
@@ -5182,13 +5193,13 @@ components:
           allOf: [{ $ref: '#/components/schemas/StepBranch' }]
           type: object
           nullable: true
-          description: The step's branch, or null for linear fall-through to default_next_step_id.
+          description: "The step's branch, or null for linear fall-through to default_next_step_id."
     CampaignGraph:
       type: object
       required: [campaign_id, entry_step_id, nodes]
       properties:
         campaign_id: { type: string, format: uuid }
-        entry_step_id: { type: string, format: uuid, nullable: true, description: The first step (lowest step_order) every enrollment starts at; null for a campaign with no steps }
+        entry_step_id: { type: string, format: uuid, nullable: true, description: "The first step (lowest step_order) every enrollment starts at; null for a campaign with no steps" }
         nodes: { type: array, items: { $ref: '#/components/schemas/CampaignGraphNode' } }
     BranchValidationError:
       type: object
@@ -5197,7 +5208,7 @@ components:
         error: { type: string, description: Human-readable message }
         code:
           type: string
-          enum: [invalid_condition, invalid_within_days, invalid_reply_label, no_exit_not_allowed, unknown_step, unknown_target, cycle]
+          enum: [invalid_condition, invalid_within_days, invalid_reply_label, reply_label_stops_sequence, tracking_required, no_exit_not_allowed, unknown_step, unknown_target, cycle]
         step_ids:
           type: array
           items: { type: string, format: uuid }

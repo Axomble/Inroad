@@ -41,7 +41,11 @@ type BranchInput struct {
 // graph rules testable without a database.
 type BranchStore interface {
 	ListBranches(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStepBranch, error)
-	ReplyLabelExists(ctx context.Context, ws uuid.UUID, key string) (bool, error)
+	// ReplyLabelStops reports whether the workspace's label with this key stops
+	// the enrollment; found=false when no such label exists.
+	ReplyLabelStops(ctx context.Context, ws uuid.UUID, key string) (stops, found bool, err error)
+	// TrackingEnabled reports whether the campaign records opens and clicks.
+	TrackingEnabled(ctx context.Context, ws, campaignID uuid.UUID) (bool, error)
 	// UpsertBranch creates or replaces the router on in.StepID, then runs check
 	// on the result, in one transaction holding the campaign's graph lock.
 	UpsertBranch(ctx context.Context, ws uuid.UUID, in BranchInput, check GraphCheck) (gen.SequenceStepBranch, error)
@@ -81,8 +85,23 @@ func (s *PgBranchStore) ListBranches(ctx context.Context, ws, campaignID uuid.UU
 	return s.q.ListBranchesByCampaign(ctx, gen.ListBranchesByCampaignParams{CampaignID: campaignID, WorkspaceID: ws})
 }
 
-func (s *PgBranchStore) ReplyLabelExists(ctx context.Context, ws uuid.UUID, key string) (bool, error) {
-	return s.q.ReplyLabelKeyExists(ctx, gen.ReplyLabelKeyExistsParams{WorkspaceID: ws, Key: key})
+func (s *PgBranchStore) ReplyLabelStops(ctx context.Context, ws uuid.UUID, key string) (stops, found bool, err error) {
+	stops, err = s.q.ReplyLabelStopsEnrollment(ctx, gen.ReplyLabelStopsEnrollmentParams{WorkspaceID: ws, Key: key})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("reply label lookup: %w", err)
+	}
+	return stops, true, nil
+}
+
+func (s *PgBranchStore) TrackingEnabled(ctx context.Context, ws, campaignID uuid.UUID) (bool, error) {
+	on, err := s.q.CampaignTrackingEnabled(ctx, gen.CampaignTrackingEnabledParams{ID: campaignID, WorkspaceID: ws})
+	if err != nil {
+		return false, fmt.Errorf("campaign tracking lookup: %w", err)
+	}
+	return on, nil
 }
 
 func (s *PgBranchStore) UpsertBranch(ctx context.Context, ws uuid.UUID, in BranchInput, check GraphCheck) (gen.SequenceStepBranch, error) {

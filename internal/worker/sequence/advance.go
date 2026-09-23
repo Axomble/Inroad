@@ -172,15 +172,13 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// stamped next_due_at; all that is left is to look again then. Checked
 		// BEFORE Skip, which rides along on this job only so that a worker built
 		// before ConditionPending existed does nothing harmful with it.
-		// result=deferred: a self-clearing wait, the same bucket as the
-		// campaign-limit and capacity defers below. Metric AFTER the enqueue, for
-		// their double-count reason.
+		//
+		// Deliberately NO inroad_sends_total increment. A condition wait is not a
+		// send outcome at all — nothing was due to go out — and it recurs hourly
+		// for every waiting enrollment, so counting it as result="deferred" would
+		// swamp the capacity and limit defers that bucket exists to show.
 		if job.ConditionPending {
-			if err := enq.EnqueueAdvanceAt(ctx, p.EnrollmentID, p.WorkspaceID, job.RecheckAt); err != nil {
-				return err
-			}
-			mtx.SendFinalized(sendKind, "deferred")
-			return nil
+			return enq.EnqueueAdvanceAt(ctx, p.EnrollmentID, p.WorkspaceID, job.RecheckAt)
 		}
 
 		// Enrollment no longer active (stopped/completed) or no next step.

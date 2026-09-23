@@ -103,7 +103,11 @@ SELECT COALESCE(sqlc.narg(not_due_until)::timestamptz > now(), false)::bool AS n
 -- path need not visit steps in step_order — 1 → 3 → 2 is a valid path — and
 -- threading onto the highest-numbered step would reply to a message that is not
 -- the latest one the contact received.
+--
+-- Workspace-pinned like every other tenant read, even though (campaign_id,
+-- contact_id) already came from a workspace-scoped bundle: the pin costs nothing
+-- and keeps this from depending on its caller's discipline.
 SELECT message_id, references_header FROM sends
-WHERE campaign_id = $1 AND contact_id = $2 AND status = 'sent'
+WHERE campaign_id = $1 AND contact_id = $2 AND workspace_id = $3 AND status = 'sent'
 ORDER BY sent_at DESC NULLS LAST, step_order DESC
 LIMIT 1;

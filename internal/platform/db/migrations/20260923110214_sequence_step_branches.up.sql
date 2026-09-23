@@ -27,6 +27,10 @@
 -- validation. Cycles cannot be expressed as a constraint and are rejected by the
 -- service at save time (internal/platform/seqgraph), with a runtime backstop in
 -- the send path.
+--
+-- The reply-condition index on inbox_threads lives in its own migration
+-- (20260923144758_inbox_threads_campaign_contact_index) so it can be built
+-- CONCURRENTLY, without locking a live table inside this file's transaction.
 
 -- Referenceable by the composite FKs below. Redundant with the primary key for
 -- uniqueness; exists solely to be referenced, the same shape as
@@ -102,12 +106,3 @@ CREATE INDEX idx_sequence_step_branches_no ON sequence_step_branches (no_step_id
 -- ahead of its delay. Stale by construction once current_step moves on, so the
 -- cursor advance never has to clear it.
 ALTER TABLE sequence_enrollments ADD COLUMN awaiting_condition_step INT;
-
--- Reply conditions look for an inbound message on the enrollment's campaign and
--- contact; every existing inbox_threads index leads with workspace_id and a
--- mailbox or a sort key, so that lookup would otherwise walk every thread in the
--- workspace, once per waiting enrollment per re-check. Not CONCURRENTLY:
--- golang-migrate runs a file in one transaction (see
--- 20260827185855_inbox_messages_mailbox_id).
-CREATE INDEX idx_inbox_threads_campaign_contact
-    ON inbox_threads (campaign_id, contact_id) WHERE campaign_id IS NOT NULL;

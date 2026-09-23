@@ -163,10 +163,17 @@ WHERE id = $1 AND workspace_id = $2 AND status = 'active';
 -- the only replies that defer an enrollment, and pulling next_due_at forward
 -- would undo that deferral. Never pushes a due time LATER, and is a no-op for
 -- every enrollment without a reply condition — which is every linear campaign.
+--
+-- awaiting_condition_step = current_step is the second half of that deferral
+-- guard: it proves the due time being pulled forward was stamped by a CONDITION
+-- wait at this step. An out-of-office deferral is stamped by DeferEnrollment,
+-- which never touches that column, so an enrollment whose current due time is a
+-- stated absence (not yet parked by a condition at this step) is left alone.
 UPDATE sequence_enrollments e
 SET next_due_at = now()
 WHERE e.id = $1 AND e.workspace_id = $2 AND e.status = 'active'
   AND e.next_due_at > now()
+  AND e.awaiting_condition_step = e.current_step
   AND NOT COALESCE(
         (SELECT rl.is_automated FROM reply_labels rl
          WHERE rl.workspace_id = e.workspace_id AND rl.key = sqlc.arg(reply_class)::text),

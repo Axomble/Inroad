@@ -4424,6 +4424,8 @@ export type BranchValidationError = {
     | "invalid_condition"
     | "invalid_within_days"
     | "invalid_reply_label"
+    | "reply_label_stops_sequence"
+    | "tracking_required"
     | "no_exit_not_allowed"
     | "unknown_step"
     | "unknown_target"
@@ -4465,7 +4467,7 @@ export type StepBranch = {
   condition: StepBranchCondition;
   /** Evaluation window in days after the step's send; null exactly when condition is always */
   within_days: number | null;
-  /** replied / not_replied only: count only replies classified with this reply label key */
+  /** replied / not_replied only: count only replies classified with this reply label key (always a label that does not stop the sequence) */
   reply_label_key: string | null;
   /** Where a true condition (or always) goes; null ends the path */
   yes_step_id: string | null;
@@ -4491,7 +4493,7 @@ export type StepBranchRequest = {
   condition: StepBranchCondition;
   /** Required for every condition except always; must be absent or null for always */
   within_days?: number | null;
-  /** Optional, replied / not_replied only; must name a reply label key in the workspace. Empty string is treated as null. */
+  /** Optional, replied / not_replied only. Must name a reply label key in the workspace whose stops_enrollment is false (a stopping label ends the sequence before any branch runs). Empty string is treated as null. */
   reply_label_key?: string | null;
   /** A step of the same campaign, not this step; null or absent ends the path */
   yes_step_id?: string | null;

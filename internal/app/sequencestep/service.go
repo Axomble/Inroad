@@ -163,9 +163,15 @@ func (s *Service) requireDraft(ctx context.Context, ws, campaignID uuid.UUID) er
 // campaignID; otherwise ErrNotFound (never leaks another campaign's/tenant's
 // step).
 func (s *Service) assertStepInCampaign(ctx context.Context, ws, campaignID, stepID uuid.UUID) error {
+	_, err := s.stepInCampaign(ctx, ws, campaignID, stepID)
+	return err
+}
+
+// stepInCampaign is assertStepInCampaign for a caller that also needs the step.
+func (s *Service) stepInCampaign(ctx context.Context, ws, campaignID, stepID uuid.UUID) (gen.SequenceStep, error) {
 	st, err := s.store.Get(ctx, ws, stepID)
 	if err != nil || st.CampaignID != campaignID {
-		return ErrNotFound
+		return gen.SequenceStep{}, ErrNotFound
 	}
-	return nil
+	return st, nil
 }
