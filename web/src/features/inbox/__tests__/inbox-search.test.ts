@@ -3,6 +3,7 @@ import {
   decodeCursor,
   encodeCursor,
   isStaleCursorError,
+  matchedLegsLabel,
   parseInboxSearch,
 } from '../inbox-search'
 
@@ -51,4 +52,12 @@ test('a cursor the server rejects (400) is recognised as stale; anything else is
   expect(isStaleCursorError({ status: 422, data: {} })).toBe(false)
   expect(isStaleCursorError({ status: 500, data: {} })).toBe(false)
   expect(isStaleCursorError({ name: 'Error', message: 'offline' })).toBe(false)
+})
+
+test('names every reason a search hit matched, in the API order', () => {
+  expect(matchedLegsLabel(['inbound'])).toBe('received')
+  expect(matchedLegsLabel(['outbound'])).toBe('sent')
+  expect(matchedLegsLabel(['contact'])).toBe('sender address')
+  expect(matchedLegsLabel(['inbound', 'outbound'])).toBe('received & sent')
+  expect(matchedLegsLabel(['inbound', 'outbound', 'contact'])).toBe('received, sent & sender address')
 })

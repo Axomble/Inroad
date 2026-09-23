@@ -5,7 +5,7 @@ import { LIST_NAV_HINTS, type ListKeyboardNav } from '@/hooks/use-list-keyboard-
 import { cn } from '@/lib/utils'
 import type { InboxSearchHit, InboxThreadSummary } from './api'
 import { ThreadRow } from './thread-list'
-import { matchedLegsLabel, searchErrorCopy, SEARCH_QUERY_MAX_LENGTH } from './inbox-search'
+import { matchedLegsLabel, searchErrorCopy, ADDRESS_MATCH_MIN_LENGTH, SEARCH_QUERY_MAX_LENGTH } from './inbox-search'
 
 /**
  * The list pane while a search is active: the hits, newest first (the API's
@@ -123,7 +123,7 @@ export function SearchResults({
       <PageBody>
         <EmptyBlock
           title={`No threads match “${query}”`}
-          description={`Nothing in ${scopeLabel} mentions it in a subject or message, on either side of the conversation. Try fewer or different words.`}
+          description={emptyDescription(query, scopeLabel)}
           action={clearAction}
         />
       </PageBody>
@@ -181,6 +181,19 @@ export function SearchResults({
       <HintBar hints={LIST_NAV_HINTS} />
     </>
   )
+}
+
+/**
+ * The empty state's explanation. A short query is matched against message
+ * text only (the server skips address matching below three characters, where
+ * a substring would match nearly every address), so say so rather than let
+ * "ac" look like proof no acme.com thread exists.
+ */
+function emptyDescription(query: string, scopeLabel: string): string {
+  if ([...query].length < ADDRESS_MATCH_MIN_LENGTH) {
+    return `Nothing in ${scopeLabel} mentions it in a subject or message. Sender addresses are only searched for ${ADDRESS_MATCH_MIN_LENGTH} or more characters.`
+  }
+  return `Nothing in ${scopeLabel} mentions it in a subject, a message on either side, or a sender address. Try fewer or different words.`
 }
 
 /**
