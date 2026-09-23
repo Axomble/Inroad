@@ -5169,7 +5169,7 @@ components:
         condition: { $ref: '#/components/schemas/StepBranchCondition' }
         within_days: { type: integer, minimum: 1, maximum: 90, nullable: true, description: Required for every condition except always; must be absent or null for always }
         reply_label_key: { type: string, nullable: true, description: "Optional, replied / not_replied only; must name a reply label key in the workspace. Empty string is treated as null." }
-        yes_step_id: { type: string, format: uuid, nullable: true, description: A step of the same campaign, not this step; null or absent ends the path }
+        yes_step_id: { type: string, format: uuid, nullable: true, description: "A step of the same campaign, not this step; null or absent ends the path" }
         no_step_id: { type: string, format: uuid, nullable: true, description: As yes_step_id; must be null or absent for always }
     CampaignGraphNode:
       type: object
