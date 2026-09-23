@@ -2,7 +2,7 @@
 // own (component-free) module so both the add/edit form and the delete dialog
 // surface the SAME human copy for the same HTTP status, narrowed via the typed
 // `httpStatus` helper instead of ad-hoc `'status' in err` checks.
-import { httpStatus, isEmailNotVerified } from '@/lib/rtk-error'
+import { errorCode, httpStatus, isEmailNotVerified } from '@/lib/rtk-error'
 // Read-only cross-feature reuse of the auth feature's copy helper —
 // component-free module, the established exception (see mailboxes-page.tsx
 // pulling the warmup query). One sentence for both the disabled control's
@@ -12,8 +12,16 @@ import { emailVerificationHint } from '@/features/auth/use-email-verified'
 /** Completes `emailVerificationHint`'s sentence; one wording for gate + error. */
 export const TEST_SEND_GATED_ACTION = 'send a test email'
 
+/**
+ * A delete or reorder moves the linear fall-through, and with a condition in
+ * the sequence that can close a loop — which the server refuses (422 `cycle`).
+ */
+const LOOP_COPY =
+  'That would make a loop through a condition — someone could be sent the same step twice. Change the order, or one of the condition’s exits.'
+
 /** Maps an RTK Query error from a step mutation to a human message. */
 export function stepErrorMessage(error: unknown): string {
+  if (errorCode(error) === 'cycle') return LOOP_COPY
   const status = httpStatus(error)
   if (status === 409) return 'Structural changes are only allowed while the campaign is a draft.'
   if (status === 404) return 'That step no longer exists.'
@@ -27,6 +35,7 @@ export function stepErrorMessage(error: unknown): string {
  * from either view.
  */
 export function reorderErrorMessage(error: unknown): string {
+  if (errorCode(error) === 'cycle') return LOOP_COPY
   if (httpStatus(error) === 409) return 'Reorder is only allowed while the campaign is a draft.'
   return "Couldn't reorder steps — try again."
 }

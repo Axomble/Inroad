@@ -1,11 +1,12 @@
 import type { NodeProps } from '@xyflow/react'
-import { ArrowDown, ArrowUp, CirclePlay, FlaskConical, Mail, Square, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, CirclePlay, FlaskConical, Mail, Split, Square, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { FlowNodeFrame } from '@/components/shared/flow/flow-node-frame'
 import { cn } from '@/lib/utils'
 import { useListStepVariantsQuery } from './api'
 import type { StartFlowNode, StepFlowNode, StopFlowNode } from './sequence-graph'
+import { NodeFlag } from './node-flag'
 import { focusKey, useFocusRequest, useSequenceCanvasActions } from './sequence-canvas-actions'
 
 const DRAFT_ONLY_HINT = 'Structural changes are draft-only'
@@ -13,9 +14,10 @@ const DRAFT_ONLY_HINT = 'Structural changes are draft-only'
 const terminalClass =
   'flex h-full w-full items-center justify-center gap-2 rounded-full border border-border-strong bg-surface font-mono text-[10.5px] uppercase tracking-[0.14em] text-muted-foreground'
 
-export function StartNode({ type, data, isConnectable }: NodeProps<StartFlowNode>) {
+export function StartNode({ type, data }: NodeProps<StartFlowNode>) {
+  // Dragging from Start makes the dropped step first — a reorder, so draft-only.
   return (
-    <FlowNodeFrame type={type} connectable={isConnectable && data.stepCount > 0}>
+    <FlowNodeFrame type={type} outputsConnectable={data.canModifyStructure && data.stepCount > 0}>
       <div className={terminalClass}>
         <CirclePlay className="size-3.5 text-accent-ink" aria-hidden="true" />
         Start
@@ -40,21 +42,26 @@ export function StopNode({ type }: NodeProps<StopFlowNode>) {
  * editor; the toolbar underneath carries the rest. Everything is a real button
  * with a name, so the whole canvas is operable by Tab and Enter.
  */
-export function StepNode({ type, data, isConnectable }: NodeProps<StepFlowNode>) {
-  const { step, position, threadSubject, canModifyStructure } = data
+export function StepNode({ type, data }: NodeProps<StepFlowNode>) {
+  const { step, position, threadSubject, canModifyStructure, canEditBranches, hasBranch, reachable, inLoop } = data
   const actions = useSequenceCanvasActions()
   const editRef = useFocusRequest<HTMLButtonElement>(focusKey(step.id, 'edit'))
+  const addConditionRef = useFocusRequest<HTMLButtonElement>(focusKey(step.id, 'add-condition'))
   const isEditing = actions.editingStepId === step.id
   const sameThread = !step.subject && position > 1
   const subjectLine = sameThread ? `Re: ${threadSubject || 'the previous email'}` : step.subject || 'No subject yet'
   const bodyPreview = step.body_text?.trim().replace(/\s+/g, ' ') ?? ''
 
   return (
-    <FlowNodeFrame type={type} connectable={isConnectable}>
+    // The entry always accepts a drop: a condition's exit may be pointed at any
+    // step, even on a running campaign. Its own exit starts a drag only while
+    // structure is editable (that drag is a reorder) and only when no condition
+    // already owns where the step goes next.
+    <FlowNodeFrame type={type} inputConnectable outputsConnectable={canModifyStructure && !hasBranch}>
       <div
         className={cn(
           'flex h-full w-full flex-col overflow-hidden rounded-lg border bg-surface shadow-sm',
-          isEditing ? 'border-ring ring-2 ring-ring/40' : 'border-border-strong',
+          inLoop ? 'border-danger ring-2 ring-danger/30' : isEditing ? 'border-ring ring-2 ring-ring/40' : 'border-border-strong',
         )}
       >
         <button
@@ -68,6 +75,8 @@ export function StepNode({ type, data, isConnectable }: NodeProps<StepFlowNode>)
           <span className="flex w-full items-center gap-2">
             <Mail className="size-3.5 text-faint" aria-hidden="true" />
             <span className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-faint">Step {position}</span>
+            {inLoop && <NodeFlag tone="danger">In a loop</NodeFlag>}
+            {!reachable && !inLoop && <NodeFlag tone="muted">Not reached</NodeFlag>}
             <VariantCount campaignId={actions.campaignId} stepId={step.id} />
           </span>
           <span className="flex w-full min-w-0 items-center gap-2">
@@ -103,6 +112,21 @@ export function StepNode({ type, data, isConnectable }: NodeProps<StepFlowNode>)
               <MoveButton stepId={step.id} position={position} delta={-1} />
               <MoveButton stepId={step.id} position={position} delta={1} />
             </TooltipProvider>
+          )}
+          {canEditBranches && !hasBranch && (
+            // Allowed on a running campaign: a condition changes routing, not
+            // the steps themselves.
+            <Button
+              ref={addConditionRef}
+              variant="ghost"
+              size="icon-sm"
+              className="size-7"
+              aria-label={`Add a condition after step ${position}`}
+              title="Add a condition"
+              onClick={() => actions.editCondition(step.id)}
+            >
+              <Split className="size-3.5 rotate-180" aria-hidden="true" />
+            </Button>
           )}
           <span className="ml-auto" />
           {canModifyStructure ? (
