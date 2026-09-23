@@ -6,7 +6,7 @@
 // refresh), adapted to what /inbox/threads' response shape actually is: no
 // `total` (see rangeLabel's absence below — there is nothing to render one
 // from), so pagination goes on the one fact a page size proves.
-import { httpStatus, serverDetail } from '@/lib/rtk-error'
+import { httpStatus, retryAfterSeconds, serverDetail } from '@/lib/rtk-error'
 import type { InboxSearchHit, ListInboxThreadsApiArg } from '@/store/api'
 
 /**
@@ -177,37 +177,93 @@ export function isSearchQueryTooLong(query: string): boolean {
 }
 
 /**
- * Human copy for a failed search. A 400 is the operator's own query and the
- * server's message names the rule it broke, so it is shown as a correction to
- * make rather than an outage to wait out — retrying the same query cannot
- * help. Anything else is a retryable failure.
+ * The server's 400 for a query with nothing to look for ("the", "-foo"). The
+ * API has no machine code for it, so it is recognised by its prose; if that
+ * wording ever changes this degrades to the generic 400 copy, which still
+ * shows the server's own message.
  */
-export function searchErrorCopy(error: unknown): { title: string; description: string; retryable: boolean } {
-  const status = httpStatus(error)
-  if (status === 400) {
-    const detail = serverDetail(error)
-    return {
-      title: "That search can't run",
-      description: `Edit the search to try again.${detail ? ` (Server said: ${detail})` : ''}`,
-      retryable: false,
-    }
-  }
-  return {
-    title: "Couldn't search the inbox",
-    description: `The search failed${status ? ` (${status})` : ''} — try again.`,
-    retryable: true,
-  }
+const NOT_SELECTIVE_DETAIL = /word to look for/i
+
+/** Queries shorter than this are matched against message text only, never addresses. */
+export const ADDRESS_MATCH_MIN_LENGTH = 3
+
+export interface SearchErrorCopy {
+  title: string
+  description: string
+  /** Whether re-sending the same query can succeed; otherwise the query must change. */
+  retryable: boolean
 }
 
 /**
- * Which side of the conversation a hit matched on, in the operator's words:
- * "received" is the contact's replies, "sent" is everything we sent (campaign
- * steps and manual replies). The API guarantees at least one leg, in that
- * order.
+ * Human copy for a failed search, by cause. The 400/422 family is about the
+ * query itself, so the copy says how to change it and retrying is not offered;
+ * throttling, a timeout and outages are worth retrying.
+ */
+export function searchErrorCopy(error: unknown): SearchErrorCopy {
+  const status = httpStatus(error)
+  const detail = serverDetail(error)
+  switch (status) {
+    case 400:
+      if (detail && NOT_SELECTIVE_DETAIL.test(detail)) {
+        return {
+          title: 'Add a word to search for',
+          description:
+            'Common words like “the” and exclusions like “-foo” can’t be searched on their own — add a more distinctive word.',
+          retryable: false,
+        }
+      }
+      return {
+        title: "That search can't run",
+        description: `Edit the search to try again.${detail ? ` (Server said: ${detail})` : ''}`,
+        retryable: false,
+      }
+    case 422:
+      return {
+        title: 'That search matches too much',
+        description: 'It matches more than 10,000 messages or contacts — add words to narrow it.',
+        retryable: false,
+      }
+    case 429: {
+      const seconds = retryAfterSeconds(error)
+      return {
+        title: 'Too many searches',
+        description: seconds
+          ? `Searches are being limited — try again in ${seconds} ${seconds === 1 ? 'second' : 'seconds'}.`
+          : 'Searches are being limited — wait a moment and try again.',
+        retryable: true,
+      }
+    }
+    case 503:
+      return {
+        title: 'That search took too long',
+        description: 'The server stopped it before it finished — a more specific search will likely work, or try again.',
+        retryable: true,
+      }
+    default:
+      return {
+        title: "Couldn't search the inbox",
+        description: `The search failed${status ? ` (${status})` : ''} — try again.`,
+        retryable: true,
+      }
+  }
+}
+
+const MATCH_REASON_LABELS: Record<InboxSearchHit['matched_legs'][number], string> = {
+  inbound: 'received',
+  outbound: 'sent',
+  contact: 'sender address',
+}
+
+/**
+ * Why a hit matched, in the operator's words: "received" is text in the
+ * contact's replies, "sent" is text in anything we sent (campaign steps and
+ * manual replies), "sender address" is the query found in the contact's email
+ * or an inbound From address. The API guarantees at least one reason, in that
+ * order; a Record over the generated union means a new reason fails `tsc`
+ * here until it is labelled.
  */
 export function matchedLegsLabel(legs: InboxSearchHit['matched_legs']): string {
-  const received = legs.includes('inbound')
-  const sent = legs.includes('outbound')
-  if (received && sent) return 'received & sent'
-  return sent ? 'sent' : 'received'
+  const labels = legs.map((leg) => MATCH_REASON_LABELS[leg])
+  if (labels.length <= 2) return labels.join(' & ')
+  return `${labels.slice(0, -1).join(', ')} & ${labels[labels.length - 1]}`
 }

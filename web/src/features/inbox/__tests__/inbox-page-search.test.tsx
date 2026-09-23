@@ -93,7 +93,7 @@ function hit(
     ],
     threadOverrides = {},
   }: {
-    legs?: ('inbound' | 'outbound')[]
+    legs?: ('inbound' | 'outbound' | 'contact')[]
     direction?: 'inbound' | 'outbound'
     subject?: Segment[]
     body?: Segment[]
@@ -108,7 +108,7 @@ function hit(
   }
 }
 
-type SearchResponse = { status: number; body: unknown }
+type SearchResponse = { status: number; body: unknown; headers?: Record<string, string> }
 
 let searchRequests: URL[]
 let threadRequests: URL[]
@@ -169,8 +169,11 @@ beforeEach(() => {
       }
       if (url.pathname.endsWith('/inbox/search') && method === 'GET') {
         searchRequests.push(url)
-        const { status, body } = respondToSearch(url)
-        return json(body, status)
+        const { status, body, headers } = respondToSearch(url)
+        return new Response(JSON.stringify(body), {
+          status,
+          headers: { 'content-type': 'application/json', ...headers },
+        })
       }
       if (url.pathname.endsWith('/inbox/threads') && method === 'GET') {
         threadRequests.push(url)
@@ -306,7 +309,7 @@ test('a failed Load more keeps the loaded results and retries the page that fail
   let failNextPage = true
   respondToSearch = (url) => {
     if (url.searchParams.get('cursor') === 'page-2') {
-      if (failNextPage) return { status: 503, body: { error: 'unavailable' } }
+      if (failNextPage) return { status: 500, body: { error: 'boom' } }
       return { status: 200, body: { items: [hit(2, { threadOverrides: { contact_first_name: 'Page', contact_last_name: 'Two' } })], next_cursor: null } }
     }
     return { status: 200, body: { items: [hit(0, { threadOverrides: { contact_first_name: 'Page', contact_last_name: 'One' } })], next_cursor: 'page-2' } }
@@ -317,7 +320,7 @@ test('a failed Load more keeps the loaded results and retries the page that fail
 
   fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
   const alert = await screen.findByRole('alert')
-  expect(alert).toHaveTextContent('The search failed (503) — try again.')
+  expect(alert).toHaveTextContent('The search failed (500) — try again.')
   expect(screen.getByText('Page One')).toBeInTheDocument()
 
   failNextPage = false
@@ -328,17 +331,100 @@ test('a failed Load more keeps the loaded results and retries the page that fail
   expect(screen.getByText('Page One')).toBeInTheDocument()
 })
 
-test('a search with no hits (a stop-word-only query included) shows the empty state, not an error', async () => {
+test('a search with no hits shows the empty state, not an error', async () => {
   respondToSearch = () => ({ status: 200, body: { items: [], next_cursor: null } })
-  router.search = { q: 'the' }
+  router.search = { q: 'zebra' }
   renderWithProviders(<InboxPage />)
 
-  const block = await stateBlock('No threads match “the”')
+  const block = await stateBlock('No threads match “zebra”')
+  expect(block).toHaveTextContent('or a sender address')
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 
   fireEvent.click(within(block).getByRole('button', { name: 'Clear search' }))
   await waitFor(() => expect(router.search.q).toBeUndefined())
   expect(await screen.findByText('Listed Thread')).toBeInTheDocument()
+})
+
+test('a short query with no hits says addresses need three characters, rather than implying none match', async () => {
+  respondToSearch = () => ({ status: 200, body: { items: [], next_cursor: null } })
+  router.search = { q: 'ac' }
+  renderWithProviders(<InboxPage />)
+
+  const block = await stateBlock('No threads match “ac”')
+  expect(block).toHaveTextContent('Sender addresses are only searched for 3 or more characters.')
+})
+
+test('an address-only hit says it matched the sender address, with an unhighlighted snippet', async () => {
+  respondToSearch = () => ({
+    status: 200,
+    body: {
+      items: [
+        hit(0, {
+          legs: ['contact'],
+          body: [{ text: 'Thanks, talk soon.', match: false }],
+          threadOverrides: { contact_first_name: 'Jo', contact_last_name: 'Acme', contact_email: 'jo@acme.com' },
+        }),
+      ],
+      next_cursor: null,
+    },
+  })
+  router.search = { q: 'acme.com' }
+  renderWithProviders(<InboxPage />)
+
+  const list = await screen.findByRole('list', { name: /search results for acme\.com/i })
+  expect(list).toHaveTextContent('Matched in sender address')
+  expect(list).toHaveTextContent('Thanks, talk soon.')
+  expect(list.querySelector('mark')).toBeNull()
+})
+
+test('a query with nothing to look for (stop words, exclusions) explains how to fix it, not a generic error', async () => {
+  respondToSearch = () => ({
+    status: 400,
+    body: { error: 'inbox: invalid input: q must contain at least one word to look for (only common words or exclusions were given)' },
+  })
+  router.search = { q: '-foo' }
+  renderWithProviders(<InboxPage />)
+
+  const block = await stateBlock('Add a word to search for')
+  expect(block).toHaveTextContent('exclusions like “-foo” can’t be searched on their own')
+  expect(within(block).queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
+  expect(within(block).getByRole('button', { name: 'Clear search' })).toBeInTheDocument()
+})
+
+test('a too-broad search (422) asks for more words and offers no retry', async () => {
+  respondToSearch = () => ({ status: 422, body: { error: 'inbox: search matches more than 10000 messages, campaign steps or contacts; add words to narrow it' } })
+  router.search = { q: 'hello' }
+  renderWithProviders(<InboxPage />)
+
+  const block = await stateBlock('That search matches too much')
+  expect(block).toHaveTextContent('add words to narrow it')
+  expect(within(block).queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
+})
+
+test('a throttled search (429) names the Retry-After delay and can be retried', async () => {
+  let throttled = true
+  const ok = respondToSearch
+  respondToSearch = (url) =>
+    throttled ? { status: 429, body: { error: 'rate limited' }, headers: { 'retry-after': '12' } } : ok(url)
+  router.search = { q: 'meeting' }
+  renderWithProviders(<InboxPage />)
+
+  const block = await stateBlock('Too many searches')
+  expect(block).toHaveTextContent('try again in 12 seconds')
+
+  throttled = false
+  fireEvent.click(within(block).getByRole('button', { name: 'Try again' }))
+  expect(await screen.findByText('Jamie Lin')).toBeInTheDocument()
+})
+
+test('a timed-out search (503) suggests a narrower query and offers a retry', async () => {
+  respondToSearch = () => ({ status: 503, body: { error: 'inbox: search took too long; try a more specific query' } })
+  router.search = { q: 'meeting' }
+  renderWithProviders(<InboxPage />)
+
+  const block = await stateBlock('That search took too long')
+  expect(block).toHaveTextContent('a more specific search will likely work')
+  expect(within(block).getByRole('button', { name: 'Try again' })).toBeInTheDocument()
 })
 
 test('a failed search offers Try again, which re-runs it', async () => {
