@@ -13,6 +13,8 @@ type Options = {
   content: Parameters<typeof useEditor>[0]['content']
   variables: MergeVariable[]
   onUpdate: (editor: Editor) => void
+  /** Call `onUpdate` once as soon as the editor exists, not only on the first edit. */
+  reportOnMount?: boolean
   placeholder?: string
   attributes: Record<string, string>
   editorProps?: Omit<EditorProps, 'attributes'>
@@ -30,6 +32,7 @@ export function useVariableEditor({
   content,
   variables,
   onUpdate,
+  reportOnMount = false,
   placeholder,
   attributes,
   editorProps,
@@ -66,10 +69,11 @@ export function useVariableEditor({
     if (!editor) return
     const listener = () => emitUpdate(editor)
     editor.on('update', listener)
+    if (reportOnMount) listener()
     return () => {
       editor.off('update', listener)
     }
-  }, [editor])
+  }, [editor, reportOnMount])
 
   return { editor, menu, menuId, anchorProps: { [MENU_ANCHOR_ATTRIBUTE]: '' } }
 }

@@ -4,6 +4,7 @@ import { Slice } from '@tiptap/pm/model'
 import { StarterKit } from '@tiptap/starter-kit'
 import { cn } from '@/lib/utils'
 import { EditorToolbar } from './editor-toolbar'
+import { unkeptFormatting } from './html-compat'
 import {
   docToText,
   isRichDoc,
@@ -13,6 +14,7 @@ import {
   type ClassifyVariable,
   type MergeVariable,
 } from './merge-tags'
+import { RawHtmlBody } from './raw-html-body'
 import { useVariableEditor } from './use-variable-editor'
 import { VariableContext } from './variable-context'
 import { VariableMenu } from './variable-menu'
@@ -62,11 +64,49 @@ const bodyKit = StarterKit.configure({
 })
 
 /**
+ * The email body. Normally the rich editor; but stored HTML carrying anything
+ * the editor's schema would drop (tables, headings, inline styles — HTML from
+ * an API client, not from this editor) opens as its raw parts instead, and
+ * only moves to the editor on an explicit, confirmed conversion.
+ *
+ * Neither mode reports a change until someone edits, so an untouched body is
+ * saved back byte for byte from the caller's own copy of the stored values.
+ */
+export function BodyEditor(props: BodyEditorProps) {
+  const { initialHtml = '', initialText = '', onChange } = props
+  // Non-null while the stored HTML is shown raw; holds the latest of both parts.
+  const [raw, setRaw] = useState<EmailBody | null>(() =>
+    unkeptFormatting(initialHtml).length > 0 ? { html: initialHtml, text: initialText } : null,
+  )
+  const [converted, setConverted] = useState(false)
+
+  if (raw && !converted) {
+    return (
+      <RawHtmlBody
+        labelledBy={props.labelledBy}
+        describedBy={props.describedBy}
+        body={raw}
+        lost={unkeptFormatting(raw.html)}
+        invalid={props.invalid}
+        onChange={(body) => {
+          setRaw(body)
+          onChange(body)
+        }}
+        onConvert={() => setConverted(true)}
+      />
+    )
+  }
+  // After a conversion the editor reports its content at once: what the user
+  // now sees is what saves, not the HTML they just chose to leave behind.
+  return <RichBody {...props} initialHtml={raw?.html ?? initialHtml} reportOnMount={converted} />
+}
+
+/**
  * The rich email body editor: a formatting toolbar, merge fields as chips, and
  * a `{{` menu. Uncontrolled — it reads its initial content once and reports
  * every change — so a parent form re-rendering never resets the caret.
  */
-export function BodyEditor({
+function RichBody({
   labelledBy,
   describedBy,
   initialHtml,
@@ -76,13 +116,15 @@ export function BodyEditor({
   variables,
   classifyVariable,
   onChange,
-}: BodyEditorProps) {
+  reportOnMount,
+}: BodyEditorProps & { reportOnMount: boolean }) {
   const [content] = useState(() => (initialHtml ? wrapTokensInHtml(initialHtml) : textToDoc(initialText ?? '')))
   const { editor, anchorProps, menu, menuId } = useVariableEditor({
     extensions: [bodyKit],
     content,
     variables,
     placeholder,
+    reportOnMount,
     onUpdate: (e) => {
       const doc = e.getJSON()
       onChange({ text: docToText(doc), html: isRichDoc(doc) ? unwrapTokensInHtml(e.getHTML()) : '' })

@@ -196,3 +196,18 @@ test('a variant with an unknown merge field is flagged and not saved', async () 
   await new Promise((resolve) => setTimeout(resolve, 50))
   expect(await lastBody(fetchMock, 'PUT')).toBeUndefined()
 })
+
+test('a variant whose HTML the editor can’t hold opens raw and an untouched save sends it back unchanged', async () => {
+  const html = '<table style="width:100%"><tr><td>Hey {{first_name}}</td></tr></table>'
+  listResponder = () =>
+    new Response(JSON.stringify([{ ...VARIANT_B, body_html: html }]), { status: 200, headers: jsonHeaders })
+  render()
+
+  expect(await screen.findByRole('textbox', { name: 'Variant B body HTML' })).toHaveValue(html)
+  expect(screen.getByRole('status')).toHaveTextContent('can’t keep: inline styles and tables')
+  fireEvent.click(screen.getByRole('button', { name: 'Save variant' }))
+
+  await waitFor(async () =>
+    expect(await lastBody(fetchMock, 'PUT')).toMatchObject({ body_html: html, body_text: 'Hey {{first_name}}' }),
+  )
+})
