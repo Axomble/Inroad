@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/events"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/mail"
@@ -52,6 +53,9 @@ type Service struct {
 	// events announces status transitions to a workspace's open tabs. NIL IS
 	// VALID and means realtime is disabled — events.Emit treats it as a no-op.
 	events events.Publisher
+	// audit records connect/disconnect/pause/resume, best-effort (security.md
+	// invariant 82). Nil is "audit not wired" — audit.Emit no-ops.
+	audit audit.Recorder
 }
 
 // ServiceOption configures an optional collaborator. An option rather than an
@@ -64,6 +68,21 @@ type ServiceOption func(*Service)
 // silent and clients learn about a status change on their next refetch — the
 // pre-socket behaviour.
 func WithEvents(p events.Publisher) ServiceOption { return func(s *Service) { s.events = p } }
+
+// WithAudit wires the audit recorder.
+func WithAudit(r audit.Recorder) ServiceOption { return func(s *Service) { s.audit = r } }
+
+// auditTarget is the audit log's target_type for a mailbox.
+const auditTarget = "mailbox"
+
+// mailboxEvent describes a mailbox for the audit log. The address is the
+// workspace's own sending identity, already visible to every member on the
+// mailbox list; no host, username or credential is ever included.
+func mailboxEvent(ctx context.Context, ws uuid.UUID, action audit.Action, box MailboxSafe) audit.Event {
+	return audit.New(ctx, ws, action, auditTarget, box.ID.String(), audit.Metadata{
+		"email": box.Email, "provider": box.Provider,
+	})
+}
 
 func NewService(store Store, tester mail.ConnectionTester, keyring *crypto.Keyring, oauth mail.GoogleOAuth, exchanger TokenExchanger, msOAuth mail.MicrosoftOAuth, msExchanger TokenExchanger, opts ...ServiceOption) *Service {
 	s := &Service{store: store, tester: tester, keyring: keyring, oauth: oauth, exchanger: exchanger, msOAuth: msOAuth, msExchanger: msExchanger}
@@ -203,7 +222,7 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		return MailboxSafe{}, err
 	}
 
-	return s.store.Create(ctx, gen.CreateMailboxParams{
+	box, err := s.store.Create(ctx, gen.CreateMailboxParams{
 		WorkspaceID:        workspaceID,
 		Provider:           "smtp",
 		Email:              in.Email,
@@ -222,6 +241,11 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		RampStartCap:       defaultRampStartCap,
 		RampDays:           defaultRampDays,
 	})
+	if err != nil {
+		return MailboxSafe{}, err
+	}
+	audit.Emit(ctx, s.audit, mailboxEvent(ctx, workspaceID, audit.ActionMailboxConnected, box))
+	return box, nil
 }
 
 // List returns every mailbox connected in the workspace.
@@ -253,6 +277,11 @@ func (s *Service) setStatus(ctx context.Context, workspaceID, id uuid.UUID, stat
 		return box, err
 	}
 	s.announceChanged(ctx, workspaceID, id, status)
+	action := audit.ActionMailboxResumed
+	if status == "paused" {
+		action = audit.ActionMailboxPaused
+	}
+	audit.Emit(ctx, s.audit, mailboxEvent(ctx, workspaceID, action, box))
 	return box, nil
 }
 
@@ -276,6 +305,10 @@ func (s *Service) announceChanged(ctx context.Context, workspaceID, id uuid.UUID
 // Delete removes a mailbox from the workspace. Returns ErrNotFound if no row
 // matched (belongs to another workspace or does not exist).
 func (s *Service) Delete(ctx context.Context, workspaceID, id uuid.UUID) error {
+	// Read first so the audit row can name the address: after the delete there
+	// is nothing left to name. A failed read does not block the delete — the
+	// record then carries the id alone.
+	box, getErr := s.store.Get(ctx, workspaceID, id)
 	rows, err := s.store.Delete(ctx, workspaceID, id)
 	if err != nil {
 		return err
@@ -283,6 +316,10 @@ func (s *Service) Delete(ctx context.Context, workspaceID, id uuid.UUID) error {
 	if rows == 0 {
 		return ErrNotFound
 	}
+	if getErr != nil {
+		box = MailboxSafe{ID: id}
+	}
+	audit.Emit(ctx, s.audit, mailboxEvent(ctx, workspaceID, audit.ActionMailboxDisconnected, box))
 	// "deleted" is not a stored status — the row is gone — but the console needs
 	// to drop it from its counts, and a client cannot infer a deletion from
 	// silence.

@@ -349,6 +349,15 @@ refuses to start over the verbosity of its own logs helps nobody.
 | `INROAD_RUN_SCHEDULER` | Whether **this** worker process runs the periodic scheduler | `true` |
 | `INROAD_WORKER_ROLE` | Which half of the worker this process runs — `control`, `send`, or unset for both. See [Splitting control and send roles](#splitting-control-and-send-roles) before using it in production | unset (`all`) |
 | `INROAD_WORKER_QUEUES` | Explicit comma-separated override of the asynq queues this worker consumes. Set, it replaces the role's queue set outright rather than merging with it | unset (derived from the role) |
+| `INROAD_AUDIT_RETENTION_DAYS` | Days to keep workspace audit events before the daily maintenance job deletes them. `0`/unset keeps them forever. A whole number in `0`–`36500`; anything else is a startup error | unset (keep forever) |
+
+Audit retention is **off by default, deliberately**. How long a security log is
+kept is a privacy and legal decision — it depends on your jurisdiction and your
+customers' contracts — so the product does not make it for you. Decide it with
+whoever owns privacy in your organisation, then set the number of days. The
+purge runs in the worker's daily maintenance job (control role), in batches, and
+is the only thing that can delete an audit row: the table refuses `UPDATE`,
+`DELETE` and `TRUNCATE` from anything else.
 
 The default of `10` is sized for small deployments. Every per-mailbox send and
 inbox-poll task shares this pool, so with many active mailboxes the queue backs

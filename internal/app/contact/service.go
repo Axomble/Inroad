@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/cursor"
 )
 
@@ -37,13 +38,26 @@ type Service struct {
 	store   Store
 	checker ListChecker
 	fields  FieldStore
+	// audit records data.exported BEFORE an export streams (fail-closed, see
+	// PrepareExport). Nil is "audit not wired".
+	audit audit.Recorder
 }
+
+// ServiceOption configures an optional Service collaborator.
+type ServiceOption func(*Service)
+
+// WithAudit wires the audit recorder the export path records through.
+func WithAudit(r audit.Recorder) ServiceOption { return func(s *Service) { s.audit = r } }
 
 // NewService constructs a Service backed by store, using checker to verify list
 // ownership before mutating imports and fields to resolve custom field
 // definitions and values.
-func NewService(store Store, checker ListChecker, fields FieldStore) *Service {
-	return &Service{store: store, checker: checker, fields: fields}
+func NewService(store Store, checker ListChecker, fields FieldStore, opts ...ServiceOption) *Service {
+	s := &Service{store: store, checker: checker, fields: fields}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // ImportCSV verifies the list belongs to the workspace, then imports rows.

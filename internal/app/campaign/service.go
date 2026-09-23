@@ -3,6 +3,8 @@ package campaign
 import (
 	"context"
 	"errors"
+	"maps"
+	"strconv"
 	"sync"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 
 	"github.com/inroad/inroad/internal/app/events"
 
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/cadence"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
@@ -67,6 +70,10 @@ type Service struct {
 	// and means realtime is disabled — events.Emit treats it as a no-op — so a
 	// service built without one behaves exactly as it did before sockets.
 	events events.Publisher
+	// audit records launch/pause/resume, best-effort (security.md invariant
+	// 82): an audit outage must never stop an operator pausing a campaign
+	// that is burning a domain. Nil is "audit not wired".
+	audit audit.Recorder
 }
 
 // ServiceOption configures an optional Service dependency. See the Service
@@ -117,6 +124,17 @@ func WithRateLimiter(l RateLimiter) ServiceOption { return func(s *Service) { s.
 // the service silent, which is the pre-socket behaviour: clients learn about a
 // launch on their next refetch.
 func WithEvents(p events.Publisher) ServiceOption { return func(s *Service) { s.events = p } }
+
+// WithAudit wires the audit recorder.
+func WithAudit(r audit.Recorder) ServiceOption { return func(s *Service) { s.audit = r } }
+
+// recordLifecycle audits one campaign state transition. The campaign name is
+// the operator's own label; nothing about recipients or content is recorded.
+func (s *Service) recordLifecycle(ctx context.Context, ws uuid.UUID, c gen.Campaign, action audit.Action, extra audit.Metadata) {
+	md := audit.Metadata{"name": c.Name}
+	maps.Copy(md, extra)
+	audit.Emit(ctx, s.audit, audit.New(ctx, ws, action, "campaign", c.ID.String(), md))
+}
 
 // WithSuppressionChecker wires test-send's suppression-list guard: a test
 // email must never go to an address the workspace has explicitly
@@ -469,6 +487,7 @@ func (s *Service) Launch(ctx context.Context, ws, campaignID uuid.UUID, enq Enqu
 	// running campaign, and a client that never heard about it would show a
 	// draft until the next refetch.
 	s.announceLaunched(ctx, ws, campaignID, len(enrollments))
+	s.recordLifecycle(ctx, ws, c, audit.ActionCampaignStarted, audit.Metadata{"enrolled": strconv.Itoa(len(enrollments))})
 
 	due, err := s.spread(ctx, ws, campaignSchedule{id: campaignID, timezone: c.Timezone}, enrollments)
 	if err != nil {

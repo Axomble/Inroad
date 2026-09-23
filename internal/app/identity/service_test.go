@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/notify"
 )
@@ -57,6 +58,9 @@ type fakeStore struct {
 	loginStates map[string]LoginState
 
 	registerErr error
+
+	// auditEvents are the in-transaction audit events handed to the store.
+	auditEvents []audit.Event
 
 	// preRevokeSession, when set, runs at the top of RevokeSession before it
 	// reads the session row. Tests use it to simulate a concurrent request

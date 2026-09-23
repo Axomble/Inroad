@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/dbtest"
 	"github.com/inroad/inroad/internal/platform/db/gen"
@@ -118,7 +119,12 @@ func TestOperatorUpsertMemberRoleAddsThenUpdates(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
-	m1, err := store.UpsertMemberRole(ctx, ws.ID, user.ID, gen.MemberRoleMember)
+	roleEvent := func(to string) audit.Event {
+		ev := audit.New(ctx, ws.ID, audit.ActionMemberRoleChanged, "user", user.ID.String(), audit.Metadata{"to_role": to})
+		ev.Actor = audit.SystemActor("inroadctl")
+		return ev
+	}
+	m1, err := store.UpsertMemberRole(ctx, ws.ID, user.ID, gen.MemberRoleMember, roleEvent("member"))
 	if err != nil {
 		t.Fatalf("UpsertMemberRole insert: %v", err)
 	}
@@ -126,9 +132,31 @@ func TestOperatorUpsertMemberRoleAddsThenUpdates(t *testing.T) {
 		t.Fatalf("expected role member, got %s", m1.Role)
 	}
 
-	m2, err := store.UpsertMemberRole(ctx, ws.ID, user.ID, gen.MemberRoleOwner)
+	m2, err := store.UpsertMemberRole(ctx, ws.ID, user.ID, gen.MemberRoleOwner, roleEvent("owner"))
 	if err != nil {
 		t.Fatalf("UpsertMemberRole update: %v", err)
+	}
+	// Each change landed its audit row in the same transaction, naming the
+	// transition read inside it: none -> member, then member -> owner.
+	rows, err := store.pool.Query(ctx, `
+		SELECT metadata->>'from_role', metadata->>'to_role' FROM audit_events
+		WHERE workspace_id = $1 AND action = 'member.role_changed' ORDER BY created_at, id`, ws.ID)
+	if err != nil {
+		t.Fatalf("query audit: %v", err)
+	}
+	var transitions []string
+	for rows.Next() {
+		var from, to string
+		if err := rows.Scan(&from, &to); err != nil {
+			t.Fatalf("scan audit: %v", err)
+		}
+		transitions = append(transitions, from+"->"+to)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("audit rows: %v", err)
+	}
+	if len(transitions) != 2 || transitions[0] != "none->member" || transitions[1] != "member->owner" {
+		t.Fatalf("role_changed transitions = %v, want [none->member member->owner]", transitions)
 	}
 	if m2.ID != m1.ID {
 		t.Fatalf("expected the SAME membership row to be updated (id %s), got a new row %s", m1.ID, m2.ID)
@@ -164,7 +192,9 @@ func TestOperatorUpsertMemberRoleUnknownWorkspaceFailsForeignKey(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
-	if _, err := store.UpsertMemberRole(ctx, uuid.New(), user.ID, gen.MemberRoleOwner); err == nil {
+	unknownWS := uuid.New()
+	ev := audit.New(ctx, unknownWS, audit.ActionMemberRoleChanged, "user", user.ID.String(), nil)
+	if _, err := store.UpsertMemberRole(ctx, unknownWS, user.ID, gen.MemberRoleOwner, ev); err == nil {
 		t.Fatal("expected an error granting a role in an unknown workspace, got nil")
 	}
 }

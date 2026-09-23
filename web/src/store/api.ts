@@ -1832,6 +1832,26 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    listAuditEvents: build.query<
+      ListAuditEventsApiResponse,
+      ListAuditEventsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/audit-events`,
+        params: {
+          action: queryArg.action,
+          actor_type: queryArg.actorType,
+          actor_id: queryArg.actorId,
+          actor_user_id: queryArg.actorUserId,
+          target_type: queryArg.targetType,
+          target_id: queryArg.targetId,
+          since: queryArg.since,
+          until: queryArg.until,
+          limit: queryArg.limit,
+          cursor: queryArg.cursor,
+        },
+      }),
+    }),
     listFleetWorkers: build.query<
       ListFleetWorkersApiResponse,
       ListFleetWorkersApiArg
@@ -2975,6 +2995,27 @@ export type ListWebhookDeliveriesApiResponse =
 export type ListWebhookDeliveriesApiArg = {
   id: string;
   /** Page size. Defaults to 50, capped at 100. */
+  limit?: number;
+  /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
+  cursor?: string;
+};
+export type ListAuditEventsApiResponse =
+  /** status 200 Audit events */ AuditEventList;
+export type ListAuditEventsApiArg = {
+  /** A full action name (`campaign.paused`) or a dotted prefix of one on a segment boundary (`campaign` matches every `campaign.*`, not `campaigns.*`). Lower-case letters, underscores and dots only. */
+  action?: string;
+  actorType?: AuditActorType;
+  /** Exact actor id (a user id, api key id, OAuth client id, agent run id, or system component name). */
+  actorId?: string;
+  /** Every event done on this user's authority — directly, through their api keys, or by an agent they delegated to. */
+  actorUserId?: string;
+  targetType?: string;
+  targetId?: string;
+  /** Inclusive lower bound (RFC3339). */
+  since?: string;
+  /** Exclusive upper bound (RFC3339). Must be after `since`. */
+  until?: string;
+  /** Page size. Defaults to 50, capped at 200. */
   limit?: number;
   /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
   cursor?: string;
@@ -4987,6 +5028,52 @@ export type WebhookDeliveryList = {
   /** Cursor for the next page; null on the last page. Opaque — round-trip it untouched. */
   next_cursor: string | null;
 };
+export type AuditAction =
+  | "auth.login"
+  | "auth.login_failed"
+  | "member.invited"
+  | "member.invite_revoked"
+  | "member.joined"
+  | "member.role_changed"
+  | "mailbox.connected"
+  | "mailbox.disconnected"
+  | "mailbox.paused"
+  | "mailbox.resumed"
+  | "campaign.started"
+  | "campaign.paused"
+  | "campaign.resumed"
+  | "apikey.created"
+  | "apikey.revoked"
+  | "data.exported"
+  | "settings.changed";
+export type AuditActorType =
+  "user" | "api_key" | "oauth_client" | "agent" | "system";
+export type AuditEvent = {
+  id: string;
+  action: AuditAction;
+  actor_type: AuditActorType;
+  /** The acting principal's id for its type; null for an unauthenticated actor. */
+  actor_id: string | null;
+  /** The human on whose authority the actor acted (the user, a key's creator, an agent's delegating user). */
+  actor_user_id: string | null;
+  /** actor_user_id's current email; null when there is none or the user was deleted. */
+  actor_email: string | null;
+  target_type: string | null;
+  target_id: string | null;
+  /** Client address, when the action came from a request. */
+  ip: string | null;
+  user_agent: string | null;
+  /** Small, flat, string-valued context (e.g. `name`, `email`, `role`, `from_role`, `to_role`, `prefix`, `scopes`, `reason`). Never a secret, token, password or message body. */
+  metadata: {
+    [key: string]: string;
+  };
+  created_at: string;
+};
+export type AuditEventList = {
+  events: AuditEvent[];
+  /** Cursor for the next page; null on the last page. */
+  next_cursor: string | null;
+};
 export type FleetProviderSignals = {
   /** Which transport leg ran. A worker one provider has blocked can be a perfectly good home for another provider's mailboxes, which is why these are never pooled. */
   provider: "smtp" | "gmail" | "m365";
@@ -5287,6 +5374,7 @@ export const {
   useRotateWebhookEndpointSecretMutation,
   usePingWebhookEndpointMutation,
   useListWebhookDeliveriesQuery,
+  useListAuditEventsQuery,
   useListFleetWorkersQuery,
   useListFleetDecisionsQuery,
   useListScheduledJobsQuery,

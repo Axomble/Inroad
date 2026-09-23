@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/notify"
 )
@@ -53,10 +54,13 @@ func (s *Service) CreateInvite(ctx context.Context, ws, invitedBy uuid.UUID, ema
 	if err != nil {
 		return Invite{}, err
 	}
+	// The invitee's address and role are what an admin reviewing the log needs
+	// ("who was let in, at what level"); the token is a bearer credential and
+	// never leaves this function except in the email.
 	inv, err := s.store.CreateInvite(ctx, gen.CreateInviteParams{
 		WorkspaceID: ws, Email: email, Role: gen.MemberRole(role),
 		TokenHash: hash, InvitedBy: invitedBy, ExpiresAt: pgxTimestamp(time.Now().Add(s.inviteTTL)),
-	})
+	}, audit.New(ctx, ws, audit.ActionMemberInvited, "invite", "", audit.Metadata{"email": email, "role": role}))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Invite{}, ErrInviteExists
@@ -95,7 +99,8 @@ func (s *Service) ListInvites(ctx context.Context, ws uuid.UUID) ([]Invite, erro
 // a different workspace, already accepted, or already revoked silently
 // no-ops - matching the underlying UPDATE ... WHERE's affected-rows behavior.
 func (s *Service) RevokeInvite(ctx context.Context, ws, inviteID uuid.UUID) error {
-	return s.store.RevokeInvite(ctx, gen.RevokeInviteParams{ID: inviteID, WorkspaceID: ws})
+	return s.store.RevokeInvite(ctx, gen.RevokeInviteParams{ID: inviteID, WorkspaceID: ws},
+		audit.New(ctx, ws, audit.ActionMemberInviteRevoked, "invite", inviteID.String(), nil))
 }
 
 // AcceptInvite atomically consumes a workspace invite via Store.AcceptInviteTx:
@@ -133,6 +138,11 @@ func (s *Service) AcceptInvite(ctx context.Context, rawToken string, password *s
 	if err != nil {
 		return Session{}, err // ErrTokenInvalid or ErrPasswordRequired
 	}
+	// Best-effort: the authority this grants was recorded, in-transaction, as
+	// member.invited when the invite was created; this records it being used.
+	ev := audit.New(ctx, res.WorkspaceID, audit.ActionMemberJoined, "user", res.UserID.String(), audit.Metadata{"role": res.Role})
+	ev.Actor = audit.UserActor(res.UserID)
+	audit.Emit(ctx, s.audit, ev)
 	mems, _ := s.memberships(ctx, res.UserID)
 	return Session{
 		UserID: res.UserID, WorkspaceID: res.WorkspaceID, Role: res.Role,

@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -29,17 +30,19 @@ type fakeStore struct {
 	touched     []uuid.UUID
 	touchSignal chan uuid.UUID // when set, TouchLastUsed sends here instead of appending
 	createErr   error
+	events      []audit.Event // audit events handed to Create/Revoke
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{byPrefix: map[string]gen.ApiKey{}}
 }
 
-func (f *fakeStore) Create(_ context.Context, p CreateParams) (gen.ApiKey, error) {
+func (f *fakeStore) Create(_ context.Context, p CreateParams, ev audit.Event) (gen.ApiKey, error) {
 	if f.createErr != nil {
 		return gen.ApiKey{}, f.createErr
 	}
 	f.created = append(f.created, p)
+	f.events = append(f.events, ev)
 	k := gen.ApiKey{
 		ID:              uuid.New(),
 		WorkspaceID:     p.WorkspaceID,
@@ -71,8 +74,9 @@ func (f *fakeStore) ListByWorkspace(_ context.Context, _ uuid.UUID) ([]gen.ListA
 	return f.list, nil
 }
 
-func (f *fakeStore) Revoke(_ context.Context, ws, id uuid.UUID) (int64, error) {
+func (f *fakeStore) Revoke(_ context.Context, ws, id uuid.UUID, ev audit.Event) (int64, error) {
 	f.revoked = append(f.revoked, [2]uuid.UUID{ws, id})
+	f.events = append(f.events, ev)
 	return f.revokeRows, nil
 }
 

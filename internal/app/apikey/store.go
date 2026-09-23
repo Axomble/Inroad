@@ -5,8 +5,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -28,7 +30,10 @@ type CreateParams struct {
 // inversion): exactly the methods they use, so unit tests inject an in-memory
 // fake with no DB. *PgStore satisfies it.
 type Store interface {
-	Create(ctx context.Context, p CreateParams) (gen.ApiKey, error)
+	// Create persists the key and ev (an apikey.created audit event, completed
+	// with the new key's id) in ONE transaction: a key without its audit row
+	// cannot exist (security.md invariant 82, in-transaction class).
+	Create(ctx context.Context, p CreateParams, ev audit.Event) (gen.ApiKey, error)
 	// GetByPrefix resolves a presented token's public prefix to its stored row
 	// (pgx.ErrNoRows when unknown). It is the ONLY verify-path lookup; the prefix
 	// is globally unique, so it also resolves the workspace.
@@ -38,24 +43,41 @@ type Store interface {
 	ListByWorkspace(ctx context.Context, ws uuid.UUID) ([]gen.ListApiKeysByWorkspaceRow, error)
 	// Revoke marks (ws, id) revoked, tenant-pinned and idempotent. Returns the
 	// number of rows affected: 1 when the key exists in ws (revoked or already
-	// revoked), 0 when it is unknown or belongs to another workspace.
-	Revoke(ctx context.Context, ws, id uuid.UUID) (int64, error)
+	// revoked), 0 when it is unknown or belongs to another workspace. ev is
+	// written in the same transaction when a row matched, and not at all when
+	// none did (nothing happened, so there is nothing to record).
+	Revoke(ctx context.Context, ws, id uuid.UUID, ev audit.Event) (int64, error)
 	// TouchLastUsed stamps last_used_at; best-effort, called off the request path.
 	TouchLastUsed(ctx context.Context, id uuid.UUID) error
 }
 
 // PgStore is the sqlc-backed persistence for the apikey domain.
 type PgStore struct {
-	q *gen.Queries
+	pool *pgxpool.Pool
+	q    *gen.Queries
 }
 
 // NewPgStore builds a PgStore over the given pool.
 func NewPgStore(pool *pgxpool.Pool) *PgStore {
-	return &PgStore{q: gen.New(pool)}
+	return &PgStore{pool: pool, q: gen.New(pool)}
 }
 
-func (s *PgStore) Create(ctx context.Context, p CreateParams) (gen.ApiKey, error) {
-	return s.q.CreateApiKey(ctx, gen.CreateApiKeyParams{
+func (s *PgStore) Create(ctx context.Context, p CreateParams, ev audit.Event) (gen.ApiKey, error) {
+	var key gen.ApiKey
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		qtx := s.q.WithTx(tx)
+		var err error
+		if key, err = createKey(ctx, qtx, p); err != nil {
+			return err
+		}
+		ev.TargetID = key.ID.String()
+		return audit.Insert(ctx, qtx, ev)
+	})
+	return key, err
+}
+
+func createKey(ctx context.Context, q *gen.Queries, p CreateParams) (gen.ApiKey, error) {
+	return q.CreateApiKey(ctx, gen.CreateApiKeyParams{
 		WorkspaceID:     p.WorkspaceID,
 		CreatedByUserID: pgUUID(p.CreatedBy),
 		Name:            p.Name,
@@ -76,8 +98,17 @@ func (s *PgStore) ListByWorkspace(ctx context.Context, ws uuid.UUID) ([]gen.List
 	return s.q.ListApiKeysByWorkspace(ctx, ws)
 }
 
-func (s *PgStore) Revoke(ctx context.Context, ws, id uuid.UUID) (int64, error) {
-	return s.q.RevokeApiKey(ctx, gen.RevokeApiKeyParams{ID: id, WorkspaceID: ws})
+func (s *PgStore) Revoke(ctx context.Context, ws, id uuid.UUID, ev audit.Event) (int64, error) {
+	var n int64
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		qtx := s.q.WithTx(tx)
+		var err error
+		if n, err = qtx.RevokeApiKey(ctx, gen.RevokeApiKeyParams{ID: id, WorkspaceID: ws}); err != nil || n == 0 {
+			return err
+		}
+		return audit.Insert(ctx, qtx, ev)
+	})
+	return n, err
 }
 
 func (s *PgStore) TouchLastUsed(ctx context.Context, id uuid.UUID) error {

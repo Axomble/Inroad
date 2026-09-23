@@ -4,6 +4,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -399,8 +401,21 @@ func (s *Store) RevokeOtherSessionsForUser(ctx context.Context, userID, keepSID 
 // invite for the same (workspace, email) pair fails with a unique-violation
 // (the partial index on workspace_invites) - the caller (Service.CreateInvite)
 // maps that to ErrInviteExists.
-func (s *Store) CreateInvite(ctx context.Context, arg gen.CreateInviteParams) (gen.WorkspaceInvite, error) {
-	return s.q.CreateInvite(ctx, arg)
+//
+// ev (member.invited, completed here with the invite id) commits in the same
+// transaction: an outstanding grant of membership cannot exist unrecorded.
+func (s *Store) CreateInvite(ctx context.Context, arg gen.CreateInviteParams, ev audit.Event) (gen.WorkspaceInvite, error) {
+	var inv gen.WorkspaceInvite
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		qtx := s.q.WithTx(tx)
+		var err error
+		if inv, err = qtx.CreateInvite(ctx, arg); err != nil {
+			return err
+		}
+		ev.TargetID = inv.ID.String()
+		return audit.Insert(ctx, qtx, ev)
+	})
+	return inv, err
 }
 
 // ListPendingInvites returns every pending invite for a workspace.
@@ -411,8 +426,17 @@ func (s *Store) ListPendingInvites(ctx context.Context, wsID uuid.UUID) ([]gen.W
 // RevokeInvite marks a pending invite revoked, scoped to its workspace. An
 // invite that's missing, belongs to a different workspace, or is no longer
 // pending silently affects 0 rows - matching the underlying UPDATE ... WHERE.
-func (s *Store) RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams) error {
-	return s.q.RevokeInvite(ctx, arg)
+// ev is written in the same transaction when an invite was revoked, and not at
+// all when nothing was (a no-op is not an event).
+func (s *Store) RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams, ev audit.Event) error {
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		qtx := s.q.WithTx(tx)
+		n, err := qtx.RevokeInvite(ctx, arg)
+		if err != nil || n == 0 {
+			return err
+		}
+		return audit.Insert(ctx, qtx, ev)
+	})
 }
 
 // GetWorkspace returns the workspace with the given id.
@@ -435,8 +459,40 @@ func (s *Store) ListUsers(ctx context.Context) ([]gen.User, error) {
 // comment (member.sql) for why this is an upsert rather than a plain update:
 // `inroadctl grant-role` must restore a lost owner whether they lost the role
 // or the membership entirely.
-func (s *Store) UpsertMemberRole(ctx context.Context, wsID, userID uuid.UUID, role gen.MemberRole) (gen.WorkspaceMember, error) {
-	return s.q.UpsertMemberRole(ctx, gen.UpsertMemberRoleParams{WorkspaceID: wsID, UserID: userID, Role: role})
+//
+// ev (member.role_changed) commits in the same transaction, completed here
+// with the role the member held before ("none" when this adds them), read
+// inside the transaction so the record names the transition that happened.
+func (s *Store) UpsertMemberRole(ctx context.Context, wsID, userID uuid.UUID, role gen.MemberRole, ev audit.Event) (gen.WorkspaceMember, error) {
+	var m gen.WorkspaceMember
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		qtx := s.q.WithTx(tx)
+		from := "none"
+		prev, err := qtx.GetMember(ctx, gen.GetMemberParams{WorkspaceID: wsID, UserID: userID})
+		switch {
+		case err == nil:
+			from = string(prev.Role)
+		case !errors.Is(err, pgx.ErrNoRows):
+			return err
+		}
+		if m, err = qtx.UpsertMemberRole(ctx, gen.UpsertMemberRoleParams{WorkspaceID: wsID, UserID: userID, Role: role}); err != nil {
+			return err
+		}
+		ev.Metadata = withEntry(ev.Metadata, "from_role", from)
+		return audit.Insert(ctx, qtx, ev)
+	})
+	return m, err
+}
+
+// withEntry returns a copy of md with k=v added, leaving the caller's map
+// untouched.
+func withEntry(md audit.Metadata, k, v string) audit.Metadata {
+	out := maps.Clone(md)
+	if out == nil {
+		out = audit.Metadata{}
+	}
+	out[k] = v
+	return out
 }
 
 // CreateMemberTx creates a new user and adds them to an EXISTING workspace at

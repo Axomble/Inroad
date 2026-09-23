@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -19,7 +20,7 @@ import (
 // second pending invite for the same (workspace, email) pair fails with a
 // *pgconn.PgError carrying the unique-violation code, exactly what
 // isUniqueViolation checks for.
-func (f *fakeStore) CreateInvite(ctx context.Context, arg gen.CreateInviteParams) (gen.WorkspaceInvite, error) {
+func (f *fakeStore) CreateInvite(ctx context.Context, arg gen.CreateInviteParams, ev audit.Event) (gen.WorkspaceInvite, error) {
 	for _, inv := range f.invites {
 		if inv.WorkspaceID == arg.WorkspaceID && inv.Email == arg.Email && inv.Status == gen.InviteStatusPending {
 			return gen.WorkspaceInvite{}, &pgconn.PgError{Code: "23505"}
@@ -31,6 +32,8 @@ func (f *fakeStore) CreateInvite(ctx context.Context, arg gen.CreateInviteParams
 		ExpiresAt: arg.ExpiresAt, CreatedAt: pgxTimestamp(time.Now()),
 	}
 	f.invites[inv.ID] = inv
+	ev.TargetID = inv.ID.String()
+	f.auditEvents = append(f.auditEvents, ev)
 	return inv, nil
 }
 
@@ -46,13 +49,14 @@ func (f *fakeStore) ListPendingInvites(ctx context.Context, wsID uuid.UUID) ([]g
 
 // RevokeInvite mirrors the real UPDATE ... WHERE's affected-rows semantics: a
 // missing, foreign-workspace, or already-resolved invite silently no-ops.
-func (f *fakeStore) RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams) error {
+func (f *fakeStore) RevokeInvite(ctx context.Context, arg gen.RevokeInviteParams, ev audit.Event) error {
 	inv, ok := f.invites[arg.ID]
 	if !ok || inv.WorkspaceID != arg.WorkspaceID || inv.Status != gen.InviteStatusPending {
 		return nil
 	}
 	inv.Status = gen.InviteStatusRevoked
 	f.invites[arg.ID] = inv
+	f.auditEvents = append(f.auditEvents, ev)
 	return nil
 }
 

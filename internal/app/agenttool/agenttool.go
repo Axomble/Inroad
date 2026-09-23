@@ -13,6 +13,8 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
+
+	"github.com/inroad/inroad/internal/platform/audit"
 )
 
 // Risk tiers. The tier decides whether a call executes immediately or parks in
@@ -87,6 +89,18 @@ type Principal struct {
 	// whenever the runtime supplies them.
 	ThreadID string
 	RunID    string
+}
+
+// AuditActor is the audit log's actor for a tool call: an agent, identified by
+// its run when there is one (a chat run) and by its client otherwise (an MCP
+// client), acting on UserID's authority.
+func (p Principal) AuditActor() audit.Actor {
+	id := p.RunID
+	if id == "" {
+		id = p.AgentClientID
+	}
+	uid := p.UserID
+	return audit.Actor{Type: audit.ActorAgent, ID: id, UserID: &uid}
 }
 
 // Result is a tool's outcome. Tools report failure as a Result rather than an

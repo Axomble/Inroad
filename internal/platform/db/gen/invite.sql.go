@@ -182,7 +182,7 @@ func (q *Queries) MarkInviteAccepted(ctx context.Context, id uuid.UUID) (uuid.UU
 	return id_2, err
 }
 
-const revokeInvite = `-- name: RevokeInvite :exec
+const revokeInvite = `-- name: RevokeInvite :execrows
 UPDATE workspace_invites SET status = 'revoked'
 WHERE id = $1 AND workspace_id = $2 AND status = 'pending'
 `
@@ -192,7 +192,10 @@ type RevokeInviteParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
-func (q *Queries) RevokeInvite(ctx context.Context, arg RevokeInviteParams) error {
-	_, err := q.db.Exec(ctx, revokeInvite, arg.ID, arg.WorkspaceID)
-	return err
+func (q *Queries) RevokeInvite(ctx context.Context, arg RevokeInviteParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeInvite, arg.ID, arg.WorkspaceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

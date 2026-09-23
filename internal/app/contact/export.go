@@ -2,10 +2,13 @@ package contact
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strconv"
 
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/cursor"
 )
 
@@ -125,7 +128,32 @@ func (s *Service) PrepareExport(ctx context.Context, ws uuid.UUID, req SearchReq
 			live = append(live, d)
 		}
 	}
+	if err := s.recordExport(ctx, ws, req.ListID, q != "", string(sort)); err != nil {
+		return ExportPlan{}, err
+	}
 	return ExportPlan{filter: filter, sort: sort, fields: live}, nil
+}
+
+// recordExport writes data.exported BEFORE a single row leaves, and a failure
+// refuses the export (security.md invariant 82). This is the one best-effort
+// exception in the non-transactional class, for the reason it exists: an
+// export is a disclosure, a disclosure cannot be taken back, and "the whole
+// contact list left and nothing says who took it" is the exact gap an audit
+// log is for. It records the SHAPE of the request — whether it was filtered,
+// by which list, in what order — never the search text, which is routinely an
+// email address.
+func (s *Service) recordExport(ctx context.Context, ws uuid.UUID, listID *uuid.UUID, filtered bool, sort string) error {
+	if s.audit == nil {
+		return nil
+	}
+	md := audit.Metadata{"resource": "contacts", "format": "csv", "filtered": strconv.FormatBool(filtered), "sort": sort}
+	if listID != nil {
+		md["list_id"] = listID.String()
+	}
+	if err := s.audit.Record(ctx, audit.New(ctx, ws, audit.ActionDataExported, "workspace", ws.String(), md)); err != nil {
+		return fmt.Errorf("contact export refused, audit record failed: %w", err)
+	}
+	return nil
 }
 
 // StreamExport walks plan's filtered set one keyset page at a time, over the

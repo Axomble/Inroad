@@ -448,6 +448,7 @@ func run() error {
 		WarmupSecret:        cfg.WarmupSecret,
 		WebhookAllowPrivate: cfg.WebhookAllowPrivate,
 		Metrics:             mtx,
+		AuditRetentionDays:  cfg.AuditRetentionDays,
 	})
 
 	logger.Info("worker starting", "version", version.String(), "redis", redisconn.Redact(cfg.RedisAddr), "concurrency", cfg.WorkerConcurrency)

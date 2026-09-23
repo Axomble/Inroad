@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/inroad/inroad/internal/platform/ai"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/crypto"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
@@ -85,6 +87,9 @@ type ServiceDeps struct {
 	// (INROAD_AI_ALLOW_PRIVATE_BASE_URL) for private/loopback endpoints.
 	ClassifyHost        HostClassifier
 	AllowPrivateBaseURL bool
+	// Audit records settings.changed for the workspace defaults and provider
+	// doors, best-effort (security.md invariant 82). Nil disables recording.
+	Audit audit.Recorder
 }
 
 // Service implements the AI-settings use cases: settings, provider doors
@@ -97,12 +102,15 @@ type Service struct {
 
 	classify            HostClassifier
 	allowPrivateBaseURL bool
+
+	audit audit.Recorder
 }
 
 func NewService(d ServiceDeps) *Service {
 	return &Service{
 		store: d.Store, keyring: d.Keyring, catalog: d.Catalog, discoverer: d.Discoverer,
 		classify: d.ClassifyHost, allowPrivateBaseURL: d.AllowPrivateBaseURL,
+		audit: d.Audit,
 	}
 }
 
@@ -266,7 +274,34 @@ func (s *Service) UpdateSettings(ctx context.Context, ws uuid.UUID, req Settings
 	if err != nil {
 		return SettingsDTO{}, err
 	}
+	s.recordSettings(ctx, ws, "ai_settings", "", audit.Metadata{"change": "updated", "fields": changedFields(req)})
 	return settingsDTO(row), nil
+}
+
+// recordSettings audits one AI-settings change. Model ids, kinds and display
+// names only: never a credential, and never the free-text additional
+// instructions (which is prompt content, not configuration metadata).
+func (s *Service) recordSettings(ctx context.Context, ws uuid.UUID, area, targetID string, md audit.Metadata) {
+	md["area"] = area
+	audit.Emit(ctx, s.audit, audit.New(ctx, ws, audit.ActionSettingsChanged, area, targetID, md))
+}
+
+// changedFields names which settings a PATCH touched, in a stable order.
+func changedFields(req SettingsUpdate) string {
+	var out []string
+	if req.DefaultSmartModel != nil {
+		out = append(out, "default_smart_model")
+	}
+	if req.DefaultFastModel != nil {
+		out = append(out, "default_fast_model")
+	}
+	if req.EnabledModelIDs != nil {
+		out = append(out, "enabled_model_ids")
+	}
+	if req.AdditionalInstructions != nil {
+		out = append(out, "additional_instructions")
+	}
+	return strings.Join(out, " ")
 }
 
 // validateModelRef accepts the field's own sentinel or an id from the
@@ -332,6 +367,9 @@ func (s *Service) CreateProvider(ctx context.Context, ws uuid.UUID, in ProviderC
 	case err != nil:
 		return ProviderDTO{}, err
 	}
+	s.recordSettings(ctx, ws, "ai_provider", row.ID.String(), audit.Metadata{
+		"change": "created", "kind": row.Kind, "display_name": row.DisplayName,
+	})
 	return providerDTO(row.ID, row.Kind, row.DisplayName, row.Config, row.KeyPrefix, row.CreatedAt, row.UpdatedAt)
 }
 
@@ -400,6 +438,12 @@ func (s *Service) UpdateProvider(ctx context.Context, ws, id uuid.UUID, in Provi
 	case err != nil:
 		return ProviderDTO{}, err
 	}
+	s.recordSettings(ctx, ws, "ai_provider", row.ID.String(), audit.Metadata{
+		"change": "updated", "kind": row.Kind, "display_name": row.DisplayName,
+		// Whether the sealed key was replaced — the fact an auditor needs —
+		// without anything about the key itself.
+		"key_replaced": strconv.FormatBool(in.Credentials != nil),
+	})
 	return providerDTO(row.ID, row.Kind, row.DisplayName, row.Config, row.KeyPrefix, row.CreatedAt, row.UpdatedAt)
 }
 
@@ -430,6 +474,7 @@ func (s *Service) DeleteProvider(ctx context.Context, ws, id uuid.UUID) error {
 	if rows == 0 {
 		return ErrNotFound
 	}
+	s.recordSettings(ctx, ws, "ai_provider", id.String(), audit.Metadata{"change": "deleted"})
 	return nil
 }
 

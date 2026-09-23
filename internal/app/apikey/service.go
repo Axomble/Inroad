@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/inroad/inroad/internal/app/auth"
+	"github.com/inroad/inroad/internal/platform/audit"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -120,7 +122,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (KeyView, string, 
 			IPAllowlist:     allowlist,
 			RateLimitPerMin: rate,
 			ExpiresAt:       in.ExpiresAt,
-		})
+		}, createdEvent(ctx, in.WorkspaceID, in.Name, prefix, scopes))
 		if err != nil {
 			if isUniquePrefixViolation(err) {
 				continue // regenerate a fresh prefix and retry
@@ -149,7 +151,7 @@ func (s *Service) List(ctx context.Context, ws uuid.UUID) ([]KeyView, error) {
 // tenant-pinned; a key absent from ws yields ErrNotFound so a caller cannot probe
 // or revoke another workspace's key.
 func (s *Service) Revoke(ctx context.Context, ws, id uuid.UUID) error {
-	n, err := s.store.Revoke(ctx, ws, id)
+	n, err := s.store.Revoke(ctx, ws, id, audit.New(ctx, ws, audit.ActionAPIKeyRevoked, auditTarget, id.String(), nil))
 	if err != nil {
 		return err
 	}
@@ -157,6 +159,18 @@ func (s *Service) Revoke(ctx context.Context, ws, id uuid.UUID) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// auditTarget is the audit log's target_type for a key.
+const auditTarget = "api_key"
+
+// createdEvent describes a new key for the audit log: its display name, public
+// prefix (already shown in every key listing) and granted scopes — never the
+// secret or its hash. The store fills in the key id once it exists.
+func createdEvent(ctx context.Context, ws uuid.UUID, name, prefix string, scopes []string) audit.Event {
+	return audit.New(ctx, ws, audit.ActionAPIKeyCreated, auditTarget, "", audit.Metadata{
+		"name": name, "prefix": prefix, "scopes": strings.Join(scopes, " "),
+	})
 }
 
 // normalizeScopes validates that every requested scope is part of the owned
