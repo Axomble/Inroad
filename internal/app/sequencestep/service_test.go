@@ -33,7 +33,7 @@ func (f *fakeStore) Get(context.Context, uuid.UUID, uuid.UUID) (gen.SequenceStep
 func (f *fakeStore) List(context.Context, uuid.UUID, uuid.UUID) ([]gen.SequenceStep, error) {
 	return f.listSteps, nil
 }
-func (f *fakeStore) Reorder(_ context.Context, _, _ uuid.UUID, stepIDs []uuid.UUID) ([]gen.SequenceStep, error) {
+func (f *fakeStore) Reorder(_ context.Context, _, _ uuid.UUID, stepIDs []uuid.UUID, _ GraphCheck) ([]gen.SequenceStep, error) {
 	f.reorderedTo = stepIDs
 	out := make([]gen.SequenceStep, len(stepIDs))
 	for i, id := range stepIDs {
@@ -45,7 +45,10 @@ func (f *fakeStore) Update(_ context.Context, _ uuid.UUID, in UpdateInput) (gen.
 	f.updated = in
 	return gen.SequenceStep{ID: in.StepID, Subject: in.Subject}, nil
 }
-func (f *fakeStore) Delete(_ context.Context, _, id uuid.UUID) error { f.deletedID = id; return nil }
+func (f *fakeStore) Delete(_ context.Context, _, _, id uuid.UUID, _ GraphCheck) error {
+	f.deletedID = id
+	return nil
+}
 func (f *fakeStore) MaxStepOrder(context.Context, uuid.UUID, uuid.UUID) (int32, error) {
 	return f.maxOrder, nil
 }
@@ -60,7 +63,7 @@ func (c fakeChecker) CampaignStatus(context.Context, uuid.UUID, uuid.UUID) (stri
 }
 
 func TestCreateRejectsNonDraftCampaign(t *testing.T) {
-	svc := NewService(&fakeStore{}, fakeChecker{status: "running"}, &fakeVariantStore{})
+	svc := NewService(&fakeStore{}, fakeChecker{status: "running"}, &fakeVariantStore{}, &fakeBranchStore{})
 	_, err := svc.Create(context.Background(), uuid.New(), uuid.New(), CreateInput{Subject: "x", BodyText: "y"})
 	if !errors.Is(err, ErrCampaignNotDraft) {
 		t.Fatalf("want ErrCampaignNotDraft, got %v", err)
@@ -68,7 +71,7 @@ func TestCreateRejectsNonDraftCampaign(t *testing.T) {
 }
 
 func TestCreateRejectsMissingCampaign(t *testing.T) {
-	svc := NewService(&fakeStore{}, fakeChecker{err: errors.New("no rows")}, &fakeVariantStore{})
+	svc := NewService(&fakeStore{}, fakeChecker{err: errors.New("no rows")}, &fakeVariantStore{}, &fakeBranchStore{})
 	_, err := svc.Create(context.Background(), uuid.New(), uuid.New(), CreateInput{Subject: "x", BodyText: "y"})
 	if !errors.Is(err, ErrCampaignNotFound) {
 		t.Fatalf("want ErrCampaignNotFound, got %v", err)
@@ -77,7 +80,7 @@ func TestCreateRejectsMissingCampaign(t *testing.T) {
 
 func TestCreateAppendsAtNextOrder(t *testing.T) {
 	store := &fakeStore{maxOrder: 2}
-	svc := NewService(store, fakeChecker{status: "draft"}, &fakeVariantStore{})
+	svc := NewService(store, fakeChecker{status: "draft"}, &fakeVariantStore{}, &fakeBranchStore{})
 	campaignID := uuid.New()
 	st, err := svc.Create(context.Background(), uuid.New(), campaignID, CreateInput{Subject: "x", BodyText: "y"})
 	if err != nil {
@@ -96,7 +99,7 @@ func TestUpdateAllowedOnRunningCampaign(t *testing.T) {
 	campaignID := uuid.New()
 	stepID := uuid.New()
 	store := &fakeStore{getStep: gen.SequenceStep{ID: stepID, CampaignID: campaignID}}
-	svc := NewService(store, fakeChecker{status: "running"}, &fakeVariantStore{})
+	svc := NewService(store, fakeChecker{status: "running"}, &fakeVariantStore{}, &fakeBranchStore{})
 	_, err := svc.Update(context.Background(), uuid.New(), campaignID, UpdateInput{StepID: stepID, Subject: "new"})
 	if err != nil {
 		t.Fatalf("update on running should be allowed (live-reference), got %v", err)
@@ -111,7 +114,7 @@ func TestDeleteRejectsRunningCampaign(t *testing.T) {
 	campaignID := uuid.New()
 	stepID := uuid.New()
 	store := &fakeStore{getStep: gen.SequenceStep{ID: stepID, CampaignID: campaignID}}
-	svc := NewService(store, fakeChecker{status: "running"}, &fakeVariantStore{})
+	svc := NewService(store, fakeChecker{status: "running"}, &fakeVariantStore{}, &fakeBranchStore{})
 	err := svc.Delete(context.Background(), uuid.New(), campaignID, stepID)
 	if !errors.Is(err, ErrCampaignNotDraft) {
 		t.Fatalf("want ErrCampaignNotDraft, got %v", err)
@@ -126,7 +129,7 @@ func TestReorderHappyPath(t *testing.T) {
 	store := &fakeStore{listSteps: []gen.SequenceStep{
 		{ID: a, StepOrder: 1}, {ID: b, StepOrder: 2}, {ID: c, StepOrder: 3},
 	}}
-	svc := NewService(store, fakeChecker{status: "draft"}, &fakeVariantStore{})
+	svc := NewService(store, fakeChecker{status: "draft"}, &fakeVariantStore{}, &fakeBranchStore{})
 	newOrder := []uuid.UUID{c, a, b}
 	got, err := svc.Reorder(context.Background(), uuid.New(), campaignID, newOrder)
 	if err != nil {
@@ -156,7 +159,7 @@ func TestReorderRejectsNonPermutation(t *testing.T) {
 	for name, ids := range cases {
 		t.Run(name, func(t *testing.T) {
 			store := &fakeStore{listSteps: []gen.SequenceStep{{ID: a, StepOrder: 1}, {ID: b, StepOrder: 2}}}
-			svc := NewService(store, fakeChecker{status: "draft"}, &fakeVariantStore{})
+			svc := NewService(store, fakeChecker{status: "draft"}, &fakeVariantStore{}, &fakeBranchStore{})
 			_, err := svc.Reorder(context.Background(), uuid.New(), campaignID, ids)
 			if !errors.Is(err, ErrInvalidOrder) {
 				t.Fatalf("want ErrInvalidOrder, got %v", err)
@@ -171,7 +174,7 @@ func TestReorderRejectsNonPermutation(t *testing.T) {
 // Reorder is a structural edit → forbidden on a non-draft campaign (409).
 func TestReorderRejectsNonDraftCampaign(t *testing.T) {
 	store := &fakeStore{}
-	svc := NewService(store, fakeChecker{status: "running"}, &fakeVariantStore{})
+	svc := NewService(store, fakeChecker{status: "running"}, &fakeVariantStore{}, &fakeBranchStore{})
 	_, err := svc.Reorder(context.Background(), uuid.New(), uuid.New(), []uuid.UUID{uuid.New()})
 	if !errors.Is(err, ErrCampaignNotDraft) {
 		t.Fatalf("want ErrCampaignNotDraft, got %v", err)
@@ -183,7 +186,7 @@ func TestReorderRejectsNonDraftCampaign(t *testing.T) {
 
 // Reorder on a missing campaign is 404, checked before any store read.
 func TestReorderRejectsMissingCampaign(t *testing.T) {
-	svc := NewService(&fakeStore{}, fakeChecker{err: errors.New("no rows")}, &fakeVariantStore{})
+	svc := NewService(&fakeStore{}, fakeChecker{err: errors.New("no rows")}, &fakeVariantStore{}, &fakeBranchStore{})
 	_, err := svc.Reorder(context.Background(), uuid.New(), uuid.New(), []uuid.UUID{uuid.New()})
 	if !errors.Is(err, ErrCampaignNotFound) {
 		t.Fatalf("want ErrCampaignNotFound, got %v", err)
@@ -197,7 +200,7 @@ func TestUpdateRejectsStepFromAnotherCampaign(t *testing.T) {
 	otherCampaign := uuid.New()
 	stepID := uuid.New()
 	store := &fakeStore{getStep: gen.SequenceStep{ID: stepID, CampaignID: otherCampaign}}
-	svc := NewService(store, fakeChecker{status: "draft"}, &fakeVariantStore{})
+	svc := NewService(store, fakeChecker{status: "draft"}, &fakeVariantStore{}, &fakeBranchStore{})
 	_, err := svc.Update(context.Background(), uuid.New(), urlCampaign, UpdateInput{StepID: stepID, Subject: "x"})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound for mismatched campaign, got %v", err)

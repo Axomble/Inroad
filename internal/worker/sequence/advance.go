@@ -167,6 +167,22 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 		// The gmail access token is a decrypted secret too; wipe it after use.
 		defer zeroize(job.AccessToken)
 
+		// A branch condition on the enrollment's current step is still open, or
+		// the step it routed to is not due yet. The control plane has already
+		// stamped next_due_at; all that is left is to look again then. Checked
+		// BEFORE Skip, which rides along on this job only so that a worker built
+		// before ConditionPending existed does nothing harmful with it.
+		// result=deferred: a self-clearing wait, the same bucket as the
+		// campaign-limit and capacity defers below. Metric AFTER the enqueue, for
+		// their double-count reason.
+		if job.ConditionPending {
+			if err := enq.EnqueueAdvanceAt(ctx, p.EnrollmentID, p.WorkspaceID, job.RecheckAt); err != nil {
+				return err
+			}
+			mtx.SendFinalized(sendKind, "deferred")
+			return nil
+		}
+
 		// Enrollment no longer active (stopped/completed) or no next step.
 		// result=skipped: nothing was ever actionable — same bucket as a
 		// racing worker's already-claimed row below (ClaimSkip), never

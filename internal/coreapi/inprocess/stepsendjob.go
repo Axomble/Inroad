@@ -231,17 +231,39 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 		}, nil
 	}
 
-	// Resolve the next step by order rather than current_step+1: DeleteStep does
-	// not renumber, so orders can have gaps (e.g. {1,3}). GetNextStep skips gaps;
-	// ErrNoRows means the cursor is at/after the last step → done.
-	step, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
-		CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: b.CurrentStep,
-	})
+	// A campaign with branches (or an enrollment still parked by one) is routed
+	// through the graph; every other campaign takes the linear path below exactly
+	// as it did before branching existed. See branchroute.go.
+	branches, err := c.q.ListBranchesByCampaign(ctx, gen.ListBranchesByCampaignParams{CampaignID: b.CampaignID, WorkspaceID: ws})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return coreapi.StepSendJob{Skip: true}, nil
+		return coreapi.StepSendJob{}, fmt.Errorf("list branches: %w", err)
+	}
+	var (
+		step  gen.SequenceStep
+		route *routeDecision
+	)
+	if usesGraphRouting(branches, b) {
+		routed, err := c.routeStep(ctx, ws, enrollmentID, b, branches)
+		if err != nil {
+			return coreapi.StepSendJob{}, err
 		}
-		return coreapi.StepSendJob{}, err
+		if routed.kind != routeSend {
+			return c.applyRoute(ctx, ws, eid, enrollmentID, b, routed.routeDecision)
+		}
+		step, route = routed.step, &routed.routeDecision
+	} else {
+		// Resolve the next step by order rather than current_step+1: DeleteStep
+		// does not renumber, so orders can have gaps (e.g. {1,3}). GetNextStep
+		// skips gaps; ErrNoRows means the cursor is at/after the last step → done.
+		step, err = c.q.GetNextStep(ctx, gen.GetNextStepParams{
+			CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: b.CurrentStep,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return coreapi.StepSendJob{Skip: true}, nil
+			}
+			return coreapi.StepSendJob{}, err
+		}
 	}
 	nextOrder := int(step.StepOrder)
 
@@ -329,17 +351,23 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 	}
 
 	// Is there a step after this one? Its existence decides last-step; its delay
-	// is the cadence gap to the following send. One query answers both.
-	after, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
-		CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: step.StepOrder,
-	})
-	lastStep := errors.Is(err, pgx.ErrNoRows)
-	if err != nil && !lastStep {
-		return coreapi.StepSendJob{}, err
-	}
-	nextDelay := 0
-	if !lastStep {
-		nextDelay = int(after.DelaySeconds)
+	// is the cadence gap to the following send. On the linear path one query
+	// answers both; a routed step already carries the answer from the graph (the
+	// next step, the end, or the first look at its condition).
+	lastStep, nextDelay := false, 0
+	if route != nil {
+		lastStep, nextDelay = route.lastStep, route.nextDelay
+	} else {
+		after, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
+			CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: step.StepOrder,
+		})
+		lastStep = errors.Is(err, pgx.ErrNoRows)
+		if err != nil && !lastStep {
+			return coreapi.StepSendJob{}, err
+		}
+		if !lastStep {
+			nextDelay = int(after.DelaySeconds)
+		}
 	}
 
 	// Thread subject is only needed to build "Re: <step-1 subject>" for a

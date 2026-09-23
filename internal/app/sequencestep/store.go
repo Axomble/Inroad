@@ -43,13 +43,18 @@ type Store interface {
 	Get(ctx context.Context, ws, id uuid.UUID) (gen.SequenceStep, error)
 	List(ctx context.Context, ws, campaignID uuid.UUID) ([]gen.SequenceStep, error)
 	Update(ctx context.Context, ws uuid.UUID, in UpdateInput) (gen.SequenceStep, error)
-	Delete(ctx context.Context, ws, id uuid.UUID) error
+	// Delete removes one step of campaignID, then runs check on the campaign's
+	// resulting graph, in one transaction holding the campaign's graph lock (a
+	// delete re-links the linear fall-through around the removed step, which can
+	// close a loop through a branch). A check error rolls the delete back.
+	Delete(ctx context.Context, ws, campaignID, id uuid.UUID, check GraphCheck) error
 	MaxStepOrder(ctx context.Context, ws, campaignID uuid.UUID) (int32, error)
-	// Reorder rewrites step_order to 1..N to match stepIDs' order, in one
-	// transaction, and returns the campaign's steps in the new order. Every
-	// write is pinned by campaign_id AND workspace_id. Callers must pre-validate
-	// that stepIDs is a permutation of the campaign's current step ids.
-	Reorder(ctx context.Context, ws, campaignID uuid.UUID, stepIDs []uuid.UUID) ([]gen.SequenceStep, error)
+	// Reorder rewrites step_order to 1..N to match stepIDs' order, then runs
+	// check on the resulting graph, in one transaction holding the campaign's
+	// graph lock, and returns the campaign's steps in the new order. Every write
+	// is pinned by campaign_id AND workspace_id. Callers must pre-validate that
+	// stepIDs is a permutation of the campaign's current step ids.
+	Reorder(ctx context.Context, ws, campaignID uuid.UUID, stepIDs []uuid.UUID, check GraphCheck) ([]gen.SequenceStep, error)
 }
 
 // CampaignChecker reports a campaign's status (and existence) within the
@@ -87,8 +92,13 @@ func (s *PgStore) Update(ctx context.Context, ws uuid.UUID, in UpdateInput) (gen
 		Subject: in.Subject, BodyText: in.BodyText, BodyHtml: in.BodyHTML,
 	})
 }
-func (s *PgStore) Delete(ctx context.Context, ws, id uuid.UUID) error {
-	return s.q.DeleteStep(ctx, gen.DeleteStepParams{ID: id, WorkspaceID: ws})
+func (s *PgStore) Delete(ctx context.Context, ws, campaignID, id uuid.UUID, check GraphCheck) error {
+	return withGraphLock(ctx, s.pool, s.q, ws, campaignID, check, func(q *gen.Queries) error {
+		if err := q.DeleteStep(ctx, gen.DeleteStepParams{ID: id, WorkspaceID: ws}); err != nil {
+			return fmt.Errorf("delete step: %w", err)
+		}
+		return nil
+	})
 }
 func (s *PgStore) MaxStepOrder(ctx context.Context, ws, campaignID uuid.UUID) (int32, error) {
 	return s.q.MaxStepOrder(ctx, gen.MaxStepOrderParams{CampaignID: campaignID, WorkspaceID: ws})
@@ -100,36 +110,38 @@ func (s *PgStore) MaxStepOrder(ctx context.Context, ws, campaignID uuid.UUID) (i
 // final 1-based position. All writes are pinned by campaign_id AND
 // workspace_id, so a foreign id would update zero rows (belt-and-braces on top
 // of the service's permutation check). Either every write commits or none does.
-func (s *PgStore) Reorder(ctx context.Context, ws, campaignID uuid.UUID, stepIDs []uuid.UUID) ([]gen.SequenceStep, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin reorder tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op once committed
-	qtx := s.q.WithTx(tx)
-
-	maxOrder, err := qtx.MaxStepOrder(ctx, gen.MaxStepOrderParams{CampaignID: campaignID, WorkspaceID: ws})
-	if err != nil {
-		return nil, fmt.Errorf("max step order: %w", err)
-	}
-	if err := qtx.ShiftStepOrders(ctx, gen.ShiftStepOrdersParams{
-		CampaignID: campaignID, WorkspaceID: ws, StepOrder: maxOrder,
-	}); err != nil {
-		return nil, fmt.Errorf("shift step orders: %w", err)
-	}
-	for i, id := range stepIDs {
-		if err := qtx.SetStepOrder(ctx, gen.SetStepOrderParams{
-			ID: id, CampaignID: campaignID, WorkspaceID: ws, StepOrder: int32(i + 1),
-		}); err != nil {
-			return nil, fmt.Errorf("set step order: %w", err)
+//
+// The transaction is the graph-lock one (withGraphLock): reordering moves the
+// linear fall-through edges, so it is a routing change like any branch edit. A
+// campaign outside ws fails the lock and returns ErrCampaignNotFound before any
+// write.
+func (s *PgStore) Reorder(ctx context.Context, ws, campaignID uuid.UUID, stepIDs []uuid.UUID, check GraphCheck) ([]gen.SequenceStep, error) {
+	var steps []gen.SequenceStep
+	err := withGraphLock(ctx, s.pool, s.q, ws, campaignID, check, func(qtx *gen.Queries) error {
+		maxOrder, err := qtx.MaxStepOrder(ctx, gen.MaxStepOrderParams{CampaignID: campaignID, WorkspaceID: ws})
+		if err != nil {
+			return fmt.Errorf("max step order: %w", err)
 		}
-	}
-	steps, err := qtx.ListStepsByCampaign(ctx, gen.ListStepsByCampaignParams{CampaignID: campaignID, WorkspaceID: ws})
+		if err := qtx.ShiftStepOrders(ctx, gen.ShiftStepOrdersParams{
+			CampaignID: campaignID, WorkspaceID: ws, StepOrder: maxOrder,
+		}); err != nil {
+			return fmt.Errorf("shift step orders: %w", err)
+		}
+		for i, id := range stepIDs {
+			if err := qtx.SetStepOrder(ctx, gen.SetStepOrderParams{
+				ID: id, CampaignID: campaignID, WorkspaceID: ws, StepOrder: int32(i + 1),
+			}); err != nil {
+				return fmt.Errorf("set step order: %w", err)
+			}
+		}
+		steps, err = qtx.ListStepsByCampaign(ctx, gen.ListStepsByCampaignParams{CampaignID: campaignID, WorkspaceID: ws})
+		if err != nil {
+			return fmt.Errorf("list steps: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("list steps: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit reorder tx: %w", err)
+		return nil, err
 	}
 	return steps, nil
 }

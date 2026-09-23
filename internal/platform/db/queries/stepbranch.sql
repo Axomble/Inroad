@@ -1,0 +1,89 @@
+-- name: ListBranchesByCampaign :many
+-- Every router in the campaign, workspace-pinned. The send path reads this once
+-- per advance: an empty result is the linear campaign, which then takes exactly
+-- the pre-branching code path.
+SELECT * FROM sequence_step_branches
+WHERE campaign_id = $1 AND workspace_id = $2
+ORDER BY step_id;
+
+-- name: UpsertBranch :one
+-- Create or replace the router on one step. workspace_id and campaign_id are
+-- written from the caller's pinned values, and the composite FKs refuse a step
+-- (source or target) that is not in that campaign, so a foreign id cannot be
+-- smuggled in even if the service's own check were skipped. The ON CONFLICT
+-- update is pinned on workspace_id as well: a step id belonging to another tenant
+-- updates nothing and returns no row.
+INSERT INTO sequence_step_branches (step_id, workspace_id, campaign_id, condition, within_days,
+                                    reply_label_key, yes_step_id, no_step_id)
+VALUES ($1, $2, $3, $4, sqlc.narg(within_days), sqlc.narg(reply_label_key),
+        sqlc.narg(yes_step_id), sqlc.narg(no_step_id))
+ON CONFLICT (step_id) DO UPDATE
+SET condition = EXCLUDED.condition, within_days = EXCLUDED.within_days,
+    reply_label_key = EXCLUDED.reply_label_key, yes_step_id = EXCLUDED.yes_step_id,
+    no_step_id = EXCLUDED.no_step_id, updated_at = now()
+WHERE sequence_step_branches.workspace_id = EXCLUDED.workspace_id
+  AND sequence_step_branches.campaign_id = EXCLUDED.campaign_id
+RETURNING *;
+
+-- name: DeleteBranch :exec
+-- Remove a step's router, returning it to linear fall-through. Pinned on
+-- workspace_id and campaign_id.
+DELETE FROM sequence_step_branches
+WHERE step_id = $1 AND campaign_id = $2 AND workspace_id = $3;
+
+-- name: LockCampaignGraph :one
+-- Serializes every write that changes a campaign's routing graph (branch
+-- upsert/delete, step delete, reorder), so the save-time cycle check sees the
+-- graph it is actually committing into — two edits that are each acyclic alone
+-- can form a cycle together. FOR NO KEY UPDATE rather than FOR UPDATE: it still
+-- conflicts with itself, but not with the FOR KEY SHARE lock every sends insert
+-- takes on its campaign FK, so a graph edit never stalls delivery.
+SELECT id FROM campaigns WHERE id = $1 AND workspace_id = $2 FOR NO KEY UPDATE;
+
+-- name: ReplyLabelKeyExists :one
+-- Whether the workspace defines a reply label with this key. Save-time
+-- validation only: a branch naming a label that does not exist could never match.
+SELECT EXISTS (SELECT 1 FROM reply_labels WHERE workspace_id = $1 AND key = $2)::bool;
+
+-- name: FirstHumanTrackingEventAt :one
+-- The earliest HUMAN open or click of one send, at or before window_end. It reads
+-- the stored bot verdict (NOT is_machine) — the same definition CountHumanOpens
+-- reports — rather than deriving its own, so a branch and the open rate can
+-- never disagree about the same contact (docs/security.md invariant 82). Served
+-- by idx_tracking_send_recent (send_id, kind, is_machine, created_at).
+SELECT created_at FROM tracking_events
+WHERE send_id = $1 AND workspace_id = $2 AND kind = $3 AND NOT is_machine
+  AND created_at <= sqlc.arg(window_end)::timestamptz
+ORDER BY created_at ASC
+LIMIT 1;
+
+-- name: FirstInboundReplyAt :one
+-- The earliest inbound reply from this contact on this campaign that arrived
+-- inside [window_start, window_end]. created_at (when WE ingested it), not
+-- occurred_at: the latter is the sender's own Date header, which they control.
+--
+-- label_key '' means "any human reply": a message whose label is automated
+-- (out-of-office, auto-reply) is not a reply from a person and does not count. A
+-- label the workspace has since deleted falls back to the builtin automated keys,
+-- the same degradation the inbox dispatch applies. A non-empty label_key matches
+-- that key exactly, automated or not — branching on an out-of-office is a
+-- legitimate thing to want.
+SELECT m.created_at FROM inbox_messages m
+JOIN inbox_threads t ON t.id = m.thread_id AND t.workspace_id = m.workspace_id
+LEFT JOIN reply_labels rl ON rl.workspace_id = m.workspace_id AND rl.key = m.reply_class
+WHERE m.workspace_id = $1 AND t.campaign_id = $2 AND t.contact_id = $3
+  AND m.direction = 'inbound'
+  AND m.created_at >= sqlc.arg(window_start)::timestamptz
+  AND m.created_at <= sqlc.arg(window_end)::timestamptz
+  AND CASE WHEN sqlc.arg(label_key)::text = ''
+           THEN NOT COALESCE(rl.is_automated, m.reply_class IN ('auto_reply', 'out_of_office'))
+           ELSE m.reply_class = sqlc.arg(label_key)::text
+      END
+ORDER BY m.created_at ASC
+LIMIT 1;
+
+-- name: StepSendCreatedAt :one
+-- When a (deterministically-id'd) step send row was first created. The send
+-- path's cycle backstop: a routed step whose row predates the enrollment's last
+-- send was visited EARLIER on this path, i.e. the graph now loops. Workspace-pinned.
+SELECT created_at FROM sends WHERE id = $1 AND workspace_id = $2;

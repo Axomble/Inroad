@@ -11,6 +11,7 @@ import (
 	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 	"github.com/inroad/inroad/internal/platform/httpx"
+	"github.com/inroad/inroad/internal/platform/seqgraph"
 	"github.com/inroad/inroad/internal/platform/validate"
 )
 
@@ -131,6 +132,9 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusConflict, "steps can only be removed while the campaign is draft")
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "step not found")
+	case seqgraph.CodeOf(err) != "":
+		// The re-linked fall-through would close a loop through a branch (422).
+		writeGraphError(w, err, "could not delete step")
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "could not delete step")
 	default:
@@ -175,6 +179,9 @@ func (h *Handler) Reorder(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusNotFound, "step not found")
 	case errors.Is(err, ErrInvalidOrder):
 		httpx.Error(w, http.StatusBadRequest, err.Error())
+	case seqgraph.CodeOf(err) != "":
+		// The new order's fall-through would close a loop through a branch (422).
+		writeGraphError(w, err, "could not reorder steps")
 	case err != nil:
 		httpx.Error(w, http.StatusInternalServerError, "could not reorder steps")
 	default:
