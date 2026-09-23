@@ -57,7 +57,7 @@ SELECT tracking_enabled FROM campaigns WHERE id = $1 AND workspace_id = $2;
 -- The earliest HUMAN open or click of one send, at or before window_end. It reads
 -- the stored bot verdict (NOT is_machine) — the same definition CountHumanOpens
 -- reports — rather than deriving its own, so a branch and the open rate can
--- never disagree about the same contact (docs/security.md invariant 82). Served
+-- never disagree about the same contact (docs/security.md invariant 84). Served
 -- by idx_tracking_send_recent (send_id, kind, is_machine, created_at).
 SELECT created_at FROM tracking_events
 WHERE send_id = $1 AND workspace_id = $2 AND kind = $3 AND NOT is_machine

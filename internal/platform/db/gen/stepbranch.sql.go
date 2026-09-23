@@ -66,7 +66,7 @@ type FirstHumanTrackingEventAtParams struct {
 // The earliest HUMAN open or click of one send, at or before window_end. It reads
 // the stored bot verdict (NOT is_machine) — the same definition CountHumanOpens
 // reports — rather than deriving its own, so a branch and the open rate can
-// never disagree about the same contact (docs/security.md invariant 82). Served
+// never disagree about the same contact (docs/security.md invariant 84). Served
 // by idx_tracking_send_recent (send_id, kind, is_machine, created_at).
 func (q *Queries) FirstHumanTrackingEventAt(ctx context.Context, arg FirstHumanTrackingEventAtParams) (pgtype.Timestamptz, error) {
 	row := q.db.QueryRow(ctx, firstHumanTrackingEventAt,
