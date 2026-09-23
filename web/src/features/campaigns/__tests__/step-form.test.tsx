@@ -320,3 +320,58 @@ test('the first step still requires a subject; a follow-up may leave it blank', 
   await waitFor(() => expect(putRequests()).toHaveLength(1))
   expect(putRequests()[0]?.body).toMatchObject({ subject: '' })
 })
+
+// --- Stored HTML the editor can't hold -------------------------------------
+
+/** An API-client-authored body: heading, inline styles, a table. */
+const AGENT_HTML =
+  '<h2 style="margin:0">Quick idea for {{company}}</h2>\n<p>Hi {{first_name}},</p>\n<table style="border-collapse:collapse"><tr><th>Plan</th><td>Starter</td></tr></table>'
+
+test.each([
+  ['agent-authored HTML with a table (shown raw)', AGENT_HTML, 'Hi {{first_name}}, Plan: Starter'],
+  // Lossless, but not in the editor's own spelling (<b>, attribute order,
+  // whitespace): loading it must not quietly re-serialize it either.
+  ['lossless HTML in a foreign spelling (in the editor)', '<p><b>Hi</b>  {{first_name}}<br>\n<a rel="x" href="https://x.dev">x</a></p>', 'Hi {{first_name}}'],
+])('an untouched save sends the stored body back byte for byte: %s', async (_name, html, text) => {
+  renderWithProviders(
+    <StepForm
+      campaignId="c-1"
+      step={makeStep({ body_html: html, body_text: text })}
+      isFirstStep
+      onDone={vi.fn()}
+      onCancel={vi.fn()}
+    />,
+  )
+  // Whichever mode the body opened in, wait for it before saving.
+  await screen.findAllByRole('textbox', { name: /^Body/ })
+  await submitStep()
+  await waitFor(() => expect(putRequests()).toHaveLength(1))
+  const sent = putRequests()[0]?.body as { body_html: string; body_text: string }
+  expect(sent.body_html).toBe(html)
+  expect(sent.body_text).toBe(text)
+})
+
+test('agent-authored HTML opens raw with the notice, and the raw HTML is still held to the merge-field rule', async () => {
+  renderWithProviders(
+    <StepForm
+      campaignId="c-1"
+      step={makeStep({ body_html: AGENT_HTML, body_text: 'Hi {{first_name}}' })}
+      isFirstStep
+      onDone={vi.fn()}
+      onCancel={vi.fn()}
+    />,
+  )
+  expect(await screen.findByRole('status')).toHaveTextContent('can’t keep: headings, inline styles and tables')
+  const html = await screen.findByRole('textbox', { name: 'Body HTML' })
+
+  fireEvent.change(html, { target: { value: `${AGENT_HTML}<p>{{frist_name}}</p>` } })
+  expect(await screen.findByRole('alert')).toHaveTextContent('{{frist_name}}')
+  await submitStep()
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(putRequests()).toHaveLength(0)
+
+  fireEvent.change(html, { target: { value: `${AGENT_HTML}<p>{{company}}</p>` } })
+  await submitStep()
+  await waitFor(() => expect(putRequests()).toHaveLength(1))
+  expect(putRequests()[0]?.body).toMatchObject({ body_html: `${AGENT_HTML}<p>{{company}}</p>`, body_text: 'Hi {{first_name}}' })
+})

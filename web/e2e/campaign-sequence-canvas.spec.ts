@@ -258,8 +258,9 @@ test('the step editor turns merge fields into chips, flags an unknown one, and r
   expect(updates).toHaveLength(0)
 
   // One Backspace removes the whole chip; then bold everything and save.
-  await body.click()
-  await page.keyboard.press('End')
+  // focus(), not click(): ProseMirror restores its own caret (just after the
+  // chip), where a click at the box's centre could land on a chip and select it.
+  await body.focus()
   await page.keyboard.press('Backspace')
   await expect(panel.getByRole('alert')).toHaveCount(0)
   await page.keyboard.press('ControlOrMeta+a')
@@ -272,4 +273,26 @@ test('the step editor turns merge fields into chips, flags an unknown one, and r
     body_text: 'hello {{custom.industry}} ',
     body_html: '<p><strong>hello {{custom.industry}} </strong></p>',
   })
+})
+
+// Stored HTML the editor's schema can't hold (a table from an API client) must
+// never be rewritten by opening and saving the step.
+test('a step whose HTML the editor can’t keep opens as HTML and an untouched save sends it back byte for byte', async ({ page }) => {
+  const tableHtml =
+    '<h2 style="margin:0">Plans for {{company}}</h2>\n<table style="border-collapse:collapse"><tr><td>Starter</td></tr></table>'
+  const { updates } = await mockApi(page, [
+    { id: 'step-1', step_order: 1, delay_seconds: 0, subject: 'A quick idea', body_text: 'Plans: Starter', body_html: tableHtml },
+  ])
+  await signIn(page)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/steps`)
+
+  await page.getByRole('region', { name: 'Sequence flow' }).getByRole('button', { name: 'Edit step 1: A quick idea' }).click()
+  const panel = page.getByRole('complementary', { name: 'Step 1' })
+  await expect(panel.getByRole('status')).toContainText('can’t keep: headings, inline styles and tables')
+  await expect(panel.getByRole('textbox', { name: 'Body HTML' })).toHaveValue(tableHtml)
+  await expect(panel.locator('[contenteditable="true"]')).toHaveCount(1) // the subject only
+
+  await panel.getByRole('button', { name: 'Save step' }).click()
+  await expect.poll(() => updates.length).toBe(1)
+  expect(updates[0]).toMatchObject({ body_html: tableHtml, body_text: 'Plans: Starter' })
 })
