@@ -79,6 +79,13 @@ function labelList(server: FakeSequenceServer) {
   }
 }
 
+let versions = 0
+/** "2026-09-24T10:00:00.000001Z", "…000002Z", … — six fractional digits. */
+function nextVersion(): string {
+  versions += 1
+  return `2026-09-24T10:00:00.${String(versions).padStart(6, '0')}Z`
+}
+
 export function installFakeSequenceServer(steps: FakeStep[]): FakeSequenceServer {
   const server: FakeSequenceServer = {
     steps,
@@ -109,25 +116,39 @@ export function installFakeSequenceServer(steps: FakeStep[]): FakeSequenceServer
         if (server.graphGate) await server.graphGate
         return server.graphFails ? jsonResponse({ error: 'boom' }, 500) : jsonResponse(graphOf(server))
       }
-      const branchPath = /\/steps\/([^/]+)\/branch$/.exec(url)
+      const parsed = new URL(url)
+      const branchPath = /\/steps\/([^/]+)\/branch$/.exec(parsed.pathname)
       if (branchPath?.[1]) {
         if (server.branchGate) await server.branchGate
         if (server.branchFails) return server.branchFails
         const stepId = branchPath[1]
+        const stored = server.branches.get(stepId) ?? null
+        // The precondition, as the contract states it: absent = no check;
+        // null = only if the step has no branch; a token = only if the stored
+        // updated_at is exactly that string.
+        const conflict = () =>
+          jsonResponse({ error: 'the branch changed', code: 'branch_changed', current: stored }, 409)
         if (method === 'DELETE') {
+          const expected = parsed.searchParams.get('expected_updated_at')
+          if (expected !== null && (stored === null || stored.updated_at !== expected)) return conflict()
           server.branches.delete(stepId)
           return new Response(null, { status: 204 })
         }
-        const request = body as StepBranchRequest
+        const put = body as StepBranchRequest
+        if (Object.hasOwn(put, 'expected_updated_at')) {
+          const expected = put.expected_updated_at
+          if (expected === null ? stored !== null : stored?.updated_at !== expected) return conflict()
+        }
         const saved: StepBranch = {
           step_id: stepId,
-          condition: request.condition,
-          within_days: request.within_days ?? null,
-          reply_label_key: request.reply_label_key ?? null,
-          yes_step_id: request.yes_step_id ?? null,
-          no_step_id: request.no_step_id ?? null,
-          // A new version per write, as the server stamps one.
-          updated_at: new Date(Date.now() + server.requests.length).toISOString(),
+          condition: put.condition,
+          within_days: put.within_days ?? null,
+          reply_label_key: put.reply_label_key ?? null,
+          yes_step_id: put.yes_step_id ?? null,
+          no_step_id: put.no_step_id ?? null,
+          // A new version per write, at microsecond precision like the real
+          // server's — a token that a Date round-trip would truncate.
+          updated_at: nextVersion(),
         }
         server.branches.set(stepId, saved)
         return jsonResponse(saved)
@@ -179,11 +200,16 @@ export function lastRequest(
   return [...server.requests].reverse().find(predicate)
 }
 
-/** The bodies sent to URLs ending in `suffix`, in order. */
+/** The bodies sent to paths ending in `suffix` (query strings aside), in order. */
 export function bodiesTo(server: FakeSequenceServer, suffix: string, method?: string): unknown[] {
-  return server.requests
-    .filter((request) => request.url.endsWith(suffix) && (method === undefined || request.method === method))
-    .map((request) => request.body)
+  return requestsTo(server, suffix, method).map((request) => request.body)
+}
+
+/** The requests sent to paths ending in `suffix` (query strings aside), in order. */
+export function requestsTo(server: FakeSequenceServer, suffix: string, method?: string): CapturedRequest[] {
+  return server.requests.filter(
+    (request) => new URL(request.url).pathname.endsWith(suffix) && (method === undefined || request.method === method),
+  )
 }
 
 /** A promise and the function that settles it, for holding a response back. */

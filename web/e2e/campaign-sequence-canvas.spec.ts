@@ -281,6 +281,8 @@ test('adding a condition draws the IF after its step, with Yes / No exits routed
     reply_label_key: null,
     yes_step_id: 'step-3',
     no_step_id: 'step-2',
+    // A new condition is create-only.
+    expected_updated_at: null,
   })
 
   // The diamond, in words, right after step 1 — and it took focus.
@@ -304,5 +306,10 @@ test('adding a condition draws the IF after its step, with Yes / No exits routed
   await page.mouse.down()
   await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 12 })
   await page.mouse.up()
-  await expect.poll(() => branchWrites.at(-1)).toMatchObject({ yes_step_id: 'step-2', no_step_id: 'step-2' })
+  // The drag is conditional on the version the canvas showed — echoed verbatim.
+  await expect.poll(() => branchWrites.at(-1)).toMatchObject({
+    yes_step_id: 'step-2',
+    no_step_id: 'step-2',
+    expected_updated_at: '2026-09-23T00:00:00Z',
+  })
 })

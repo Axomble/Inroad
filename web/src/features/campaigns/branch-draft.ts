@@ -139,8 +139,14 @@ export function validateDraft(draft: ConditionDraft, context: DraftContext): Dra
  * rather than whatever the form still holds, so switching a reply condition to
  * "opened" can't smuggle a label along, and "always" never carries a window or
  * a no exit.
+ *
+ * `basedOn` is the concurrency token: the `updated_at` of the branch the draft
+ * was built from, sent back verbatim (never through a Date — the server's
+ * token has microseconds, and a millisecond round-trip never matches), or
+ * null for a new condition, which the server then applies only if the step
+ * still has none. A mismatch is a 409 `branch_changed`.
  */
-export function toBranchRequest(draft: ConditionDraft): StepBranchRequest {
+export function toBranchRequest(draft: ConditionDraft, basedOn: string | null): StepBranchRequest {
   const always = draft.condition === 'always'
   const meta = conditionMeta(draft.condition)
   return {
@@ -149,12 +155,17 @@ export function toBranchRequest(draft: ConditionDraft): StepBranchRequest {
     reply_label_key: meta.isReply && draft.replyLabelKey !== '' ? draft.replyLabelKey : null,
     yes_step_id: draft.yesStepId === '' ? null : draft.yesStepId,
     no_step_id: always || draft.noStepId === '' ? null : draft.noStepId,
+    expected_updated_at: basedOn,
   }
 }
 
-/** The request that changes one exit of an existing branch and keeps the rest. */
+/**
+ * The request that changes one exit of an existing branch and keeps the rest —
+ * conditional on that branch still being the one the drag was made against.
+ */
 export function withExit(branch: StepBranch, exit: 'yes' | 'no', target: string): StepBranchRequest {
   return {
+    expected_updated_at: branch.updated_at,
     condition: branch.condition,
     within_days: branch.within_days,
     reply_label_key: branch.reply_label_key,

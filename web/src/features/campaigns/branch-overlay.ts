@@ -14,11 +14,16 @@
 // a refetch is in flight the data shown is older than that request, so every
 // write stays applied.
 //
-// Across tabs this is still last-writer-wins: another tab's write lands only
-// when this tab's graph refetches (on focus, and before the condition editor
-// opens), and a save here replaces whatever the server had. Making that a
-// conflict instead needs a server-side precondition (expected_updated_at) —
-// tracked as a backend follow-up.
+// Across tabs, writes are conditional rather than last-writer-wins: every PUT
+// and DELETE sends the `updated_at` of the branch it was built from as
+// `expected_updated_at` (null for a new condition), so a write made against a
+// branch another tab has since changed is refused with a 409 `branch_changed`
+// carrying the server's current branch. That `current` is recorded here like
+// any other write, so the canvas and editor show the server's version and the
+// user decides again — nothing is retried over a change they haven't seen.
+// Another tab's change still only APPEARS when this tab's graph refetches (on
+// focus, and before the condition editor opens), but it can no longer be
+// silently overwritten.
 import type { StepBranch } from './api'
 
 /** One completed write: the step's branch as the server answered (null = removed). */

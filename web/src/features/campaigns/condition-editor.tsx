@@ -15,13 +15,14 @@ import {
   MAX_WITHIN_DAYS,
   MIN_WITHIN_DAYS,
   conditionMeta,
+  describeBranch,
   draftFromBranch,
   toBranchRequest,
   validateDraft,
   type ConditionDraft,
   type DraftField,
 } from './branch-draft'
-import { branchErrorMessage } from './branch-error'
+import { branchErrorMessage, changedBranch } from './branch-error'
 import { cycleStepIds } from './branch-loop'
 import { useBranchRules } from './branch-rules'
 import type { StepWithId } from './step-card'
@@ -72,36 +73,46 @@ export function ConditionEditor({
   onLoop,
 }: ConditionEditorProps) {
   const [draft, setDraft] = useState<ConditionDraft>(() => initialDraft ?? draftFromBranch(branch))
-  // The saved branch the draft was last seeded from, by version. When it moves
-  // on — an exit dragged on the canvas, or a refetch bringing another tab's
-  // change — the form follows if untouched; if the user has edits, they're
-  // kept and flagged instead, so "Save" never silently undoes a change the
-  // user didn't see. Adjusted during render (React's own pattern for derived
-  // state), not in an effect.
-  const [seededVersion, setSeededVersion] = useState(branch?.updated_at ?? null)
+  // Two versions, kept apart on purpose:
+  // - `basedOn` is the branch the draft is built from. It is the concurrency
+  //   token every write sends (`expected_updated_at`, verbatim; null = this is
+  //   a new condition), so the server refuses the write if the branch has moved
+  //   on since — even from another tab this one never heard about.
+  // - `observed` is the latest version this editor has seen. When it moves on
+  //   (an exit dragged on the canvas, a refetch, or a 409 reporting the
+  //   server's current branch), an untouched form follows it — and rebases its
+  //   token. An edited one keeps the user's draft and its old token, and says
+  //   so: the user reviews the change before anything overwrites it.
+  // Adjusted during render (React's pattern for derived state), not an effect.
+  const version = branch?.updated_at ?? null
+  const [observed, setObserved] = useState(version)
+  const [basedOn, setBasedOn] = useState(version)
   const [baseline, setBaseline] = useState<ConditionDraft>(() => draftFromBranch(branch))
   const [changedElsewhere, setChangedElsewhere] = useState(false)
-  const version = branch?.updated_at ?? null
-  if (version !== seededVersion) {
-    setSeededVersion(version)
-    const latest = draftFromBranch(branch)
-    if (sameDraft(draft, baseline)) {
+  const [save, saveState] = useSetStepBranchMutation()
+  const [remove, removeState] = useDeleteStepBranchMutation()
+  if (version !== observed) {
+    setObserved(version)
+    if (!changedElsewhere && sameDraft(draft, baseline)) {
+      const latest = draftFromBranch(branch)
       setDraft(latest)
+      setBaseline(latest)
+      setBasedOn(version)
     } else {
       setChangedElsewhere(true)
     }
-    setBaseline(latest)
   }
 
   function loadLatest() {
     const latest = draftFromBranch(branch)
     setDraft(latest)
     setBaseline(latest)
+    setBasedOn(version)
     setChangedElsewhere(false)
+    saveState.reset()
+    removeState.reset()
   }
 
-  const [save, saveState] = useSetStepBranchMutation()
-  const [remove, removeState] = useDeleteStepBranchMutation()
   const busy = saveState.isLoading || removeState.isLoading
   const failure = saveState.error ?? removeState.error
 
@@ -145,11 +156,15 @@ export function ConditionEditor({
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault()
-    if (problems.length > 0 || busy || routingUnavailable) return
+    if (problems.length > 0 || busy || routingUnavailable || changedElsewhere) return
     onLoop(null)
-    const result = await save({ id: campaignId, stepId: step.id, stepBranchRequest: toBranchRequest(draft) })
+    const result = await save({ id: campaignId, stepId: step.id, stepBranchRequest: toBranchRequest(draft, basedOn) })
     if ('error' in result) {
       onLoop(cycleStepIds(result.error))
+      // Someone else's write got there first. Show theirs — never retry ours
+      // over it: the user hasn't seen what they'd be replacing.
+      const conflict = changedBranch(result.error)
+      if (conflict) onWritten(conflict.current)
       return
     }
     onWritten(result.data)
@@ -157,11 +172,19 @@ export function ConditionEditor({
   }
 
   async function onRemove() {
-    if (routingUnavailable) return
+    if (routingUnavailable || changedElsewhere || basedOn === null) return
     onLoop(null)
-    const result = await remove({ id: campaignId, stepId: step.id })
+    const result = await remove({ id: campaignId, stepId: step.id, expectedUpdatedAt: basedOn })
     if ('error' in result) {
       onLoop(cycleStepIds(result.error))
+      const conflict = changedBranch(result.error)
+      // Already removed elsewhere: what the user asked for is true. Done.
+      if (conflict?.current === null) {
+        onWritten(null)
+        onDeleted()
+        return
+      }
+      if (conflict) onWritten(conflict.current)
       return
     }
     onWritten(null)
@@ -289,7 +312,9 @@ export function ConditionEditor({
       {changedElsewhere && (
         <div role="status" className="flex flex-wrap items-center gap-2 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
           <span className="min-w-0 flex-1">
-            This condition was changed elsewhere since you started editing. Saving will replace that change.
+            This condition was changed elsewhere since you started editing
+            {branch ? ` — it’s now “${describeBranch(branch)}”` : ' — it has been removed'}. Load the latest to
+            continue from it; your edits here would replace a version you haven’t seen, so they can’t be saved.
           </span>
           <Button type="button" variant="ghost" size="xs" onClick={loadLatest}>
             Load the latest
@@ -309,13 +334,13 @@ export function ConditionEditor({
       )}
 
       <div className="flex items-center gap-2">
-        {branch && (
+        {basedOn !== null && (
           <Button
             type="button"
             variant="ghost"
             size="sm"
             className="text-danger"
-            disabled={busy || routingUnavailable}
+            disabled={busy || routingUnavailable || changedElsewhere}
             onClick={() => void onRemove()}
           >
             {removeState.isLoading && <Loader2 className="animate-spin" />}
@@ -326,9 +351,14 @@ export function ConditionEditor({
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" size="sm" disabled={busy || routingUnavailable || problems.length > 0}>
+        <Button
+          type="submit"
+          variant="primary"
+          size="sm"
+          disabled={busy || routingUnavailable || changedElsewhere || problems.length > 0}
+        >
           {saveState.isLoading && <Loader2 className="animate-spin" />}
-          {branch ? 'Save condition' : 'Add condition'}
+          {basedOn !== null ? 'Save condition' : 'Add condition'}
         </Button>
       </div>
     </form>
