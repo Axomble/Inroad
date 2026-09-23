@@ -8,44 +8,21 @@
 -- From this migration on, ClaimStepSend stamps sends.tracked from the job being
 -- claimed (coreapi.StepSendJob.CarriesTracking: the campaign had tracking on AND
 -- the step had an HTML body, since the pixel and the link rewriting only exist
--- in HTML), and the aggregate reads the row.
+-- in HTML), and the aggregates read the row.
 --
--- DEFAULT false: a writer that does not state it must not claim that opens were
--- measurable. Adding a column with a constant default is metadata-only.
-ALTER TABLE sends ADD COLUMN tracked BOOLEAN NOT NULL DEFAULT false;
-
--- BACKFILL. The per-send truth was never stored, so it cannot be recovered
--- exactly for existing rows. The signals used, strongest first:
+-- NULLABLE, with no default, on purpose. NULL means "not recorded", and every
+-- reader falls back to the campaign's flag for it
+-- (COALESCE(s.tracked, c.tracking_enabled)) — exactly the old answer, never a
+-- new wrong one. That matters during a ROLLING DEPLOY: workers still running the
+-- previous binary keep claiming after this migration with the old INSERT, which
+-- does not name the column. A DEFAULT false would silently record every one of
+-- those tracked sends as untracked, and nothing would ever correct them; a
+-- DEFAULT true would do the same to untracked campaigns. A column default
+-- cannot look at the campaign, and NULL is the only value that does not lie.
 --
---   1. A tracking event exists for the send (open or click, human OR machine —
---      a scanner fetching the pixel still proves the pixel was in the message).
---      That is proof the send was tracked, whatever the campaign says today.
---   2. Otherwise, the campaign's tracking_enabled as of this migration. This is
---      the exact signal the old query used, so for every row without proof the
---      answer rendered today is preserved: frozen, not improved.
---
--- What CANNOT be recovered, and stays exactly as wrong as it already was:
---   * a send made while tracking was ON, on a campaign whose tracking is now
---     OFF, that never produced a single event -> backfilled false (it was
---     tracked; nobody opened it, and nothing records that the pixel was there);
---   * a send made while tracking was OFF, on a campaign whose tracking is now ON
---     -> backfilled true (it was not tracked; no event can exist to correct it);
---   * a text-only step (no HTML body, so no pixel) on a tracked campaign ->
---     backfilled true. The step's body at send time was not recorded, and
---     today's step content is as mutable as today's toggle, so it is not used.
--- The toggle's history is logged nowhere, so no better signal exists. New sends
--- are stamped correctly at claim time; only these historical rows are estimates.
-UPDATE sends s
-   SET tracked = true
-  FROM campaigns c
- WHERE c.id = s.campaign_id
-   AND c.workspace_id = s.workspace_id
-   AND c.tracking_enabled;
-
-UPDATE sends s
-   SET tracked = true
- WHERE NOT s.tracked
-   AND EXISTS (
-       SELECT 1 FROM tracking_events te
-        WHERE te.send_id = s.id AND te.workspace_id = s.workspace_id
-   );
+-- This file is ONLY the column, so it takes ACCESS EXCLUSIVE on sends for the
+-- instant a catalog change needs (a nullable column with no default rewrites no
+-- rows). The backfill is the next migration, 20260923142238, which runs in
+-- committed batches — golang-migrate executes a file as one statement batch, so
+-- a backfill in this file would hold this lock for its whole duration.
+ALTER TABLE sends ADD COLUMN tracked BOOLEAN;

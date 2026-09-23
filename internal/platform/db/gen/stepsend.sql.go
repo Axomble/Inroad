@@ -15,7 +15,7 @@ import (
 const claimStepSend = `-- name: ClaimStepSend :one
 INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
                    step_order, references_header, status, claimed_at, variant_id, tracked)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), $9, $10)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), $9, $10::bool)
 ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
 DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
               variant_id = EXCLUDED.variant_id, tracked = EXCLUDED.tracked
@@ -67,7 +67,9 @@ type ClaimStepSendRow struct {
 // the campaign's tracking toggle may have moved between the two attempts. It is
 // written here, at claim time, and never again: this row is what every
 // "could an open have been recorded" aggregate reads, so a later toggle of
-// campaigns.tracking_enabled cannot rewrite history.
+// campaigns.tracking_enabled cannot rewrite history. Cast to a plain bool: the
+// column is nullable (NULL = "not recorded", written only by a pre-column
+// binary during a rolling deploy), but this writer always knows the answer.
 // `freshly_inserted` distinguishes the two ways a claim is won, for
 // observability only (inroad_send_claims_total: a rising RECLAIM rate means
 // workers are dying mid-send, which a single "won" counter would hide). Both
@@ -254,8 +256,9 @@ SELECT COALESCE($1::timestamptz > now(), false)::bool AS not_yet_due
 // used to) made the outcome depend on app/DB clock skew: a database clock
 // running ahead turned a due-now enrollment into ClaimDeferred.
 //
-// Called inside the claim transaction, so now() here is the SAME instant the
-// ClaimStepSend INSERT stamps as claimed_at. A NULL not_due_until ("no
+// Run on its own, just before the claim transaction opens, so a refusal never
+// holds a transaction; the database clock only moves forward, so a "due"
+// verdict still holds by the time the INSERT runs. A NULL not_due_until ("no
 // recorded due time") is never "not yet due", which is what the COALESCE says.
 func (q *Queries) StepSendNotYetDue(ctx context.Context, notDueUntil pgtype.Timestamptz) (bool, error) {
 	row := q.db.QueryRow(ctx, stepSendNotYetDue, notDueUntil)

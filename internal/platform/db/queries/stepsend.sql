@@ -55,10 +55,12 @@ WHERE e.id = $1 AND e.workspace_id = $2;
 -- the campaign's tracking toggle may have moved between the two attempts. It is
 -- written here, at claim time, and never again: this row is what every
 -- "could an open have been recorded" aggregate reads, so a later toggle of
--- campaigns.tracking_enabled cannot rewrite history.
+-- campaigns.tracking_enabled cannot rewrite history. Cast to a plain bool: the
+-- column is nullable (NULL = "not recorded", written only by a pre-column
+-- binary during a rolling deploy), but this writer always knows the answer.
 INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
                    step_order, references_header, status, claimed_at, variant_id, tracked)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), sqlc.narg(variant_id), sqlc.arg(tracked))
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), sqlc.narg(variant_id), sqlc.arg(tracked)::bool)
 ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
 DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
               variant_id = EXCLUDED.variant_id, tracked = EXCLUDED.tracked
@@ -85,8 +87,9 @@ RETURNING id, (created_at = claimed_at) AS freshly_inserted;
 -- used to) made the outcome depend on app/DB clock skew: a database clock
 -- running ahead turned a due-now enrollment into ClaimDeferred.
 --
--- Called inside the claim transaction, so now() here is the SAME instant the
--- ClaimStepSend INSERT stamps as claimed_at. A NULL not_due_until ("no
+-- Run on its own, just before the claim transaction opens, so a refusal never
+-- holds a transaction; the database clock only moves forward, so a "due"
+-- verdict still holds by the time the INSERT runs. A NULL not_due_until ("no
 -- recorded due time") is never "not yet due", which is what the COALESCE says.
 SELECT COALESCE(sqlc.narg(not_due_until)::timestamptz > now(), false)::bool AS not_yet_due;
 

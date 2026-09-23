@@ -478,12 +478,6 @@ func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob)
 	if err != nil {
 		return coreapi.ClaimSkip, err
 	}
-	tx, err := c.pool.Begin(ctx)
-	if err != nil {
-		return coreapi.ClaimSkip, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	qtx := c.q.WithTx(tx)
 
 	// Not-due guard, BEFORE any row is written: an advance task queued for an
 	// earlier due time must not deliver after next_due_at was pushed out (the
@@ -492,15 +486,21 @@ func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob)
 	// stick. Reported as ClaimDeferred, the existing "wait and retry, don't
 	// advance" outcome.
 	//
-	// Evaluated by the DATABASE, on the clock that stamped next_due_at, and in
-	// this transaction so its now() is the very instant the claim below stamps
-	// as claimed_at. It used to be job.NotYetDue(time.Now()), which compared a
-	// database timestamp against this process's clock: with the database ahead
-	// by the skew, a due-now enrollment was refused and retried until the skew
-	// elapsed. The gate is read-only and can only turn a claim into a refusal
-	// that writes nothing, so moving it changes which clock decides, not what a
-	// won claim means.
-	notYetDue, err := qtx.StepSendNotYetDue(ctx, pgtype.Timestamptz{
+	// Evaluated by the DATABASE, on the clock that stamped next_due_at. It used
+	// to be job.NotYetDue(time.Now()), which compared a database timestamp
+	// against this process's clock: with the database ahead by the skew, a
+	// due-now enrollment was refused and retried until the skew elapsed.
+	//
+	// On the pool, before the claim transaction opens, so a refusal — the common
+	// outcome for a task queued ahead of an out-of-office return — costs one
+	// read and never holds a transaction. Running it outside the claim's
+	// transaction is sound because the only thing between the two is time: the
+	// database clock moves forward, so a "due" verdict cannot become "not due"
+	// by the INSERT below, and a next_due_at pushed out in that gap is the same
+	// race the job's snapshot of it always had. The gate is read-only and can
+	// only turn a claim into a refusal that writes nothing, so it changes which
+	// clock decides, never what a won claim means.
+	notYetDue, err := c.q.StepSendNotYetDue(ctx, pgtype.Timestamptz{
 		Time: job.NotDueUntil, Valid: !job.NotDueUntil.IsZero(),
 	})
 	if err != nil {
@@ -510,6 +510,13 @@ func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob)
 		c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeDeferred)
 		return coreapi.ClaimDeferred, nil
 	}
+
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	qtx := c.q.WithTx(tx)
 
 	claimed, err := qtx.ClaimStepSend(ctx, gen.ClaimStepSendParams{
 		ID:          sendID,

@@ -24,6 +24,16 @@ import (
 // old process-clock gate fails the first whenever the database runs ahead of
 // this process and the second whenever it runs behind by more than the margin.
 // The measured skew is logged so a failure is diagnosable at a glance.
+//
+// LIMIT, stated plainly: with the database on the same host (or otherwise
+// clock-synced to within a millisecond or so, as a local dev stack usually
+// is), the OLD code passes these tests too — there is no skew for it to trip
+// on. They regress the bug only where real skew exists (the ~1.7s that made the
+// ARF tests flake). The fix's own proof was a mutation run: reinstating the
+// process-clock gate with time.Now() shifted by -2s fails the first test, and by
+// +10s fails the second. A clock is not injected to make that permanent because
+// the fixed gate reads no process clock at all — there would be nothing for the
+// injected clock to reach.
 
 // dbClock reads the database's clock_timestamp() and brackets it with this
 // process's clock, returning the database's reading and an estimate of the

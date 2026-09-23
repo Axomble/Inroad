@@ -109,7 +109,7 @@ import (
 //
 // The claim's not-due gate compares job.NotDueUntil — sequence_enrollments.
 // next_due_at, stamped by the DATABASE's clock — against the database's own
-// now(), inside the claim transaction (queries/stepsend.sql StepSendNotYetDue).
+// now(), just before the claim transaction (queries/stepsend.sql StepSendNotYetDue).
 // No process clock takes part, so neither the fleet host running this client
 // nor the control plane serving the route can turn a due-now enrollment into
 // ClaimDeferred by being behind the database. (It used to compare against the

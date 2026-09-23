@@ -144,10 +144,16 @@ type TrackingStats struct {
 // CampaignEnrollment is one campaign the contact is (or was) enrolled in.
 //
 // TrackingEnabled is the only thing that tells a zero open count apart from an
-// unmeasured one: a campaign with tracking off contributes sends but cannot
-// contribute opens or clicks. The rollup's counts do not adjust for it (neither
-// does campaign.Metrics, and the two must agree), so this is how a caller
-// explains a zero rather than guessing at it.
+// unmeasured one: an untracked email contributes sends but cannot contribute
+// opens or clicks. The rollup's counts do not adjust for it (neither does
+// campaign.Metrics, and the two must agree), so this is how a caller explains a
+// zero rather than guessing at it.
+//
+// Once the enrollment has sent anything it describes those emails — true when
+// at least one carried tracking, as stamped on the send (sends.tracked) — so it
+// agrees with Engagement.OpensMeasurable and a later toggle cannot rewrite it.
+// Before the first send it is the campaign's current setting
+// (queries/contact.sql ListContactCampaigns).
 type CampaignEnrollment struct {
 	CampaignID      uuid.UUID
 	CampaignName    string
