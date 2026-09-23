@@ -50,6 +50,20 @@ func (s *Service) MarkStepStopped(ctx context.Context, ws, id uuid.UUID, reason 
 	return s.store.Stop(ctx, ws, id, reason)
 }
 
+// FinishRoute completes an enrollment whose branch routed it to the end of its
+// path without another send. Distinct from the lastStep completion in
+// MarkStepSent, which records the final send; nothing was sent here.
+func (s *Service) FinishRoute(ctx context.Context, ws, id uuid.UUID) error {
+	return s.store.Finish(ctx, ws, id)
+}
+
+// AwaitCondition parks an active enrollment until recheckAt because its next
+// move depends on a branch condition that has not been decided, or on a routed
+// step that is not yet due.
+func (s *Service) AwaitCondition(ctx context.Context, ws, id uuid.UUID, recheckAt time.Time) error {
+	return s.store.AwaitCondition(ctx, ws, id, recheckAt)
+}
+
 // Reschedule re-stamps an active enrollment's next due time (launch stagger).
 func (s *Service) Reschedule(ctx context.Context, ws, id uuid.UUID, nextDueAt time.Time) error {
 	return s.store.SetDue(ctx, ws, id, nextDueAt)

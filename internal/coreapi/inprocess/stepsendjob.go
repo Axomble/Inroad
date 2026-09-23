@@ -138,11 +138,13 @@ func decodeCustom(b []byte) map[string]string {
 // threading computes the In-Reply-To / References headers for the step about to
 // send. Empty for step 1. For later steps it prefers the immediately-preceding
 // sent message (proper chain), falling back to the stored thread root.
-func (c client) threading(ctx context.Context, order int, campaignID, contactID uuid.UUID, threadRootID string) (inReplyTo, references string) {
+func (c client) threading(ctx context.Context, ws uuid.UUID, order int, campaignID, contactID uuid.UUID, threadRootID string) (inReplyTo, references string) {
 	if order <= 1 {
 		return "", ""
 	}
-	prior, err := c.q.LatestSentForContact(ctx, gen.LatestSentForContactParams{CampaignID: campaignID, ContactID: contactID})
+	prior, err := c.q.LatestSentForContact(ctx, gen.LatestSentForContactParams{
+		CampaignID: campaignID, ContactID: contactID, WorkspaceID: ws,
+	})
 	if err == nil && prior.MessageID != "" {
 		return prior.MessageID, strings.TrimSpace(prior.ReferencesHeader + " " + prior.MessageID)
 	}
@@ -196,7 +198,12 @@ func (c client) newLeadLimitReached(ctx context.Context, ws, campaignID uuid.UUI
 }
 
 // localStepSendJob resolves the enrollment's next due step and builds the send
-// job. Read-only: creates no rows. workspaceID is pinned in the SQL WHERE
+// job. It creates no sends row — the claim does that — so a suppressed or
+// capped step leaves no orphan. It is not strictly read-only, though: resolving
+// a sender pins a pool mailbox to the enrollment, and on a branched campaign
+// routing may complete the enrollment (a path that ends) or park it until a
+// condition can next change (see applyRoute). Every such write is guarded on
+// status='active' and idempotent. workspaceID is pinned in the SQL WHERE
 // (defense in depth on the unguessable enrollment UUID).
 func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID string) (coreapi.StepSendJob, error) {
 	eid, err := uuid.Parse(enrollmentID)
@@ -231,17 +238,47 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 		}, nil
 	}
 
-	// Resolve the next step by order rather than current_step+1: DeleteStep does
-	// not renumber, so orders can have gaps (e.g. {1,3}). GetNextStep skips gaps;
-	// ErrNoRows means the cursor is at/after the last step → done.
-	step, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
-		CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: b.CurrentStep,
-	})
+	// A campaign with branches (or an enrollment still parked by one) is routed
+	// through the graph; every other campaign takes the linear path below exactly
+	// as it did before branching existed. See branchroute.go.
+	branches, err := c.q.ListBranchesByCampaign(ctx, gen.ListBranchesByCampaignParams{CampaignID: b.CampaignID, WorkspaceID: ws})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return coreapi.StepSendJob{Skip: true}, nil
+		return coreapi.StepSendJob{}, fmt.Errorf("list branches: %w", err)
+	}
+	var (
+		step  gen.SequenceStep
+		route *routeDecision
+	)
+	if usesGraphRouting(branches, b) {
+		// A campaign that is not running must not have its enrollments moved at
+		// all — not finished by a path that ends, nor parked by a condition —
+		// only held, exactly as the linear path holds them below. So on the graph
+		// path the gate comes BEFORE routing. (On the linear path it stays after
+		// GetNextStep, where it has always been, so linear behaviour is unchanged.)
+		if b.CampaignStatus != string(campaign.StatusRunning) {
+			return c.campaignPausedJob(ctx, ws, enrollmentID, b)
 		}
-		return coreapi.StepSendJob{}, err
+		routed, err := c.routeStep(ctx, ws, enrollmentID, b, branches)
+		if err != nil {
+			return coreapi.StepSendJob{}, err
+		}
+		if routed.kind != routeSend {
+			return c.applyRoute(ctx, ws, eid, enrollmentID, b, routed.routeDecision)
+		}
+		step, route = routed.step, &routed.routeDecision
+	} else {
+		// Resolve the next step by order rather than current_step+1: DeleteStep
+		// does not renumber, so orders can have gaps (e.g. {1,3}). GetNextStep
+		// skips gaps; ErrNoRows means the cursor is at/after the last step → done.
+		step, err = c.q.GetNextStep(ctx, gen.GetNextStepParams{
+			CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: b.CurrentStep,
+		})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return coreapi.StepSendJob{Skip: true}, nil
+			}
+			return coreapi.StepSendJob{}, err
+		}
 	}
 	nextOrder := int(step.StepOrder)
 
@@ -259,17 +296,7 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 	// comes FIRST because it is already in the bundle, so it costs no query, while
 	// campaignLimitReached runs a COUNT.
 	if b.CampaignStatus != string(campaign.StatusRunning) {
-		// The schedule travels for the same reason as the daily-limit branch: a
-		// deferred retry SENDS as soon as it runs, so the worker has to wake inside
-		// the campaign's window.
-		sched, serr := c.loadSchedule(ctx, ws, b.CampaignID, b.Timezone)
-		if serr != nil {
-			return coreapi.StepSendJob{}, serr
-		}
-		return coreapi.StepSendJob{
-			EnrollmentID: enrollmentID, WorkspaceID: ws.String(), CampaignPaused: true,
-			Schedule: sched,
-		}, nil
+		return c.campaignPausedJob(ctx, ws, enrollmentID, b)
 	}
 
 	// The campaign-wide daily limit, stacked on top of the per-mailbox caps: the
@@ -329,17 +356,23 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 	}
 
 	// Is there a step after this one? Its existence decides last-step; its delay
-	// is the cadence gap to the following send. One query answers both.
-	after, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
-		CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: step.StepOrder,
-	})
-	lastStep := errors.Is(err, pgx.ErrNoRows)
-	if err != nil && !lastStep {
-		return coreapi.StepSendJob{}, err
-	}
-	nextDelay := 0
-	if !lastStep {
-		nextDelay = int(after.DelaySeconds)
+	// is the cadence gap to the following send. On the linear path one query
+	// answers both; a routed step already carries the answer from the graph (the
+	// next step, the end, or the first look at its condition).
+	lastStep, nextDelay := false, 0
+	if route != nil {
+		lastStep, nextDelay = route.lastStep, route.nextDelay
+	} else {
+		after, err := c.q.GetNextStep(ctx, gen.GetNextStepParams{
+			CampaignID: b.CampaignID, WorkspaceID: ws, StepOrder: step.StepOrder,
+		})
+		lastStep = errors.Is(err, pgx.ErrNoRows)
+		if err != nil && !lastStep {
+			return coreapi.StepSendJob{}, err
+		}
+		if !lastStep {
+			nextDelay = int(after.DelaySeconds)
+		}
 	}
 
 	// Thread subject is only needed to build "Re: <step-1 subject>" for a
@@ -362,7 +395,7 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 		}
 	}
 
-	inReplyTo, references := c.threading(ctx, nextOrder, b.CampaignID, b.ContactID, b.ThreadRootID)
+	inReplyTo, references := c.threading(ctx, ws, nextOrder, b.CampaignID, b.ContactID, b.ThreadRootID)
 
 	// Derived now, before the step is sent, so the worker can embed it in
 	// tracking tokens at MIME-build time; ClaimStepSend inserts it as the send
@@ -438,6 +471,21 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 		Provider: sender.provider, AccessToken: accessToken,
 		SMTPHost: sender.smtpHost, SMTPPort: int(sender.smtpPort),
 		SMTPUsername: sender.smtpUsername, SMTPPassword: password, AllowPlaintext: sender.allowPlaintext,
+	}, nil
+}
+
+// campaignPausedJob is the job for a campaign that is not running: the worker
+// holds the enrollment and retries later. The schedule travels for the same
+// reason as the daily-limit branch: a deferred retry SENDS as soon as it runs,
+// so the worker has to wake inside the campaign's window.
+func (c client) campaignPausedJob(ctx context.Context, ws uuid.UUID, enrollmentID string, b gen.GetStepEnrollmentBundleRow) (coreapi.StepSendJob, error) {
+	sched, err := c.loadSchedule(ctx, ws, b.CampaignID, b.Timezone)
+	if err != nil {
+		return coreapi.StepSendJob{}, err
+	}
+	return coreapi.StepSendJob{
+		EnrollmentID: enrollmentID, WorkspaceID: ws.String(), CampaignPaused: true,
+		Schedule: sched,
 	}, nil
 }
 

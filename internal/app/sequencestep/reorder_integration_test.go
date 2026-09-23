@@ -4,6 +4,7 @@ package sequencestep
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -85,7 +86,7 @@ func TestReorderPersistsNewOrder(t *testing.T) {
 	// Reverse the order: [3,2,1].
 	want := []uuid.UUID{ids[2], ids[1], ids[0]}
 
-	got, err := store.Reorder(ctx, ws, campaignID, want)
+	got, err := store.Reorder(ctx, ws, campaignID, want, checkGraph)
 	if err != nil {
 		t.Fatalf("Reorder: %v", err)
 	}
@@ -109,8 +110,8 @@ func TestReorderPersistsNewOrder(t *testing.T) {
 }
 
 // TestReorderIsWorkspaceScoped proves the workspace pin: reordering under a
-// foreign workspace id touches zero rows (returns an empty list) and leaves the
-// owning workspace's step_order untouched.
+// foreign workspace id is refused (ErrCampaignNotFound, no rows returned) and
+// leaves the owning workspace's step_order untouched.
 func TestReorderIsWorkspaceScoped(t *testing.T) {
 	ctx := context.Background()
 	if err := db.Migrate(dbtest.DSN(t)); err != nil {
@@ -131,9 +132,12 @@ func TestReorderIsWorkspaceScoped(t *testing.T) {
 	}
 
 	// Intruder attempts to reorder the owner's steps under its own workspace id.
-	got, err := store.Reorder(ctx, other.ID, campaignID, []uuid.UUID{ids[2], ids[1], ids[0]})
-	if err != nil {
-		t.Fatalf("cross-tenant Reorder: %v", err)
+	// The graph lock is taken on (campaign, workspace) before any write, so a
+	// foreign workspace fails there — refused outright rather than, as before the
+	// lock existed, running every UPDATE against zero rows.
+	got, err := store.Reorder(ctx, other.ID, campaignID, []uuid.UUID{ids[2], ids[1], ids[0]}, checkGraph)
+	if !errors.Is(err, ErrCampaignNotFound) {
+		t.Fatalf("cross-tenant Reorder: want ErrCampaignNotFound, got %v", err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("cross-tenant reorder returned %d rows, want 0", len(got))
