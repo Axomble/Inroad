@@ -6,15 +6,16 @@
 // refresh), adapted to what /inbox/threads' response shape actually is: no
 // `total` (see rangeLabel's absence below — there is nothing to render one
 // from), so pagination goes on the one fact a page size proves.
-import { httpStatus } from '@/lib/rtk-error'
-import type { ListInboxThreadsApiArg } from '@/store/api'
+import { httpStatus, serverDetail } from '@/lib/rtk-error'
+import type { InboxSearchHit, ListInboxThreadsApiArg } from '@/store/api'
 
 /**
  * The inbox view, as held in the URL: which mailbox it's scoped to (omitted =
- * every mailbox), which reply class, a free-text search (server-side,
- * case-insensitive substring match against subject or the linked contact's
- * email — real, workspace-wide, not just the loaded page), and the keyset
- * cursor.
+ * every mailbox), which reply class, a full-text search (`q`, answered by
+ * GET /inbox/search over subjects and bodies on both legs of every thread —
+ * workspace-wide, not just the loaded page), and the thread list's keyset
+ * cursor. `q` is in the URL so a search is linkable and survives a reload;
+ * its "Load more" pages are not, because they are this tab's scroll position.
  */
 export interface InboxSearch {
   mailbox?: string
@@ -161,4 +162,52 @@ export function isStaleCursorError(error: unknown): boolean {
 export function inboxErrorMessage(error: unknown): string {
   const status = httpStatus(error)
   return `Couldn't load the inbox${status ? ` (${status})` : ''} — try again.`
+}
+
+/**
+ * The search endpoint's cap on the trimmed query, in characters (code points,
+ * which is what the server counts). Mirrored here so an over-long paste is
+ * explained before a request is spent on a guaranteed 400.
+ */
+export const SEARCH_QUERY_MAX_LENGTH = 256
+
+/** True when a (trimmed) query is longer than the server will accept. */
+export function isSearchQueryTooLong(query: string): boolean {
+  return [...query].length > SEARCH_QUERY_MAX_LENGTH
+}
+
+/**
+ * Human copy for a failed search. A 400 is the operator's own query and the
+ * server's message names the rule it broke, so it is shown as a correction to
+ * make rather than an outage to wait out — retrying the same query cannot
+ * help. Anything else is a retryable failure.
+ */
+export function searchErrorCopy(error: unknown): { title: string; description: string; retryable: boolean } {
+  const status = httpStatus(error)
+  if (status === 400) {
+    const detail = serverDetail(error)
+    return {
+      title: "That search can't run",
+      description: `Edit the search to try again.${detail ? ` (Server said: ${detail})` : ''}`,
+      retryable: false,
+    }
+  }
+  return {
+    title: "Couldn't search the inbox",
+    description: `The search failed${status ? ` (${status})` : ''} — try again.`,
+    retryable: true,
+  }
+}
+
+/**
+ * Which side of the conversation a hit matched on, in the operator's words:
+ * "received" is the contact's replies, "sent" is everything we sent (campaign
+ * steps and manual replies). The API guarantees at least one leg, in that
+ * order.
+ */
+export function matchedLegsLabel(legs: InboxSearchHit['matched_legs']): string {
+  const received = legs.includes('inbound')
+  const sent = legs.includes('outbound')
+  if (received && sent) return 'received & sent'
+  return sent ? 'sent' : 'received'
 }

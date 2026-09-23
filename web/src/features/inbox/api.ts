@@ -2,13 +2,18 @@
 // from api/openapi.yaml into store/api.ts (listInboxThreads, getInboxThread,
 // sendInboxReply, setInboxThreadRead) — this file only layers cache tags on
 // top via `enhanceEndpoints` (so marking a thread read/unread, or sending a
-// reply, refetches the list without a manual `refetch()` at every call site)
-// and re-exports the hooks under this feature's own import surface, matching
+// reply, refetches the list without a manual `refetch()` at every call site),
+// injects the one shape codegen cannot emit (the search's infinite query), and
+// re-exports the hooks under this feature's own import surface, matching
 // every other feature's `api.ts` (see features/mailboxes/api.ts,
 // features/campaigns/api.ts).
-import { api } from '@/store/api'
+import { api, type InboxSearchPage, type SearchInboxThreadsApiArg } from '@/store/api'
 
 export type {
+  InboxSearchHit,
+  InboxSearchPage,
+  InboxSearchSnippet,
+  SearchInboxThreadsApiArg,
   InboxThreadSummary,
   InboxThreadDetail,
   InboxMessage,
@@ -179,6 +184,45 @@ const inboxApi = api.enhanceEndpoints({
       ],
     },
   },
+}).injectEndpoints({
+  endpoints: (build) => ({
+    // The search box's "Load more" list, as an RTK Query infinite query over
+    // the same GET /inbox/search the generated `searchInboxThreads` calls. The
+    // generated endpoint is a plain query — one page per cache entry — so
+    // accumulating pages behind "Load more" needs this shape instead, and a
+    // distinct name (the generated one already claims `searchInboxThreads`,
+    // and an injection under a claimed name silently no-ops). Arg and page
+    // types are the generated ones; only the cursor moves from the arg to the
+    // page param. An invalidation (a thread marked read) refetches every
+    // loaded page, not just the first, so rows never duplicate or vanish.
+    searchInboxThreadPages: build.infiniteQuery<InboxSearchPage, Omit<SearchInboxThreadsApiArg, 'cursor'>, string>({
+      infiniteQueryOptions: {
+        // '' is "no cursor": the first page. The API's next_cursor is null on
+        // the last page, which is what ends `hasNextPage`.
+        initialPageParam: '',
+        getNextPageParam: (lastPage) => lastPage.next_cursor,
+      },
+      query: ({ queryArg, pageParam }) => ({
+        url: `/inbox/search`,
+        params: {
+          q: queryArg.q,
+          cursor: pageParam || undefined,
+          limit: queryArg.limit,
+          scope: queryArg.scope,
+          tz_offset: queryArg.tzOffset,
+          mailbox_id: queryArg.mailboxId,
+          reply_class: queryArg.replyClass,
+          label: queryArg.label,
+        },
+      }),
+      providesTags: (result) => [
+        ...(result?.pages ?? []).flatMap((page) =>
+          page.items.map((hit) => ({ type: 'InboxThread' as const, id: hit.thread.id })),
+        ),
+        { type: 'InboxThread' as const, id: 'LIST' },
+      ],
+    }),
+  }),
 })
 
 // `draftInboxReply` is generated now (the interim injection this file carried
@@ -191,6 +235,7 @@ const inboxApi = api.enhanceEndpoints({
 // the textarea — cost with no correctness gain.
 export const {
   useListInboxThreadsQuery,
+  useSearchInboxThreadPagesInfiniteQuery,
   useGetInboxOverviewQuery,
   useGetInboxThreadQuery,
   useSendInboxReplyMutation,
