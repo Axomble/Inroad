@@ -2619,7 +2619,7 @@ paths:
         '200':
           description: Workspace companies
           content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompanyList' } } }
-        '422': { description: Search query too short or too long, or cursor issued for a different query }
+        '422': { description: 'Search query too short or too long, or cursor issued for a different query' }
     post:
       operationId: crmCreateCompany
       tags: [crm]
