@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -50,13 +50,15 @@ export function DeliveryLog({ endpointId }: { endpointId: string }) {
   const canGoBack = visited.length > 0
   const showPager = canGoBack || nextCursor !== null
 
+  // Recovered during render, not in an effect (same as the dead-letter list): the
+  // reset is a pure function of the query result, and the `cursor` guard makes it
+  // one-shot — once cleared, `staleCursor` is false.
   const staleCursor = cursor !== undefined && httpStatus(error) === 400
-  useEffect(() => {
-    if (!staleCursor) return
+  if (staleCursor) {
     setCursor(undefined)
     setVisited([])
     setRecovered(true)
-  }, [staleCursor])
+  }
 
   // Both pagers clear the recovery notice. It reports a ONE-TIME event ("we
   // reset your position"), so leaving it up while the operator pages normally
@@ -88,10 +90,11 @@ export function DeliveryLog({ endpointId }: { endpointId: string }) {
       {/*
         `staleCursor` renders as loading, not as an error. The 400 it stands for
         is a condition this component has ALREADY decided how to handle — the
-        effect above resets to the first page and the refetch is in flight — so
+        recovery above resets to the first page and the refetch is in flight — so
         announcing it through `role="alert"` would interrupt a screen reader
         with a failure that is gone by the next frame. A skeleton is the honest
-        description of what is happening.
+        description of what is happening. (The render-phase reset means React
+        re-renders before committing, so this branch is a belt-and-braces guard.)
       */}
       {isLoading || staleCursor ? (
         <LoadingRows />

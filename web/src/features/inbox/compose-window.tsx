@@ -74,9 +74,10 @@ export function ComposeWindow({
     () => (mailboxes ?? []).map((m) => ({ id: m.id ?? '', label: m.email ?? 'Mailbox' })),
     [mailboxes],
   )
-  useEffect(() => {
-    if (mailboxId === '' && mailboxOptions.length === 1) setMailboxId(mailboxOptions[0]?.id ?? '')
-  }, [mailboxId, mailboxOptions])
+  // Adjusted during render rather than in an effect, so the picker never paints
+  // "Choose a mailbox" first. Guarded on a non-empty id so it always settles.
+  const onlyMailboxId = mailboxOptions.length === 1 ? mailboxOptions[0]?.id : undefined
+  if (mailboxId === '' && onlyMailboxId) setMailboxId(onlyMailboxId)
 
   // Autosave, debounced. The timer is keyed on the content, so it restarts while
   // typing and fires once the operator pauses.

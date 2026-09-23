@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { AlertCircle, ShieldAlert } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -36,18 +36,14 @@ export function GuardrailsCard({ campaignId }: { campaignId: string }) {
   const { data, isLoading, error } = useGetCampaignDeliverabilityQuery({ id: campaignId })
   const [save, { isLoading: isSaving, error: saveError }] = useUpdateCampaignGuardrailsMutation()
 
-  const [bounce, setBounce] = useState('')
-  const [complaint, setComplaint] = useState('')
+  // The edit in progress, or null while the operator hasn't touched a threshold.
+  // While null the inputs show the server's values — so they follow a refetch, and
+  // clearing the draft after a save re-seeds them from what was persisted. Once
+  // non-null, a background refetch can't discard the edit.
+  const [draft, setDraft] = useState<ThresholdDraft | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  const [dirty, setDirty] = useState(false)
-
-  // Seed from the server once, and re-seed after a save. Guarded on `dirty` so a
-  // background refetch can't discard an edit in progress.
-  useEffect(() => {
-    if (!data || dirty) return
-    setBounce(thresholdToDraft(data.guardrails.bounce_pause_pct))
-    setComplaint(thresholdToDraft(data.guardrails.complaint_pause_pct))
-  }, [data, dirty])
+  const dirty = draft !== null
+  const { bounce, complaint } = draft ?? (data ? serverDraft(data.guardrails) : EMPTY_DRAFT)
 
   /**
    * Both controls submit the whole object, because the API's PUT is a full
@@ -75,7 +71,7 @@ export function GuardrailsCard({ campaignId }: { campaignId: string }) {
     const result = await save({ id: campaignId, campaignGuardrails: body })
     // A failure is surfaced from `saveError` below; the draft stays dirty so the
     // operator's values aren't thrown away by the refetch.
-    if (!('error' in result)) setDirty(false)
+    if (!('error' in result)) setDraft(null)
   }
 
   if (isLoading) {
@@ -106,9 +102,8 @@ export function GuardrailsCard({ campaignId }: { campaignId: string }) {
   const autoPause = autoPauseCopy(data.guardrails)
   const enabled = data.guardrails.auto_pause_enabled
 
-  function editThreshold(setter: (value: string) => void, value: string) {
-    setter(value)
-    setDirty(true)
+  function editThreshold(field: keyof ThresholdDraft, value: string) {
+    setDraft({ bounce, complaint, [field]: value })
     setProblem(null)
   }
 
@@ -183,13 +178,13 @@ export function GuardrailsCard({ campaignId }: { campaignId: string }) {
               id="guardrail-bounce"
               label="Bounce threshold"
               value={bounce}
-              onChange={(value) => editThreshold(setBounce, value)}
+              onChange={(value) => editThreshold('bounce', value)}
             />
             <ThresholdField
               id="guardrail-complaint"
               label="Complaint threshold"
               value={complaint}
-              onChange={(value) => editThreshold(setComplaint, value)}
+              onChange={(value) => editThreshold('complaint', value)}
             />
           </div>
         </div>
@@ -209,6 +204,17 @@ export function GuardrailsCard({ campaignId }: { campaignId: string }) {
       </div>
     </Shell>
   )
+}
+
+type ThresholdDraft = { bounce: string; complaint: string }
+
+const EMPTY_DRAFT: ThresholdDraft = { bounce: '', complaint: '' }
+
+function serverDraft(guardrails: CampaignGuardrails): ThresholdDraft {
+  return {
+    bounce: thresholdToDraft(guardrails.bounce_pause_pct),
+    complaint: thresholdToDraft(guardrails.complaint_pause_pct),
+  }
 }
 
 function Shell({ actions, children }: { actions?: React.ReactNode; children: React.ReactNode }) {

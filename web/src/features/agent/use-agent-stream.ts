@@ -121,16 +121,21 @@ export function useAgentStream(): void {
   const afterRef = useRef(0)
   const trackedThreadRef = useRef<string | null>(null)
 
-  if (trackedThreadRef.current !== threadId) {
-    trackedThreadRef.current = threadId
-    // Read once instead of subscribing: the seq changes on every frame, and a
-    // selector on it would re-render the whole panel thousands of times per
-    // answer. `afterRef` is what the reconnect actually uses.
-    afterRef.current = threadId ? (store.getState().agent.lastEventIds[threadId] ?? 0) : 0
-    accumulatorRef.current = null
-  }
-
   useEffect(() => {
+    // Reset the per-thread cursor and accumulator only when the THREAD changes —
+    // a token refresh re-runs this effect too, and must resume where the stream
+    // left off rather than replay from the last persisted cursor. Done here, not
+    // during render: the previous subscription's cleanup has already aborted it,
+    // so nothing can write the old thread's state after the reset.
+    if (trackedThreadRef.current !== threadId) {
+      trackedThreadRef.current = threadId
+      // Read once instead of subscribing: the seq changes on every frame, and a
+      // selector on it would re-render the whole panel thousands of times per
+      // answer. `afterRef` is what the reconnect actually uses.
+      afterRef.current = threadId ? (store.getState().agent.lastEventIds[threadId] ?? 0) : 0
+      accumulatorRef.current = null
+    }
+
     if (!threadId || !token) return
     const controller = new AbortController()
     const { signal } = controller

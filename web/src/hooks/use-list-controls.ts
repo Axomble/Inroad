@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useUrlState } from './use-url-state'
 
 /**
@@ -47,9 +47,10 @@ export interface ListControls<T> {
  *
  * `paramPrefix` disambiguates two independently-filtered lists on one screen.
  *
- * Declare `sorts` at module scope, not inline in the component: the memo that
- * filters and sorts keys off the active comparator's identity, so a fresh array
- * every render would recompute on every render and defeat the point.
+ * Declare `sorts` and `searchFields` at module scope, not inline in the
+ * component: the memo that filters and sorts keys off the active comparator's
+ * and the projection's identity, so a fresh array or arrow every render would
+ * recompute on every render and defeat the point.
  */
 export function useListControls<T>({
   items,
@@ -74,13 +75,6 @@ export function useListControls<T>({
   // default ordering rather than rendering an unsorted list or throwing.
   const sortId = sorts.some((s) => s.id === sortParam) ? sortParam : defaultSortId
 
-  // `searchFields` is almost always an inline arrow, so it has a new identity
-  // every render. Holding it in a ref keeps it out of the memo's dependency
-  // list without a lint suppression — safe because it is contractually a pure
-  // projection, so which render's copy runs cannot change the result.
-  const searchFieldsRef = useRef(searchFields)
-  searchFieldsRef.current = searchFields
-
   // No `useMemo` here on purpose: with `sorts` declared at module scope (the
   // documented contract above), `find` returns the *same* option object every
   // render, so the reference `filtered` depends on is already stable. Wrapping
@@ -96,15 +90,13 @@ export function useListControls<T>({
   // opt-in React Compiler, which this build doesn't enable.)
   const filtered = useMemo(() => {
     const base = trimmed
-      ? items.filter((item) =>
-          searchFieldsRef.current(item).some((field) => field?.toLowerCase().includes(trimmed)),
-        )
+      ? items.filter((item) => searchFields(item).some((field) => field?.toLowerCase().includes(trimmed)))
       : items
     // Copy before sorting: the input is the RTK Query cache array, and
     // Array.prototype.sort mutates in place — sorting it directly would
     // scramble the cached data for every other subscriber.
     return [...base].sort(activeSort.compare)
-  }, [items, trimmed, activeSort])
+  }, [items, trimmed, activeSort, searchFields])
 
   const clear = useCallback(() => setQuery(''), [setQuery])
 

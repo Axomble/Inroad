@@ -101,7 +101,11 @@ reason.** It was previously `^1.71.0`, which happily resolves to any 1.x — and
 the `correctness` category that `.oxlintrc.json` treats as errors. A routine
 `npm install` could therefore turn 56 pre-existing findings into a red build
 that nobody chose to take on. Upgrading the pin is now a deliberate act with its
-own PR, exactly like bumping `GOLANGCI_VERSION`.
+own PR, exactly like bumping `GOLANGCI_VERSION`. The pin is currently `1.83.0`:
+that upgrade fixed every React Compiler finding rather than suppressing it —
+adjust state during render (or derive it) instead of setState-in-effect, keep
+ref reads/writes out of render (`useEffectEvent` for latest-value callbacks),
+and `useWatch` instead of react-hook-form's `watch()`.
 
 ## More docs
 

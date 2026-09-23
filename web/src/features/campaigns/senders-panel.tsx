@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { GitBranch } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -42,24 +42,29 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
   const { data: mailboxes, isLoading: mailboxesLoading, error: mailboxesError } = useListMailboxesQuery()
   const [save, { isLoading: isSaving, error: saveError, isSuccess }] = useUpdateCampaignSendersMutation()
 
-  const [mode, setMode] = useState<RotationMode>('weighted')
-  const [rows, setRows] = useState<DraftSender[]>([])
+  // The edit in progress, or null while the operator hasn't touched the pool.
+  // While null the editor shows the server's pool (seeded once both the pool and
+  // the mailbox list arrive), and clearing it after a save re-seeds from what was
+  // actually persisted. Once non-null, a background refetch can't discard edits.
+  const [draft, setDraft] = useState<PoolDraft | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  const [dirty, setDirty] = useState(false)
+  const serverDraft = useMemo<PoolDraft>(
+    () => (data ? { mode: data.rotation_mode, rows: toDraft(data, mailboxes) } : EMPTY_DRAFT),
+    [data, mailboxes],
+  )
+  const dirty = draft !== null
+  const { mode, rows } = draft ?? serverDraft
 
-  // Seed the editor once both the pool and the mailbox list arrive, and re-seed
-  // after a save so the form reflects what was actually persisted. Guarded on
-  // `dirty` so a background refetch can't discard edits in progress.
-  useEffect(() => {
-    if (!data || dirty) return
-    setMode(data.rotation_mode)
-    setRows(toDraft(data, mailboxes))
-  }, [data, mailboxes, dirty])
+  function edit(update: (current: PoolDraft) => PoolDraft) {
+    setDraft((current) => update(current ?? serverDraft))
+    setProblem(null)
+  }
 
   function editRow(mailboxId: string, patch: Partial<DraftSender>) {
-    setRows((current) => current.map((row) => (row.mailbox_id === mailboxId ? { ...row, ...patch } : row)))
-    setDirty(true)
-    setProblem(null)
+    edit((current) => ({
+      ...current,
+      rows: current.rows.map((row) => (row.mailbox_id === mailboxId ? { ...row, ...patch } : row)),
+    }))
   }
 
   async function onSave() {
@@ -70,7 +75,7 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
     }
     try {
       await save({ id: campaignId, campaignSenderPoolRequest: result.pool }).unwrap()
-      setDirty(false)
+      setDraft(null)
       setProblem(null)
     } catch {
       // The rejected promise is surfaced through `saveError` below; swallowing it
@@ -123,9 +128,8 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
             id="rotation-mode"
             value={mode}
             onChange={(e) => {
-              setMode(e.target.value as RotationMode)
-              setDirty(true)
-              setProblem(null)
+              const next = e.target.value as RotationMode
+              edit((current) => ({ ...current, mode: next }))
             }}
           >
             {ROTATION_MODES.map((option) => (
@@ -191,6 +195,10 @@ export function SendersPanel({ campaignId }: { campaignId: string }) {
     </div>
   )
 }
+
+type PoolDraft = { mode: RotationMode; rows: DraftSender[] }
+
+const EMPTY_DRAFT: PoolDraft = { mode: 'weighted', rows: [] }
 
 /**
  * One mailbox row. Two booleans, deliberately: excluding removes the mailbox

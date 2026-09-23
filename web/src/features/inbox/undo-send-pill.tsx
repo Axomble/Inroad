@@ -16,6 +16,15 @@ export function UndoSendPill({ pending }: { pending: InboxPendingReply }) {
   const [now, setNow] = useState(() => new Date())
   const [cancel, { isLoading, error }] = useCancelInboxPendingReplyMutation()
 
+  // Re-read the clock when a NEW pending reply arrives, so its countdown starts
+  // from the right instant rather than from whenever this component mounted.
+  // Adjusted during render so the first frame for the new reply is already right.
+  const [clockedPendingId, setClockedPendingId] = useState(pending.id)
+  if (clockedPendingId !== pending.id) {
+    setClockedPendingId(pending.id)
+    setNow(new Date())
+  }
+
   const ticking = showsCountdown(pending.send_after, now)
 
   useEffect(() => {
@@ -25,12 +34,6 @@ export function UndoSendPill({ pending }: { pending: InboxPendingReply }) {
     // `ticking` is the whole dependency: once the countdown lapses the interval
     // is torn down, and it is never created for a far-future schedule.
   }, [ticking])
-
-  // Re-read the clock when a NEW pending reply arrives, so its countdown starts
-  // from the right instant rather than from whenever this component mounted.
-  useEffect(() => {
-    setNow(new Date())
-  }, [pending.id])
 
   // A claimed reply is past the point of no return: the server would answer 409,
   // so the control says so rather than offering a click that cannot work.

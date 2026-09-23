@@ -53,6 +53,9 @@ const SORTS: readonly SortOption<Campaign>[] = [
   { id: 'status', label: 'Status', compare: byText((c) => c.status) },
 ]
 
+/** Module scope for the same reason as SORTS: the list memo keys off its identity. */
+const searchFields = (c: Campaign) => [c.name, c.subject, c.status]
+
 export function CampaignsPage() {
   const [showForm, setShowForm] = useState(false)
   const { data: campaigns = [], isLoading, error: listError, refetch } = useListCampaignsQuery()
@@ -60,7 +63,7 @@ export function CampaignsPage() {
 
   const controls = useListControls({
     items: campaigns,
-    searchFields: (c) => [c.name, c.subject, c.status],
+    searchFields,
     sorts: SORTS,
   })
 
@@ -68,7 +71,9 @@ export function CampaignsPage() {
     if (campaign.id) void navigate({ to: '/app/campaigns/$id', params: { id: campaign.id } })
   }
 
-  const nav = useListKeyboardNav({
+  // Destructured, not held as `nav`: the ref inside would make every `nav.*` read
+  // in render look like a ref read to the React Compiler lint.
+  const { containerRef, isActive, onRowHover } = useListKeyboardNav({
     count: controls.items.length,
     onOpen: (index) => {
       const campaign = controls.items[index]
@@ -171,7 +176,7 @@ export function CampaignsPage() {
             <ListHeaderCell className="w-36 text-right">Actions</ListHeaderCell>
           </ListHeader>
 
-          <PageBody ref={nav.containerRef}>
+          <PageBody ref={containerRef}>
             {controls.items.length === 0 ? (
               <EmptyBlock
                 title="No campaigns match this search"
@@ -189,8 +194,8 @@ export function CampaignsPage() {
                     key={campaign.id}
                     campaign={campaign}
                     index={index}
-                    active={nav.isActive(index)}
-                    onHover={nav.onRowHover}
+                    active={isActive(index)}
+                    onHover={onRowHover}
                     onOpen={open}
                   />
                 ))}

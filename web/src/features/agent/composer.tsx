@@ -67,17 +67,29 @@ export function AgentComposer({
   const [stopRun, stopState] = useStopAgentRunMutation()
   const [deleteQueued] = useDeleteAgentQueuedMessageMutation()
 
+  // The draft itself is adjusted during render; only the side effects — clearing
+  // the store's copy and moving focus — wait for the effects below.
+  //
+  // A restored draft (a send that failed) fills an empty box and never
+  // overwrites typing. Guarded on `!draft`, so it settles after one pass.
+  if (restoredDraft && !draft) setDraft(restoredDraft)
+
+  // A suggestion replaces the draft once per suggestion (each click mints a new
+  // object). `null` initially so a suggestion present at mount is applied too.
+  const [appliedPrompt, setAppliedPrompt] = useState<typeof suggestedPrompt>(null)
+  if (suggestedPrompt && suggestedPrompt !== appliedPrompt) {
+    setAppliedPrompt(suggestedPrompt)
+    setDraft(suggestedPrompt.text)
+  }
+
   useEffect(() => {
     if (!restoredDraft) return
-    setDraft((current) => current || restoredDraft)
     dispatch(clearRestoredAgentDraft())
     textareaRef.current?.focus()
   }, [dispatch, restoredDraft])
 
   useEffect(() => {
-    if (!suggestedPrompt) return
-    setDraft(suggestedPrompt.text)
-    textareaRef.current?.focus()
+    if (suggestedPrompt) textareaRef.current?.focus()
   }, [suggestedPrompt])
 
   const isRunning = Boolean(activeRunId) || streamStatus === 'running'

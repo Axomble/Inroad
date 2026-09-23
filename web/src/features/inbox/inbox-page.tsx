@@ -115,9 +115,16 @@ export function InboxPage() {
   const [stack, setStack] = useState<CursorStack>([])
   const [recoveredFromStaleCursor, setRecoveredFromStaleCursor] = useState(false)
 
-  useEffect(() => {
+  // Landing back on the first page (Back, a cleared filter, a pasted link)
+  // empties the stack. Keyed on the cursor CHANGING, not merely being absent:
+  // Next from page one pushes the stack before the URL catches up, and that
+  // in-between render must not wipe the entry it just pushed. Adjusted during
+  // render (tracking the cursor last seen) rather than in an effect.
+  const [seenCursor, setSeenCursor] = useState(search.cursor)
+  if (seenCursor !== search.cursor) {
+    setSeenCursor(search.cursor)
     if (!search.cursor) setStack([])
-  }, [search.cursor])
+  }
 
   const decodedCursor = decodeCursor(search.cursor)
   const {
@@ -150,11 +157,13 @@ export function InboxPage() {
   const busy = isFetching && !currentData
 
   const staleCursor = search.cursor !== undefined && isStaleCursorError(error)
+  // The local half of the recovery is adjusted during render (each guarded so
+  // it settles); only the URL write — a navigation, i.e. a real side effect —
+  // waits for the effect below.
+  if (staleCursor && stack.length > 0) setStack([])
+  if (staleCursor && !recoveredFromStaleCursor) setRecoveredFromStaleCursor(true)
   useEffect(() => {
-    if (!staleCursor) return
-    setStack([])
-    setRecoveredFromStaleCursor(true)
-    patch({ cursor: undefined })
+    if (staleCursor) patch({ cursor: undefined })
   }, [staleCursor, patch])
 
   // Any control except the pager changes what is being listed, which makes
@@ -253,9 +262,9 @@ export function InboxPage() {
   // A selection is only meaningful while the selected thread is on screen. A
   // filter or page change that drops it must clear the reader rather than
   // leave it showing a thread the list no longer contains.
-  useEffect(() => {
-    if (selectedThreadId && !items.some((t) => t.id === selectedThreadId)) setSelectedThreadId(undefined)
-  }, [items, selectedThreadId])
+  // Cleared during render, not in an effect, so the reader never paints a
+  // frame for a thread that has already left the list.
+  if (selectedThreadId && !items.some((t) => t.id === selectedThreadId)) setSelectedThreadId(undefined)
   const selectedThread = useMemo(
     () => items.find((t) => t.id === selectedThreadId),
     [items, selectedThreadId],
@@ -272,7 +281,9 @@ export function InboxPage() {
     void navigate({ to: '/app/inbox/$threadId', params: { threadId: thread.id } })
   }
 
-  const nav = useListKeyboardNav({
+  // Destructured, not held as `nav`: the ref inside would make every `nav.*` read
+  // in render look like a ref read to the React Compiler lint.
+  const { containerRef, isActive, onRowHover } = useListKeyboardNav({
     count: visibleThreads.length,
     onOpen: (index) => {
       const thread = visibleThreads[index]
@@ -419,7 +430,7 @@ export function InboxPage() {
           ) : (
             <>
               <div
-                ref={nav.containerRef}
+                ref={containerRef}
                 aria-busy={busy}
                 className={cn('flex-1 overflow-y-auto transition-opacity', busy && 'opacity-50')}
               >
@@ -429,7 +440,7 @@ export function InboxPage() {
                   onToggleGroup={toggleGroup}
                   visibleIndexById={visibleIndexById}
                   mailboxLabel={mailboxLabel}
-                  nav={nav}
+                  nav={{ isActive, onRowHover }}
                   onOpen={openThread}
                   onToggleRead={toggleRead}
                   selectedThreadId={selectedThreadId}

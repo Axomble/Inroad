@@ -61,13 +61,18 @@ function MessageScroller({
   // Only follow the stream while the reader is already at the bottom. Scrolling
   // up to re-read an earlier answer must not be yanked back on the next
   // 100 ms snapshot.
+  //
+  // No dependency array: this re-checks after every render of the transcript,
+  // which is exactly "whenever what it shows changed" (a new message, the next
+  // streaming snapshot). The check reads the DOM, not render values, so there is
+  // nothing to list — and a render that moved nothing leaves the pin as it was.
   useEffect(() => {
     const container = scrollRef.current
     if (!container) return
     const distance = container.scrollHeight - container.scrollTop - container.clientHeight
     if (distance > stickToBottomSlack) return
     endRef.current?.scrollIntoView({ block: 'end' })
-  }, [ids.length, streaming, scrollRef])
+  })
 
   if (loading && ids.length === 0) {
     return (
@@ -98,15 +103,14 @@ function MessageScroller({
 function StreamAnnouncer() {
   const status = useAppSelector((state) => state.agent.streamStatus)
   const [announcement, setAnnouncement] = useState('')
-  const previousRef = useRef(status)
-
-  useEffect(() => {
-    const previous = previousRef.current
-    previousRef.current = status
-    if (status === previous) return
+  // Announce transitions, not states: adjusted during render against the
+  // last-seen status rather than in an effect.
+  const [previous, setPrevious] = useState(status)
+  if (status !== previous) {
+    setPrevious(status)
     if (status === 'running') setAnnouncement('Assistant is responding')
     else if (previous === 'running' && status === 'idle') setAnnouncement('Response complete')
-  }, [status])
+  }
 
   return <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
 }

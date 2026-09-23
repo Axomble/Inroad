@@ -241,10 +241,15 @@ function ContactsPane({
 
   // Any route back to the first page (Back, a new search, a list switch) also
   // empties the stack, so the "pages walked" count can't outlive the cursor it
-  // describes.
-  useEffect(() => {
+  // describes. Keyed on the cursor CHANGING, not merely being absent: Next from
+  // page one pushes the stack before the URL catches up, and that in-between
+  // render must not wipe the entry it just pushed. Adjusted during render
+  // (tracking the cursor last seen) rather than in an effect.
+  const [seenCursor, setSeenCursor] = useState(cursor)
+  if (seenCursor !== cursor) {
+    setSeenCursor(cursor)
     if (!cursor) setStack([])
-  }, [cursor])
+  }
 
   const {
     data: page,
@@ -286,11 +291,12 @@ function ContactsPane({
   // A cursor the server rejects (minted for another sort, or an encoding that
   // moved on) must not dead-end the list: drop it, reload page one, and say so.
   const staleCursor = cursor !== undefined && isStaleCursorError(error)
+  // The local half is adjusted during render (each guarded so it settles); only
+  // the URL write — a navigation, i.e. a real side effect — waits for the effect.
+  if (staleCursor && stack.length > 0) setStack([])
+  if (staleCursor && !recoveredFromStaleCursor) setRecoveredFromStaleCursor(true)
   useEffect(() => {
-    if (!staleCursor) return
-    setStack([])
-    setRecoveredFromStaleCursor(true)
-    patch({ cursor: undefined })
+    if (staleCursor) patch({ cursor: undefined })
   }, [staleCursor, patch])
 
   const goNext = () => {

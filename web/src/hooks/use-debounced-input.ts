@@ -27,9 +27,14 @@ export function useDebouncedInput(
     commitRef.current = commit
   })
 
-  useEffect(() => {
+  // Re-sync the echo when `value` changes from the outside. Adjusted during
+  // render (tracking the value last synced from) rather than in an effect, so
+  // the box never paints one frame of the stale echo.
+  const [syncedValue, setSyncedValue] = useState(value)
+  if (syncedValue !== value) {
+    setSyncedValue(value)
     setTyped(value)
-  }, [value])
+  }
 
   useEffect(() => {
     if (typed === value) return

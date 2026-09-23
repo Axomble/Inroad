@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   DndContext,
   KeyboardSensor,
@@ -59,13 +59,14 @@ export default function SortableStepList({
   const [reorderSteps] = useReorderStepsMutation()
 
   // Local order (list of ids) drives rendering so reorder can be optimistic.
-  // Resync from server truth whenever the fetched steps change (initial load,
-  // a committed reorder, or a revert-refetch). During the optimistic window the
-  // query data is unchanged, so this effect does not clobber it.
-  const [order, setOrder] = useState<string[]>([])
-  useEffect(() => {
-    setOrder(steps.map((s) => s.id))
-  }, [steps])
+  // It remembers the server steps it was ordered against and is honoured only
+  // while those are still current, so it resyncs to server truth whenever the
+  // fetched steps change (initial load, a committed reorder, or a
+  // revert-refetch). During the optimistic window the query data is unchanged,
+  // so the local order stands.
+  const [local, setLocal] = useState<{ source: StepWithId[]; order: string[] } | null>(null)
+  const order = local !== null && local.source === steps ? local.order : steps.map((s) => s.id)
+  const setOrder = (next: string[]) => setLocal({ source: steps, order: next })
 
   const byId = useMemo(() => new Map(steps.map((s) => [s.id, s])), [steps])
   const orderedSteps = order.map((id) => byId.get(id)).filter((s): s is StepWithId => s !== undefined)

@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
@@ -101,7 +101,7 @@ export function CustomFieldDialog({
   const {
     register,
     handleSubmit,
-    watch,
+    control,
     formState: { errors },
   } = useForm<FieldValues>({
     resolver: zodResolver(fieldSchema),
@@ -112,7 +112,8 @@ export function CustomFieldDialog({
       options: (initial?.options ?? []).join('\n'),
     },
   })
-  const type = watch('type')
+  const type = useWatch({ control, name: 'type' })
+  const key = useWatch({ control, name: 'key' })
 
   async function onSubmit(values: FieldValues) {
     const options = values.type === 'select' ? parseOptions(values.options) : undefined
@@ -169,7 +170,7 @@ export function CustomFieldDialog({
               <FieldError message={errors.key.message} />
             ) : (
               <p className="text-xs text-muted-foreground">
-                Used as <code className="font-mono">{'{{custom.'}{watch('key') || 'key'}{'}}'}</code> in sequences,
+                Used as <code className="font-mono">{'{{custom.'}{key || 'key'}{'}}'}</code> in sequences,
                 and as the CSV column name on import.
               </p>
             )}

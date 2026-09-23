@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   DndContext,
   KeyboardSensor,
@@ -44,12 +44,13 @@ export default function SortableLabelList({ labels, onEdit, onDelete, onReorderE
   const [reorderLabels] = useReorderReplyLabelsMutation()
 
   // Local order (list of ids) drives rendering so reorder can be optimistic.
-  // Resync from server truth whenever the fetched labels change (initial load,
-  // a committed reorder, or a revert-refetch).
-  const [order, setOrder] = useState<string[]>([])
-  useEffect(() => {
-    setOrder(labels.map((l) => l.id))
-  }, [labels])
+  // It remembers the server labels it was ordered against and is honoured only
+  // while those are still current, so it resyncs to server truth whenever the
+  // fetched labels change (initial load, a committed reorder, or a
+  // revert-refetch).
+  const [local, setLocal] = useState<{ source: ReplyLabel[]; order: string[] } | null>(null)
+  const order = local !== null && local.source === labels ? local.order : labels.map((l) => l.id)
+  const setOrder = (next: string[]) => setLocal({ source: labels, order: next })
 
   const byId = useMemo(() => new Map(labels.map((l) => [l.id, l])), [labels])
   const orderedLabels = order.map((id) => byId.get(id)).filter((l): l is ReplyLabel => l !== undefined)

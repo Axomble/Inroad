@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { AlertCircle } from 'lucide-react'
 import { EmptyBlock, Page, PageBody, PageTopbar } from '@/components/layout/page'
 import { Button } from '@/components/ui/button'
@@ -96,9 +96,13 @@ export function DeadLettersPage() {
   // A refused cursor strands the screen: the row it named is gone (a version bump, a
   // rolling deploy), and without this the bad cursor sits in state with nothing to
   // clear it. Recover to page one and say so, the way the inbox does.
+  //
+  // Adjusted during render rather than in an effect: the reset is a pure function
+  // of the query result, and React re-renders immediately with the cleared cursor
+  // instead of committing a frame that still holds the refused one. The guard on
+  // `cursor` makes it one-shot — once cleared, `staleCursor` is false.
   const staleCursor = cursor !== undefined && isStaleCursorError(error)
-  useEffect(() => {
-    if (!staleCursor) return
+  if (staleCursor) {
     setCursor(undefined)
     setVisited([])
     // A separate flag, because recovery is instantaneous: clearing the cursor makes
@@ -106,7 +110,7 @@ export function DeadLettersPage() {
     // vanish in the same tick — the page would jump back to the start with nothing
     // saying why. Same reason the inbox keeps its own recovered flag.
     setRecovered(true)
-  }, [staleCursor])
+  }
 
   function goNext() {
     if (nextCursor === undefined) return

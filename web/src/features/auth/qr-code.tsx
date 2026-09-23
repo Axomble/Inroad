@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react'
 
+/** A settled render for one input: the SVG data URL, or null when it failed. */
+type QrResult = { value: string; size: number; svgSrc: string | null }
+
 /**
  * Renders an otpauth:// URI as a QR code, client-side. The `qrcode` renderer is
  * pulled in with a dynamic `import()` so it lands in its own bundle chunk rather
@@ -11,13 +14,14 @@ import { useEffect, useState } from 'react'
  * so a render failure here is non-fatal — we just show nothing.
  */
 export function QrCode({ value, size = 184 }: { value: string; size?: number }) {
-  const [svgSrc, setSvgSrc] = useState<string | null>(null)
-  const [failed, setFailed] = useState(false)
+  // The render result remembers the input it was rendered for, so a new
+  // `value`/`size` shows the placeholder again without an effect having to reset
+  // state first — a stale result is simply not the current one.
+  const [rendered, setRendered] = useState<QrResult | null>(null)
+  const current = rendered !== null && rendered.value === value && rendered.size === size ? rendered : null
 
   useEffect(() => {
     let cancelled = false
-    setSvgSrc(null)
-    setFailed(false)
     void (async () => {
       try {
         const { default: QRCode } = await import('qrcode')
@@ -25,10 +29,10 @@ export function QrCode({ value, size = 184 }: { value: string; size?: number }) 
         if (!cancelled) {
           // Encode the generated (non-user) SVG into a data URL for a plain
           // <img>, avoiding dangerouslySetInnerHTML entirely.
-          setSvgSrc(`data:image/svg+xml,${encodeURIComponent(svg)}`)
+          setRendered({ value, size, svgSrc: `data:image/svg+xml,${encodeURIComponent(svg)}` })
         }
       } catch {
-        if (!cancelled) setFailed(true)
+        if (!cancelled) setRendered({ value, size, svgSrc: null })
       }
     })()
     return () => {
@@ -36,7 +40,9 @@ export function QrCode({ value, size = 184 }: { value: string; size?: number }) 
     }
   }, [value, size])
 
-  if (failed) return null
+  // A settled result with no SVG is a failed render.
+  if (current !== null && current.svgSrc === null) return null
+  const svgSrc = current?.svgSrc
 
   return (
     <div
