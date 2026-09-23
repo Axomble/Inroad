@@ -3,6 +3,7 @@ package contact
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 
@@ -151,6 +152,10 @@ func (s *Service) recordExport(ctx context.Context, ws uuid.UUID, listID *uuid.U
 		md["list_id"] = listID.String()
 	}
 	if err := s.audit.Record(ctx, audit.New(ctx, ws, audit.ActionDataExported, "workspace", ws.String(), md)); err != nil {
+		// Logged here, loudly, because the client only ever sees the handler's
+		// generic 500: without this line a refused export is invisible to the
+		// operator who has to fix the audit store.
+		slog.ErrorContext(ctx, "contact export refused: audit record failed", "workspace_id", ws.String(), "err", err)
 		return fmt.Errorf("contact export refused, audit record failed: %w", err)
 	}
 	return nil

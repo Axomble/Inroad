@@ -16,8 +16,9 @@ import (
 // (MigrateTo) so this keeps testing THIS migration after later ones land.
 func TestAuditEventsMigrationRoundTrips(t *testing.T) {
 	const (
-		auditVersion = 20260923105934
-		before       = 20260921111415
+		auditVersion   = 20260923105934
+		cascadeVersion = 20260923144934
+		before         = 20260921111415
 	)
 	dsn := dbtest.ScratchDSN(t, "audit_events")
 	ctx := context.Background()
@@ -59,5 +60,22 @@ func TestAuditEventsMigrationRoundTrips(t *testing.T) {
 	}
 	if n := objects("after up again"); n != 4 {
 		t.Fatalf("after up again: %d of 4 audit objects present", n)
+	}
+
+	// The cascade-guard migration replaces the function body; its down must
+	// restore the original exactly, and up must re-apply the guard.
+	guarded := func(label string) bool {
+		return count(label, `SELECT count(*) FROM pg_proc WHERE proname = 'audit_events_append_only' AND prosrc LIKE '%NOT EXISTS%'`) == 1
+	}
+	for _, step := range []struct {
+		version uint
+		want    bool
+	}{{cascadeVersion, true}, {auditVersion, false}, {cascadeVersion, true}} {
+		if err := db.MigrateTo(dsn, step.version); err != nil {
+			t.Fatalf("migrate to %d: %v", step.version, err)
+		}
+		if got := guarded("cascade guard"); got != step.want {
+			t.Fatalf("at %d: cascade guard present = %v, want %v", step.version, got, step.want)
+		}
 	}
 }

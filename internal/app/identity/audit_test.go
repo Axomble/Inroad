@@ -82,26 +82,42 @@ func TestLoginRecordsASignInAttributedToTheUser(t *testing.T) {
 	}
 }
 
-func TestWrongPasswordRecordsAFailureInEveryWorkspaceOfTheAccount(t *testing.T) {
+// A failure lands in ONE workspace — the one a successful sign-in would have
+// activated — never fanned out to every tenant the account belongs to, since
+// the row carries the attempt's IP, user agent and reason (security review M1).
+func TestWrongPasswordRecordsOneFailureInTheSignInWorkspace(t *testing.T) {
 	store := newFakeStore()
 	svc, rec := auditedService(store)
-	ws1, ws2 := uuid.New(), uuid.New()
-	uid := seedMember(t, store, "b@acme.test", "correct-horse-battery", ws1, ws2)
+	recent, other := uuid.New(), uuid.New()
+	// seedMember appends in order; the fake's ListMembersByUser returns that
+	// order, so `recent` stands where the real query's last_seen DESC puts the
+	// most-recently-seen workspace.
+	uid := seedMember(t, store, "b@acme.test", "correct-horse-battery", recent, other)
 
 	if _, err := svc.Login(context.Background(), "b@acme.test", "wrong", "ua", "ip"); err == nil {
 		t.Fatal("Login succeeded with a wrong password")
 	}
 	got := rec.byAction(audit.ActionAuthLoginFailed)
-	if len(got) != 2 {
-		t.Fatalf("auth.login_failed events = %d, want one per workspace (2)", len(got))
+	if len(got) != 1 {
+		t.Fatalf("auth.login_failed events = %d, want exactly 1 (no cross-tenant fan-out)", len(got))
 	}
-	for _, ev := range got {
-		if ev.TargetID != uid.String() || ev.Actor.ID != "" || ev.Actor.UserID != nil || ev.Metadata["reason"] != "bad_password" {
-			t.Fatalf("event = %+v; want an unauthenticated actor targeting the account", ev)
-		}
+	ev := got[0]
+	if ev.WorkspaceID != recent {
+		t.Fatalf("failure recorded in %s, want the sign-in workspace %s", ev.WorkspaceID, recent)
+	}
+	if ev.TargetID != uid.String() || ev.Actor.ID != "" || ev.Actor.UserID != nil || ev.Metadata["reason"] != "bad_password" {
+		t.Fatalf("event = %+v; want an unauthenticated actor targeting the account", ev)
 	}
 	if n := len(rec.byAction(audit.ActionAuthLogin)); n != 0 {
 		t.Fatalf("a failed login recorded %d successes", n)
+	}
+
+	// The success of the same account lands in the same workspace.
+	if _, err := svc.Login(context.Background(), "b@acme.test", "correct-horse-battery", "ua", "ip"); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if ok := rec.byAction(audit.ActionAuthLogin); len(ok) != 1 || ok[0].WorkspaceID != recent {
+		t.Fatalf("auth.login = %+v, want one row in %s", ok, recent)
 	}
 }
 

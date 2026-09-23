@@ -460,9 +460,14 @@ func (s *Service) Authenticate(ctx context.Context, email, pw string) (uuid.UUID
 }
 
 // recordLoginFailed records auth.login_failed for a password attempt against a
-// KNOWN account, in every workspace the account belongs to (the log is
-// workspace-scoped and a failed sign-in has no active workspace yet). An
-// unknown email records nothing: there is no workspace to put it in.
+// KNOWN account, in ONE workspace: the most-recently-seen one, which is exactly
+// the workspace a successful sign-in would have activated (StartSessionForUser
+// takes mems[0] of the same ordering), so the failure and the success of the
+// same attempt land side by side. Deliberately not every workspace the account
+// belongs to: the row carries the attempt's IP, user agent, timing and reason,
+// and fanning it out would hand that to the admins of every other tenant the
+// person happens to be a member of. An unknown email records nothing: there is
+// no workspace to put it in.
 //
 // It runs through s.dispatch, off the request path, for the same reason
 // ForgotPassword defers its work: the membership lookup and the writes would
@@ -487,11 +492,14 @@ func (s *Service) recordLoginFailed(ctx context.Context, userID uuid.UUID, reaso
 			slog.ErrorContext(bg, "identity: audit login_failed membership lookup", "err", err)
 			return
 		}
-		for _, m := range rows {
-			ev := audit.New(bg, m.WorkspaceID, audit.ActionAuthLoginFailed, "user", userID.String(), audit.Metadata{"reason": reason})
-			ev.Actor = audit.Actor{Type: audit.ActorUser}
-			audit.Emit(bg, s.audit, ev)
+		if len(rows) == 0 {
+			return // no workspace to record into
 		}
+		// rows[0]: ListMembersByUser orders by last_seen desc, created asc —
+		// the same pick StartSessionForUser makes for the active workspace.
+		ev := audit.New(bg, rows[0].WorkspaceID, audit.ActionAuthLoginFailed, "user", userID.String(), audit.Metadata{"reason": reason})
+		ev.Actor = audit.Actor{Type: audit.ActorUser}
+		audit.Emit(bg, s.audit, ev)
 	})
 }
 

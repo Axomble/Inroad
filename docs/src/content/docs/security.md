@@ -2098,7 +2098,10 @@ write history that never happened.
       `TRUNCATE`, except (a) the retention purge, which opens the door with a
       transaction-local setting (`EnableAuditRetentionPurge`, `SET LOCAL`
       semantics) inside its own transaction, and (b) the cascade from deleting
-      the workspace itself (`pg_trigger_depth() > 1`), so crypto-shredding
+      the workspace itself — a delete issued from inside another trigger
+      (`pg_trigger_depth() > 1`) AND whose workspace row no longer exists
+      (migration `20260923144934`). A trigger that deletes audit rows while
+      their workspace lives is refused like any direct DELETE. Crypto-shredding
       (invariant 18) still works. `actor_user_id` deliberately has no foreign
       key: `ON DELETE SET NULL` would be an UPDATE. What this does NOT stop is
       the table owner — the application's own database role can disable a
@@ -2108,7 +2111,11 @@ write history that never happened.
       stores the principal's actor (`user`, `api_key` with the key id,
       `oauth_client` with the client id); the agent tool registry replaces it
       with an `agent` actor for the duration of a tool call, so an agent's
-      action is never recorded as the delegating human's. Unauthenticated paths
+      action is never recorded as the delegating human's. An agent action that
+      needed human approval is attributed the same way when it executes — to
+      the agent, on the thread owner's authority — and the human who approved
+      it is recorded on the approval itself (`pending_action_audit`, event
+      `approved`, `actor_user_id`). Unauthenticated paths
       set the actor explicitly (sign-in: the user; a failed sign-in: a user
       with no id; the operator CLI, the OAuth callback and the deliverability
       breaker: `system`). Client IP and user agent come from
@@ -2130,12 +2137,29 @@ write history that never happened.
       request's cancellation, and logged at ERROR on failure. An audit outage
       must not lock every user out or stop an operator pausing a campaign.
     - **A failed sign-in never becomes an enumeration oracle.** It is recorded
-      only for a KNOWN account (in each of its workspaces), and the lookup and
+      only for a KNOWN account, in ONE workspace — the most-recently-seen one,
+      the same workspace a successful sign-in would activate — never fanned out
+      to every tenant the account belongs to, because the row carries the
+      attempt's IP, user agent and reason. The lookup and
       write run off the request path (`Service.dispatch`), so a wrong password
       on a real account costs the same wall-clock time as an unknown email.
       Consequence to know about: an attacker who knows a member's email can
-      add `auth.login_failed` rows to that member's workspaces at the sign-in
-      rate limit (`INROAD_RATELIMIT_LOGIN_*`).
+      add `auth.login_failed` rows to that member's sign-in workspace at the
+      sign-in rate limit (`INROAD_RATELIMIT_LOGIN_*`).
+    - **Personal data it holds (Privacy/Legal item, not decided in code).**
+      Audit rows contain personal information: the client IP address and user
+      agent of the request; the invitee's email on `member.invited`; the
+      member's email on `member.role_changed`; the mailbox address on
+      `mailbox.*`; and, at read time, the acting user's current email (joined
+      from `users`, not stored). Rows deliberately SURVIVE the deletion of the
+      user they name (no foreign key), and there is NO per-person erasure or
+      redaction path — the append-only trigger admits only the age-based
+      retention purge and whole-workspace deletion. Canadian privacy law
+      (PIPEDA) and Quebec's Law 25 may impose retention limits and
+      access/erasure obligations on this data; how long to keep it, and how to
+      answer an individual's erasure request against an append-only log, are
+      decisions for the operator's Privacy/Legal function, not defaults this
+      code makes.
     - **Retention is off by default.** `INROAD_AUDIT_RETENTION_DAYS` unset or `0`
       keeps every row forever; how long a security log is kept is a
       privacy/legal decision, not a default. When set, the control-role

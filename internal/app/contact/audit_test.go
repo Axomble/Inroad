@@ -1,8 +1,11 @@
 package contact
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -47,10 +50,20 @@ func TestExportIsRecordedBeforeItStreams(t *testing.T) {
 }
 
 func TestExportIsRefusedWhenItCannotBeRecorded(t *testing.T) {
+	var logs bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
 	boom := errors.New("audit store down")
 	svc := NewService(&fakeStore{}, &fakeChecker{exists: true}, &fakeFieldStore{}, WithAudit(&captureRecorder{err: boom}))
 	if _, err := svc.PrepareExport(context.Background(), testWS, SearchRequest{}); !errors.Is(err, boom) {
 		t.Fatalf("PrepareExport err = %v, want the audit failure (fail closed)", err)
+	}
+	// The refusal must be visible to the operator, not only as a generic 500.
+	if out := logs.String(); !strings.Contains(out, `"level":"ERROR"`) ||
+		!strings.Contains(out, "audit record failed") || !strings.Contains(out, "audit store down") {
+		t.Fatalf("refused export not logged at ERROR with its cause; logs = %s", out)
 	}
 }
 

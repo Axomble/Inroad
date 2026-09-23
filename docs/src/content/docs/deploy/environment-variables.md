@@ -354,7 +354,19 @@ refuses to start over the verbosity of its own logs helps nobody.
 Audit retention is **off by default, deliberately**. How long a security log is
 kept is a privacy and legal decision — it depends on your jurisdiction and your
 customers' contracts — so the product does not make it for you. Decide it with
-whoever owns privacy in your organisation, then set the number of days. The
+whoever owns privacy in your organisation, then set the number of days.
+
+**What the audit log holds that is personal information.** Client IP addresses
+and user agents; invitee email addresses (`member.invited`); member email
+addresses (`member.role_changed`); connected mailbox addresses (`mailbox.*`);
+and the acting user's email, shown at read time. Rows are kept after the user
+they name is deleted, and there is **no per-person erasure path** — the only
+deletions are this age-based retention and deleting the whole workspace. If
+Canadian privacy law (PIPEDA) or Quebec's Law 25 applies to you, it may set
+retention limits and access/erasure obligations for this data. Consult your
+Privacy/Legal function before choosing a retention period and before
+answering an individual's erasure request; the software does not decide
+either for you. The
 purge runs in the worker's daily maintenance job (control role), in batches, and
 is the only thing that can delete an audit row: the table refuses `UPDATE`,
 `DELETE` and `TRUNCATE` from anything else.
