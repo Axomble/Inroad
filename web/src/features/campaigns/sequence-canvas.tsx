@@ -320,7 +320,9 @@ function SidePanel({ title, onClose, children }: { title: string; onClose: () =>
       aria-label={title}
       className="border-t border-border bg-surface/60 lg:w-[420px] lg:shrink-0 lg:border-t-0 lg:border-l"
       onKeyDown={(event) => {
-        if (event.key === 'Escape') onClose()
+        // An Escape something inside already handled — closing the editor's
+        // `{{` menu, a link field, a dropdown — must not also discard the form.
+        if (event.key === 'Escape' && !event.defaultPrevented) onClose()
       }}
     >
       <h3

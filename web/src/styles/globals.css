@@ -328,6 +328,24 @@ body {
   padding: 0.75rem;
 }
 
+/* The email editors' content (components/shared/rich-text). Preflight strips
+   list markers and link styling, which an editor has to show. */
+/* A paragraph break is a blank line in the text part and a <p> in the HTML
+   one, so it must read as a gap here too — a single line break has none. */
+.rich-text-content :where(p, ul, ol) + :where(p, ul, ol) { margin-top: 0.75em; }
+.rich-text-content :where(ul, ol) { margin-left: 1.25rem; }
+.rich-text-content ul { list-style: disc; }
+.rich-text-content ol { list-style: decimal; }
+.rich-text-content a { color: var(--accent-ink); text-decoration: underline; text-underline-offset: 2px; }
+.rich-text-content p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--faint);
+  white-space: pre-line;
+}
+
 /* Assistant panel motion.
  *
  * Lives here rather than as Tailwind utilities on the element for two reasons:
