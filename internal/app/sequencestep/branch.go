@@ -108,7 +108,7 @@ func (s *Service) SetBranch(ctx context.Context, ws, campaignID uuid.UUID, in Br
 // checkReplyLabel refuses a label that could never fire a branch.
 //
 // Reply labels decide what a reply DOES to an enrollment, and a branch never
-// overrides that (docs/security.md invariant 82). A label that stops the
+// overrides that (docs/security.md invariant 84). A label that stops the
 // enrollment — the default for every builtin human label — ends the sequence
 // the moment such a reply arrives, before any branch is consulted, so a branch
 // naming it would silently never route anyone. Refusing it at save time is the
