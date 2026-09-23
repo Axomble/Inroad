@@ -4493,7 +4493,7 @@ export type StepBranchRequest = {
   within_days?: number | null;
   /** Optional, replied / not_replied only; must name a reply label key in the workspace. Empty string is treated as null. */
   reply_label_key?: string | null;
-  /** A step of the same campaign */
+  /** A step of the same campaign, not this step; null or absent ends the path */
   yes_step_id?: string | null;
   /** As yes_step_id; must be null or absent for always */
   no_step_id?: string | null;
