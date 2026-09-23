@@ -118,6 +118,19 @@ beforeEach(() => {
       if (url.endsWith('/steps') && method === 'POST') {
         return jsonResponse({ id: 's-3', step_order: 3, delay_seconds: 0, subject: 'New' })
       }
+      // The routing: this suite covers the list, so the sequence is linear.
+      if (url.endsWith('/graph')) {
+        return jsonResponse({
+          campaign_id: 'c-1',
+          entry_step_id: steps[0]?.id ?? null,
+          nodes: steps.map((step, index) => ({
+            step_id: step.id,
+            step_order: step.step_order,
+            default_next_step_id: steps[index + 1]?.id ?? null,
+            branch: null,
+          })),
+        })
+      }
       return stepsResponder()
     }),
   )

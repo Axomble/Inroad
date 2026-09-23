@@ -28,10 +28,13 @@ const TWO_STEPS: Step[] = [
 async function mockApi(
   page: Page,
   initialSteps: Step[] = TWO_STEPS,
-): Promise<{ reorders: string[][]; creates: unknown[] }> {
+): Promise<{ reorders: string[][]; creates: unknown[]; branchWrites: unknown[] }> {
   const reorders: string[][] = []
   const creates: unknown[] = []
+  const branchWrites: unknown[] = []
   let steps: Step[] = initialSteps
+  // Branches by source step, as the server stores them: one per step.
+  const branches = new Map<string, Record<string, unknown>>()
   const membership = { workspace_id: 'workspace-e2e', workspace_name: 'Atlas Labs', role: 'owner' }
 
   await page.route('**/api/v1/**', async (route: Route) => {
@@ -63,6 +66,51 @@ async function mockApi(
     }
 
     if (path.endsWith('/variants')) return route.fulfill(json([]))
+    if (path.endsWith('/reply-labels')) {
+      const label = (key: string, name: string, stops: boolean) => ({
+        id: `rl-${key}`,
+        key,
+        label: name,
+        color: '#888888',
+        position: 0,
+        is_builtin: true,
+        stops_enrollment: stops,
+        is_automated: false,
+        suppresses_contact: false,
+        captures_deal: false,
+        defers_enrollment: false,
+        created_at: '2026-09-01T00:00:00Z',
+        updated_at: '2026-09-01T00:00:00Z',
+      })
+      return route.fulfill(json({ labels: [label('interested', 'Interested', true), label('question', 'Question', false)] }))
+    }
+    if (path.endsWith(`/campaigns/${CAMPAIGN_ID}/graph`)) {
+      return route.fulfill(
+        json({
+          campaign_id: CAMPAIGN_ID,
+          entry_step_id: steps[0]?.id ?? null,
+          nodes: steps.map((step, index) => ({
+            step_id: step.id,
+            step_order: step.step_order,
+            default_next_step_id: steps[index + 1]?.id ?? null,
+            branch: branches.get(step.id) ?? null,
+          })),
+        }),
+      )
+    }
+    const branchPath = /\/steps\/([^/]+)\/branch$/.exec(path)
+    if (branchPath?.[1]) {
+      const stepId = branchPath[1]
+      if (request.method() === 'DELETE') {
+        branches.delete(stepId)
+        return route.fulfill({ status: 204, body: '' })
+      }
+      const body = request.postDataJSON() as Record<string, unknown>
+      branchWrites.push(body)
+      const saved = { step_id: stepId, updated_at: '2026-09-23T00:00:00Z', ...body }
+      branches.set(stepId, saved)
+      return route.fulfill(json(saved))
+    }
     if (path.endsWith(`/campaigns/${CAMPAIGN_ID}/steps/reorder`)) {
       const { step_ids } = request.postDataJSON() as { step_ids: string[] }
       reorders.push(step_ids)
@@ -104,7 +152,7 @@ async function mockApi(
     return route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"unhandled e2e route"}' })
   })
 
-  return { reorders, creates }
+  return { reorders, creates, branchWrites }
 }
 
 async function signIn(page: Page) {
@@ -205,4 +253,56 @@ test('dragging from a step’s exit onto another step makes it next', async ({ p
 
   await expect.poll(() => reorders.at(-1)).toEqual(['step-1', 'step-3', 'step-2'])
   await expect(canvas.getByRole('button', { name: 'Edit step 2: Last call' })).toBeVisible()
+})
+
+test('adding a condition draws the IF after its step, with Yes / No exits routed where they were set', async ({ page }) => {
+  const three: Step[] = [
+    { ...TWO_STEPS[0]!, body_html: '<p>hello</p>' },
+    TWO_STEPS[1]!,
+    { id: 'step-3', step_order: 3, delay_seconds: 86400, subject: 'Last call', body_text: 'closing', body_html: '' },
+  ]
+  const { branchWrites } = await mockApi(page, three)
+  await signIn(page)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/steps`)
+  const canvas = page.getByRole('region', { name: 'Sequence flow' })
+  await expect(canvas.getByText('Last call')).toBeVisible()
+
+  await canvas.getByRole('button', { name: 'Add a condition after step 1' }).click()
+  const panel = page.getByRole('complementary', { name: 'Condition after step 1' })
+  await panel.getByLabel('If they…').selectOption('opened')
+  await panel.getByLabel('Within (days)').fill('3')
+  await panel.getByLabel('Yes — go to').selectOption('step-3')
+  await panel.getByLabel('No — go to').selectOption('step-2')
+  await panel.getByRole('button', { name: 'Add condition' }).click()
+
+  await expect.poll(() => branchWrites.at(-1)).toEqual({
+    condition: 'opened',
+    within_days: 3,
+    reply_label_key: null,
+    yes_step_id: 'step-3',
+    no_step_id: 'step-2',
+  })
+
+  // The diamond, in words, right after step 1 — and it took focus.
+  const condition = canvas.getByRole('button', { name: 'Edit the condition after step 1: Opened within 3 days' })
+  await expect(condition).toBeVisible()
+  await expect(condition).toBeFocused()
+  await expect(canvas.locator('.react-flow__node[data-id="cond:step-1"] polygon')).toHaveCount(1)
+  // Labelled exits, each an edge to the step it was set to.
+  const node = canvas.locator('.react-flow__node[data-id="cond:step-1"]')
+  await expect(node.getByText('Yes', { exact: true })).toBeVisible()
+  await expect(node.getByText('No', { exact: true })).toBeVisible()
+  await expect(canvas.getByTestId('rf__edge-cond:step-1:yes->step-3')).toHaveCount(1)
+  await expect(canvas.getByTestId('rf__edge-cond:step-1:no->step-2')).toHaveCount(1)
+
+  // Dragging the Yes exit onto step 2 re-routes it — a real pointer drag.
+  const from = node.locator('.react-flow__handle.source').first()
+  const to = canvas.locator('.react-flow__node[data-id="step-2"] .react-flow__handle.target')
+  const [a, b] = await Promise.all([from.boundingBox(), to.boundingBox()])
+  if (!a || !b) throw new Error('handles not rendered')
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 12 })
+  await page.mouse.up()
+  await expect.poll(() => branchWrites.at(-1)).toMatchObject({ yes_step_id: 'step-2', no_step_id: 'step-2' })
 })

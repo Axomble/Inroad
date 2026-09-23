@@ -1,4 +1,4 @@
-import { httpStatus, isFetchBaseQueryError, parseRetryAfter, retryAfterSeconds, withRetryAfter } from '../rtk-error'
+import { errorCode, httpStatus, isFetchBaseQueryError, parseRetryAfter, retryAfterSeconds, withRetryAfter } from '../rtk-error'
 
 /**
  * A rate-limited error in the shape a component actually receives: RTK hands
@@ -76,4 +76,18 @@ test('retryAfterSeconds returns null when the error carries no delay', () => {
   // so this must NOT be treated as a source of the delay.
   const headers = new Headers({ 'retry-after': '120' })
   expect(retryAfterSeconds({ status: 429, data: undefined, meta: { response: { headers } } })).toBeNull()
+})
+
+describe('errorCode', () => {
+  it('reads the envelope code of an HTTP error', () => {
+    expect(errorCode({ status: 422, data: { error: 'loop', code: 'cycle', step_ids: ['a'] } })).toBe('cycle')
+  })
+  it('is undefined without a string code, or for a non-HTTP error', () => {
+    expect(errorCode({ status: 400, data: { error: 'bad' } })).toBeUndefined()
+    expect(errorCode({ status: 400, data: { code: 7 } })).toBeUndefined()
+    expect(errorCode({ status: 400, data: { code: '' } })).toBeUndefined()
+    expect(errorCode({ status: 500, data: 'oops' })).toBeUndefined()
+    expect(errorCode({ message: 'thrown' })).toBeUndefined()
+    expect(errorCode(undefined)).toBeUndefined()
+  })
 })

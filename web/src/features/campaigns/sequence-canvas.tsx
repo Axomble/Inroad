@@ -3,7 +3,17 @@ import type { Connection, Edge } from '@xyflow/react'
 import { FlowCanvas } from '@/components/shared/flow/flow-canvas'
 import { flowContentHeight, useFlowLayout } from '@/components/shared/flow/flow-layout'
 import type { FlowInsertTarget } from '@/components/shared/flow/flow-insert-context'
-import { useReorderStepsMutation, type SequenceStep } from './api'
+import {
+  useReorderStepsMutation,
+  useSetStepBranchMutation,
+  type CampaignGraph,
+  type SequenceStep,
+  type StepBranch,
+} from './api'
+import { withExit } from './branch-draft'
+import { branchErrorMessage } from './branch-error'
+import { cycleStepIds } from './branch-loop'
+import { ConditionEditor } from './condition-editor'
 import {
   SequenceCanvasActionsContext,
   currentFocus,
@@ -15,7 +25,9 @@ import {
 import {
   START_NODE_ID,
   applyOrder,
+  branchesByStep,
   buildSequenceGraph,
+  exitForConnection,
   isMeaningfulConnection,
   leadsWithSubject,
   moveStep,
@@ -38,41 +50,61 @@ const MIN_CANVAS_HEIGHT = 320
 const MAX_CANVAS_HEIGHT = 720
 const CANVAS_PADDING = 96
 
+// Frozen in use: nothing ever writes to it, it only stands in for "no routing known".
+const NO_BRANCHES: ReadonlyMap<string, StepBranch> = new Map<string, StepBranch>()
+
 export type SequenceCanvasProps = {
   campaignId: string
   /** Server truth, sorted by `step_order`. */
   steps: StepWithId[]
   canModifyStructure: boolean
+  /**
+   * The routing. `undefined` together with `graphFailed` means it couldn't be
+   * loaded: the flow then draws the steps in order and offers no condition
+   * editing, because a save could silently replace a branch nobody can see.
+   */
+  graph: CampaignGraph | undefined
+  graphFailed: boolean
+  /** The loop the server last refused, highlighted on its nodes. */
+  loopStepIds: readonly string[] | null
+  onLoop: (stepIds: string[] | null) => void
   /** Owned by the editor, so its section-bar "Add step" opens this same panel. */
   panel: SequencePanel | null
   onPanelChange: (panel: SequencePanel | null) => void
   onDelete: (step: StepWithId) => void
   onVariants: (target: { step: StepWithId; position: number }) => void
-  /** Lifts a reorder failure to the editor's banner; `null` clears it. */
-  onReorderError: (message: string | null) => void
+  /** Lifts a failed gesture to the editor's banner; `null` clears it. */
+  onNotice: (message: string | null) => void
 }
 
 /**
- * The sequence as a flow: Start → steps → Stop, laid out by dagre. Code-split
- * behind `React.lazy` in `sequence-editor.tsx`, so `@xyflow/react` and dagre
- * only download when the canvas is actually shown.
+ * The sequence as a flow: Start → steps (and the conditions hanging off them)
+ * → Stop, laid out by dagre. Code-split behind `React.lazy` in
+ * `sequence-editor.tsx`, so `@xyflow/react` and dagre only download when the
+ * canvas is actually shown.
  *
- * Editing reuses the list's `StepForm` in a side panel rather than a second
- * form. Structural gestures (insert on an edge, move up/down, drag a
- * connection) all reduce to the one reorder endpoint; the create endpoint
- * always appends, so inserting mid-sequence is create-then-place.
+ * Two kinds of edit, gated differently, as the server gates them:
+ * - STRUCTURE (insert on an edge, move up/down, drag from Start or a step) all
+ *   reduce to the reorder endpoint and are draft-only.
+ * - ROUTING (add / edit / remove a condition, drag a condition's exit onto a
+ *   step) goes through the branch endpoints and is allowed while running.
  */
 export default function SequenceCanvas({
   campaignId,
   steps: serverSteps,
   canModifyStructure,
+  graph: routing,
+  graphFailed,
+  loopStepIds,
+  onLoop,
   panel,
   onPanelChange,
   onDelete,
   onVariants,
-  onReorderError,
+  onNotice,
 }: SequenceCanvasProps) {
   const [reorderSteps, reorderState] = useReorderStepsMutation()
+  const [setBranch] = useSetStepBranchMutation()
   const [focusRequest, setFocusRequest] = useState<string | null>(null)
   const clearFocusRequest = useCallback(() => setFocusRequest(null), [])
 
@@ -93,11 +125,22 @@ export default function SequenceCanvas({
     latestServerSteps.current = serverSteps
   }, [serverSteps])
 
-  const graph = useMemo(
-    () => buildSequenceGraph(steps, { canModifyStructure, outputsOf: sequenceNodeRegistry.outputsOf }),
-    [steps, canModifyStructure],
+  const canEditBranches = !graphFailed && routing !== undefined
+  const branches = useMemo(() => (graphFailed ? NO_BRANCHES : branchesByStep(routing?.nodes)), [graphFailed, routing])
+  const loop = useMemo(() => new Set(loopStepIds ?? []), [loopStepIds])
+
+  const flow = useMemo(
+    () =>
+      buildSequenceGraph(steps, {
+        canModifyStructure,
+        canEditBranches,
+        branches,
+        loopStepIds: loop,
+        outputsOf: sequenceNodeRegistry.outputsOf,
+      }),
+    [steps, canModifyStructure, canEditBranches, branches, loop],
   )
-  const nodes = useFlowLayout(graph.nodes, graph.edges, sequenceNodeRegistry)
+  const { nodes, edges } = useFlowLayout(flow.nodes, flow.edges, sequenceNodeRegistry)
   const order = useMemo(() => steps.map((step) => step.id), [steps])
   const stepIds = useMemo(() => new Set(order), [order])
   const subjectOf = useMemo(() => {
@@ -116,17 +159,21 @@ export default function SequenceCanvas({
   const reorder = useCallback(
     async (next: string[], failurePrefix?: string) => {
       if (!orderChanged(latestOrder.current, next)) return
-      onReorderError(null)
+      onNotice(null)
+      onLoop(null)
       const result = await reorderSteps({ id: campaignId, reorderStepsRequest: { step_ids: next } })
       if ('error' in result) {
         const message = reorderErrorMessage(result.error)
-        onReorderError(failurePrefix ? `${failurePrefix} ${message}` : message)
+        onNotice(failurePrefix ? `${failurePrefix} ${message}` : message)
+        // With conditions in play a new order can close a loop through the
+        // fall-through; the server names it, so point at it.
+        onLoop(cycleStepIds(result.error))
         return
       }
       const confirmedOrder = result.data.flatMap((step) => (step.id ? [step.id] : []))
       setConfirmed({ base: latestServerSteps.current, order: confirmedOrder })
     },
-    [campaignId, onReorderError, reorderSteps],
+    [campaignId, onLoop, onNotice, reorderSteps],
   )
 
   const moveBlock = useCallback(
@@ -159,11 +206,13 @@ export default function SequenceCanvas({
     () => ({
       campaignId,
       editingStepId: panel?.kind === 'edit' ? panel.stepId : null,
+      editingConditionStepId: panel?.kind === 'condition' ? panel.stepId : null,
       editStep: (stepId) => onPanelChange({ kind: 'edit', stepId, returnFocus: currentFocus() }),
+      editCondition: (stepId) => onPanelChange({ kind: 'condition', stepId, returnFocus: currentFocus() }),
       openVariants: (step, position) => onVariants({ step, position }),
       requestDelete: (step) => {
-        // Deleting the step being edited would leave the panel editing nothing.
-        if (panel?.kind === 'edit' && panel.stepId === step.id) onPanelChange(null)
+        // Deleting the step a panel is about would leave it editing nothing.
+        if (panel && panel.kind !== 'add' && panel.stepId === step.id) onPanelChange(null)
         onDelete(step)
       },
       moveStep: move,
@@ -197,26 +246,59 @@ export default function SequenceCanvas({
     [onPanelChange],
   )
 
-  // A drag is meaningful only if it would also leave a subject on step 1 —
-  // the same rule the move buttons and insert-at-start follow.
-  const connectionOrder = useCallback(
+  // What a drag means depends on where it starts. From a condition's exit it
+  // sets that exit (routing, allowed while running). From Start or a step it
+  // is a reorder (structure, draft-only) — and only from a step whose next is
+  // still the fall-through, since a condition owns the rest; the reorder must
+  // also leave a subject on step 1, the rule the move buttons follow.
+  const exitFor = useCallback(
+    (connection: Pick<Edge, 'source' | 'target' | 'sourceHandle'>) =>
+      canEditBranches ? exitForConnection(connection, branches, stepIds) : null,
+    [branches, canEditBranches, stepIds],
+  )
+  const reorderFor = useCallback(
     (connection: Pick<Edge, 'source' | 'target'>): string[] | null => {
+      if (!canModifyStructure || branches.has(connection.source)) return null
       if (!isMeaningfulConnection(connection, stepIds)) return null
       const next = orderForConnection(order, connection.source, connection.target)
       return leadsWithSubject(next, subjectOf) ? next : null
     },
-    [order, stepIds, subjectOf],
+    [branches, canModifyStructure, order, stepIds, subjectOf],
+  )
+
+  const setExit = useCallback(
+    async (connection: Connection) => {
+      const exit = exitFor(connection)
+      const branch = exit ? branches.get(exit.stepId) : undefined
+      if (!exit || !branch) return
+      onNotice(null)
+      onLoop(null)
+      const result = await setBranch({
+        id: campaignId,
+        stepId: exit.stepId,
+        stepBranchRequest: withExit(branch, exit.exit, exit.target),
+      })
+      if ('error' in result) {
+        onNotice(branchErrorMessage(result.error))
+        onLoop(cycleStepIds(result.error))
+      }
+    },
+    [branches, campaignId, exitFor, onLoop, onNotice, setBranch],
   )
   const onConnect = useCallback(
     (connection: Connection) => {
-      const next = connectionOrder(connection)
+      if (exitFor(connection)) {
+        void setExit(connection)
+        return
+      }
+      const next = reorderFor(connection)
       if (next) void reorder(next)
     },
-    [connectionOrder, reorder],
+    [exitFor, reorder, reorderFor, setExit],
   )
   const isValidConnection = useCallback(
-    (connection: Connection | Edge) => connectionOrder(connection) !== null,
-    [connectionOrder],
+    (connection: Connection | Edge) => exitFor(connection) !== null || reorderFor(connection) !== null,
+    [exitFor, reorderFor],
   )
 
   /** Closes the panel, returning focus to what opened it unless a better target is named. */
@@ -237,7 +319,7 @@ export default function SequenceCanvas({
     closePanel(focusKey(saved.id, 'edit'))
     const appended = [...latestOrder.current.filter((id) => id !== saved.id), saved.id]
     if (afterId !== null && !appended.includes(afterId)) {
-      onReorderError(`${PLACEMENT_FAILED} The step it was meant to follow was removed.`)
+      onNotice(`${PLACEMENT_FAILED} The step it was meant to follow was removed.`)
       return
     }
     const placed = placeAfter(appended, afterId, saved.id)
@@ -245,8 +327,8 @@ export default function SequenceCanvas({
     void reorder(placed, PLACEMENT_FAILED)
   }
 
-  const editing = panel?.kind === 'edit' ? steps.find((step) => step.id === panel.stepId) : undefined
-  const editingPosition = editing ? steps.indexOf(editing) + 1 : 0
+  const panelStep = panel && panel.kind !== 'add' ? steps.find((step) => step.id === panel.stepId) : undefined
+  const panelPosition = panelStep ? steps.indexOf(panelStep) + 1 : 0
   const height = Math.min(MAX_CANVAS_HEIGHT, Math.max(MIN_CANVAS_HEIGHT, flowContentHeight(nodes) + CANVAS_PADDING))
 
   return (
@@ -256,22 +338,41 @@ export default function SequenceCanvas({
           <FlowCanvas
             ariaLabel="Sequence flow"
             nodes={nodes}
-            edges={graph.edges}
+            edges={edges}
             registry={sequenceNodeRegistry}
             onInsert={canModifyStructure ? onInsert : undefined}
-            onConnect={canModifyStructure ? onConnect : undefined}
+            onConnect={onConnect}
             isValidConnection={isValidConnection}
           />
         </div>
 
-        {editing && (
-          <SidePanel key={`edit:${editing.id}`} title={`Step ${editingPosition}`} onClose={() => closePanel()}>
+        {panel?.kind === 'edit' && panelStep && (
+          <SidePanel key={`edit:${panelStep.id}`} title={`Step ${panelPosition}`} onClose={() => closePanel()}>
             <StepForm
               campaignId={campaignId}
-              step={editing}
-              isFirstStep={editingPosition === 1}
+              step={panelStep}
+              isFirstStep={panelPosition === 1}
               onDone={() => closePanel()}
               onCancel={() => closePanel()}
+            />
+          </SidePanel>
+        )}
+        {panel?.kind === 'condition' && panelStep && canEditBranches && (
+          <SidePanel
+            key={`condition:${panelStep.id}`}
+            title={`Condition after step ${panelPosition}`}
+            onClose={() => closePanel()}
+          >
+            <ConditionEditor
+              campaignId={campaignId}
+              step={panelStep}
+              position={panelPosition}
+              steps={steps}
+              branch={branches.get(panelStep.id) ?? null}
+              onSaved={() => closePanel(focusKey(panelStep.id, 'condition'))}
+              onDeleted={() => closePanel(focusKey(panelStep.id, 'add-condition'))}
+              onCancel={() => closePanel()}
+              onLoop={onLoop}
             />
           </SidePanel>
         )}
@@ -305,8 +406,8 @@ function addTitle(afterId: string | null, order: readonly string[]): string {
 /**
  * The editor beside the canvas. Focus moves to its heading when it opens, so a
  * keyboard user lands in the form they just asked for. Escape closes it; the
- * canvas then puts focus back on whatever opened it, or on the new step's node
- * after an add.
+ * canvas then puts focus back on whatever opened it, or on what the save
+ * created (the new step, the new condition).
  */
 function SidePanel({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   const headingRef = useRef<HTMLHeadingElement>(null)

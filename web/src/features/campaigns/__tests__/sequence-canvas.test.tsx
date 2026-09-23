@@ -4,6 +4,7 @@ import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
 import { installReactFlowDom } from '@/test/react-flow-dom'
 import { SequenceEditor } from '../sequence-editor'
+import { bodiesTo, installFakeSequenceServer, jsonResponse, lastRequest, type FakeSequenceServer } from './fake-sequence-server'
 
 // The canvas is the editor's default view, rendered through the real React
 // Flow + dagre pipeline against a stubbed `fetch` — the same seam the list's
@@ -47,80 +48,15 @@ beforeAll(() => {
   proto.scrollIntoView ??= () => {}
 })
 
-type Step = { id: string; step_order: number; delay_seconds: number; subject: string; body_text?: string }
-type CapturedRequest = { method: string; url: string; body: unknown }
-
-// A small stateful server: reorder, create and delete change `steps`, and a
-// GET returns whatever `steps` is now, so refetches are consistent with the
-// mutations before them.
-let steps: Step[]
-let requests: CapturedRequest[]
-let reorderFails: Response | null
-/** When set, GET /steps waits on it — "the refetch hasn't come back yet". */
-let listGate: Promise<void> | null
-
-function jsonResponse(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
-}
-
-function renumber(list: Step[]): Step[] {
-  return list.map((step, index) => ({ ...step, step_order: index + 1 }))
-}
+let server: FakeSequenceServer
 
 beforeEach(() => {
-  requests = []
-  steps = [
-    { id: 's-1', step_order: 1, delay_seconds: 0, subject: 'Intro', body_text: 'Hello there friend' },
+  server = installFakeSequenceServer([
+    { id: 's-1', step_order: 1, delay_seconds: 0, subject: 'Intro', body_text: 'Hello there friend', body_html: '<p>Hi</p>' },
     { id: 's-2', step_order: 2, delay_seconds: 259200, subject: '', body_text: 'Following up now' },
     { id: 's-3', step_order: 3, delay_seconds: 86400, subject: 'Last call' },
-  ]
-  reorderFails = null
-  listGate = null
+  ])
   canvasProps.current = undefined
-
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const isRequest = input instanceof Request
-      const url = isRequest ? input.url : typeof input === 'string' ? input : (input as URL).href
-      const method = (isRequest ? input.method : (init?.method ?? 'GET')).toUpperCase()
-      const text = isRequest ? await input.clone().text() : typeof init?.body === 'string' ? init.body : ''
-      const body = text ? (JSON.parse(text) as unknown) : undefined
-      requests.push({ method, url, body })
-
-      if (url.endsWith('/steps/s-1/variants')) {
-        return jsonResponse([
-          { id: 'v-1', step_id: 's-1', label: 'B', weight: 50, subject: '', body_text: '', body_html: '' },
-          { id: 'v-2', step_id: 's-1', label: 'C', weight: 50, subject: '', body_text: '', body_html: '' },
-        ])
-      }
-      if (url.endsWith('/variants')) return jsonResponse([])
-      if (url.endsWith('/steps/reorder')) {
-        if (reorderFails) return reorderFails
-        const { step_ids } = body as { step_ids: string[] }
-        steps = renumber(step_ids.flatMap((id) => steps.filter((step) => step.id === id)))
-        return jsonResponse(steps)
-      }
-      if (/\/steps\/[^/]+$/.test(url) && method === 'PUT') return jsonResponse(steps[0])
-      if (/\/steps\/[^/]+$/.test(url) && method === 'DELETE') {
-        const id = url.split('/').at(-1)
-        steps = renumber(steps.filter((step) => step.id !== id))
-        return new Response(null, { status: 204 })
-      }
-      if (url.endsWith('/steps') && method === 'POST') {
-        const created: Step = {
-          id: 's-new',
-          step_order: steps.length + 1,
-          delay_seconds: 0,
-          subject: (body as { subject?: string }).subject ?? '',
-        }
-        steps = [...steps, created]
-        return jsonResponse(created)
-      }
-      if (listGate) await listGate
-      return jsonResponse(steps)
-    }),
-  )
 })
 
 afterEach(() => {
@@ -128,10 +64,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function lastRequest(predicate: (r: CapturedRequest) => boolean): CapturedRequest | undefined {
-  return [...requests].reverse().find(predicate)
-}
-const reorderBodies = () => requests.filter((r) => r.url.endsWith('/steps/reorder')).map((r) => r.body)
+const reorderBodies = () => bodiesTo(server, '/steps/reorder')
 
 async function renderCanvas(status = 'draft') {
   renderWithProviders(<SequenceEditor campaignId="c-1" status={status} />)
@@ -181,7 +114,7 @@ test('a step with variants shows how many, a step without shows nothing', async 
 })
 
 test('a short sequence gets a canvas sized to it, not the full cap', async () => {
-  steps = [{ id: 's-1', step_order: 1, delay_seconds: 0, subject: 'Intro' }]
+  server.steps = [{ id: 's-1', step_order: 1, delay_seconds: 0, subject: 'Intro' }]
   const canvas = await renderCanvas()
   const shortHeight = Number.parseFloat(canvas.parentElement?.style.height ?? '')
   expect(shortHeight).toBeGreaterThan(320)
@@ -189,14 +122,12 @@ test('a short sequence gets a canvas sized to it, not the full cap', async () =>
 })
 
 test('a twelve-step sequence stops growing at the cap', async () => {
-  steps = renumber(
-    Array.from({ length: 12 }, (_, index) => ({
-      id: `s-${index + 1}`,
-      step_order: 0,
-      delay_seconds: 86400,
-      subject: `Touch ${index + 1}`,
-    })),
-  )
+  server.steps = Array.from({ length: 12 }, (_, index) => ({
+    id: `s-${index + 1}`,
+    step_order: index + 1,
+    delay_seconds: 86400,
+    subject: `Touch ${index + 1}`,
+  }))
   const canvas = await renderCanvas()
   expect(canvas.parentElement?.style.height).toBe('720px')
   // Every step is still in the DOM and reachable by Tab (the canvas pans to a
@@ -218,7 +149,7 @@ test('clicking a step opens the existing step form beside the canvas and saves t
   submitForm(panel)
 
   await waitFor(() =>
-    expect(lastRequest((r) => r.method === 'PUT' && r.url.endsWith('/campaigns/c-1/steps/s-1'))?.body).toMatchObject({
+    expect(lastRequest(server, (r) => r.method === 'PUT' && r.url.endsWith('/campaigns/c-1/steps/s-1'))?.body).toMatchObject({
       subject: 'Intro v2',
     }),
   )
@@ -250,7 +181,7 @@ test('inserting on an edge mid-sequence creates the step, places it, and focuses
   submitForm(panel)
 
   await waitFor(() => expect(reorderBodies().at(-1)).toEqual({ step_ids: ['s-1', 's-new', 's-2', 's-3'] }))
-  expect(lastRequest((r) => r.method === 'POST' && r.url.endsWith('/campaigns/c-1/steps'))?.body).toMatchObject({
+  expect(lastRequest(server, (r) => r.method === 'POST' && r.url.endsWith('/campaigns/c-1/steps'))?.body).toMatchObject({
     subject: 'Inserted',
   })
   // The "+" that opened the panel is gone (its edge was split), so focus goes
@@ -264,7 +195,7 @@ test('inserting before Stop just appends — no reorder request', async () => {
   const panel = await screen.findByRole('complementary', { name: 'New step after step 3' })
   submitForm(panel)
 
-  await waitFor(() => expect(lastRequest((r) => r.method === 'POST' && r.url.endsWith('/campaigns/c-1/steps'))).toBeDefined())
+  await waitFor(() => expect(lastRequest(server, (r) => r.method === 'POST' && r.url.endsWith('/campaigns/c-1/steps'))).toBeDefined())
   await waitFor(() => expect(screen.queryByRole('complementary')).not.toBeInTheDocument())
   expect(reorderBodies()).toEqual([])
 })
@@ -278,11 +209,11 @@ test('a double click on save creates the step once', async () => {
   fireEvent.click(save)
 
   await waitFor(() => expect(screen.queryByRole('complementary')).not.toBeInTheDocument())
-  expect(requests.filter((r) => r.method === 'POST' && r.url.endsWith('/campaigns/c-1/steps'))).toHaveLength(1)
+  expect(server.requests.filter((r) => r.method === 'POST' && r.url.endsWith('/campaigns/c-1/steps'))).toHaveLength(1)
 })
 
 test('a failed placement says the step exists but landed at the end', async () => {
-  reorderFails = jsonResponse({ error: 'boom' }, 500)
+  server.reorderFails = jsonResponse({ error: 'boom' }, 500)
   const canvas = await renderCanvas()
   fireEvent.click(await within(canvas).findByRole('button', { name: 'Add a step at the start' }))
   const panel = await screen.findByRole('complementary', { name: 'New first step' })
@@ -338,7 +269,7 @@ test('a second move before the refetch lands builds on the first, not on the sta
   // From here on, the refetch the reorder's invalidation triggers never
   // returns — only the reorder response itself can update the canvas.
   let release = () => {}
-  listGate = new Promise<void>((resolve) => {
+  server.listGate = new Promise<void>((resolve) => {
     release = resolve
   })
 
@@ -367,7 +298,7 @@ test('a blank-subject follow-up can’t be moved into first place', async () => 
 })
 
 test('a 409 on reorder surfaces the draft-only copy in the banner', async () => {
-  reorderFails = jsonResponse({ error: 'campaign is not a draft' }, 409)
+  server.reorderFails = jsonResponse({ error: 'campaign is not a draft' }, 409)
   const canvas = await renderCanvas()
   fireEvent.click(within(canvas).getByRole('button', { name: 'Move step 3 up' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('Reorder is only allowed while the campaign is a draft.')
@@ -406,9 +337,9 @@ test('connections that mean nothing, or would open on a blank subject, are refus
   expect(reorderBodies()).toEqual([])
 })
 
-test('handles are connectable on a draft and not on a running campaign', async () => {
+test('on a draft, steps and Start can start a drag', async () => {
   const draft = await renderCanvas('draft')
-  expect(draft.querySelectorAll('.react-flow__handle.connectable').length).toBeGreaterThan(0)
+  expect(draft.querySelectorAll('.react-flow__handle.source.connectable').length).toBeGreaterThan(0)
 })
 
 test('a running campaign keeps edit and A/B but offers no structural change', async () => {
@@ -418,9 +349,10 @@ test('a running campaign keeps edit and A/B but offers no structural change', as
   expect(within(canvas).getByRole('button', { name: /delete step 1 \(disabled/i })).toBeDisabled()
   expect(within(canvas).queryByRole('button', { name: /^add a step/i })).not.toBeInTheDocument()
   expect(within(canvas).queryByRole('button', { name: /^move step/i })).not.toBeInTheDocument()
-  // Nothing to drag: no handler, and no handle React Flow treats as connectable.
-  expect(canvasProps.current?.onConnect).toBeUndefined()
-  expect(canvas.querySelectorAll('.react-flow__handle.connectable')).toHaveLength(0)
+  // Nothing a step or Start can start a drag from — a reorder is structure —
+  // and such a drop is refused even if one arrived.
+  expect(canvas.querySelectorAll('.react-flow__handle.source.connectable')).toHaveLength(0)
+  expect(canvasProps.current?.isValidConnection?.(connection('s-1', 's-3'))).toBe(false)
   // The waits still read — they describe the sequence, not an action.
   expect(await within(canvas).findByText('Wait 3 days')).toBeInTheDocument()
 })
@@ -433,7 +365,7 @@ test('delete goes through the shared confirmation and deleteStep', async () => {
   const dialog = await screen.findByRole('alertdialog')
   fireEvent.click(within(dialog).getByRole('button', { name: /^delete step$/i }))
   await waitFor(() =>
-    expect(lastRequest((r) => r.method === 'DELETE' && r.url.endsWith('/campaigns/c-1/steps/s-2'))).toBeDefined(),
+    expect(lastRequest(server, (r) => r.method === 'DELETE' && r.url.endsWith('/campaigns/c-1/steps/s-2'))).toBeDefined(),
   )
   await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
 })

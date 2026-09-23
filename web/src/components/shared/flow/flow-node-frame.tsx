@@ -9,8 +9,10 @@ import { useFlowRegistry } from './flow-registry-context'
  * bottom, each named in text when its output has a label. Both come from the
  * registry by `type` — pass the `type` React Flow gives the node component.
  *
- * Handles are only connectable when the canvas is (`connectable`) — otherwise
- * they are drawn purely to show where edges attach.
+ * Connectability is split by direction, because what may be dragged FROM and
+ * what may be dropped ONTO differ: a read-only step may refuse to start a drag
+ * yet still accept a condition exit dropped on it. A handle that is neither is
+ * drawn purely to show where edges attach.
  *
  * `pointer-events-auto`: React Flow sets `pointer-events: none` on the wrapper
  * of a node that is neither selectable nor draggable, and it inherits — without
@@ -18,12 +20,16 @@ import { useFlowRegistry } from './flow-registry-context'
  */
 export function FlowNodeFrame({
   type,
-  connectable = false,
+  inputConnectable = false,
+  outputsConnectable = false,
   className,
   children,
 }: {
   type: string
-  connectable?: boolean
+  /** Accepts a connection dropped on its entry handle. */
+  inputConnectable?: boolean
+  /** Its exits can start a connection. */
+  outputsConnectable?: boolean
   className?: string
   children: React.ReactNode
 }) {
@@ -31,7 +37,9 @@ export function FlowNodeFrame({
   const outputs = registry.outputsOf(type)
   return (
     <div className={cn('pointer-events-auto relative h-full w-full', className)}>
-      {registry.hasInputOf(type) && <Handle type="target" position={Position.Top} isConnectable={connectable} />}
+      {registry.hasInputOf(type) && (
+        <Handle type="target" position={Position.Top} isConnectable={inputConnectable} isConnectableStart={false} />
+      )}
       {children}
       {outputs.map((output, index) => {
         const left = `${outputOffset(index, outputs.length) * 100}%`
@@ -49,7 +57,8 @@ export function FlowNodeFrame({
               type="source"
               position={Position.Bottom}
               id={output.id ?? undefined}
-              isConnectable={connectable}
+              isConnectable={outputsConnectable}
+              isConnectableEnd={false}
               style={{ left }}
             />
           </div>
