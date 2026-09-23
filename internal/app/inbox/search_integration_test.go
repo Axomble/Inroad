@@ -4,11 +4,13 @@ package inbox_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -576,79 +578,176 @@ func generatedSQL(t *testing.T, constant string) string {
 	return string(m[1])
 }
 
-// An expression index is only used when the query repeats its expression
-// exactly. This gives the workspace a realistic volume of messages, steps and
-// variants — in a transaction that is rolled back, statistics included — so
-// the planner has a reason to prefer the GIN indexes over a workspace-btree
-// scan, then asserts each of the three is the access path. A query that had
-// drifted from inbox_search_document(subject, body_text) could not use them at
-// all, and would plan as a scan of every row in the workspace instead.
+// The five search indexes each exist only because a predicate in
+// queries/inboxsearch.sql repeats its indexed expression exactly; if the SQL
+// drifts from it (a changed argument, a missing left()/lower(), a function
+// called by another name) the index silently stops serving the query and every
+// search becomes a scan.
+//
+// The regression this guards is expression drift, so it asserts that each
+// search index is USABLE by the exact generated statements — not that the
+// planner happens to PREFER it, which is a cost decision that moves with table
+// statistics. An earlier version seeded volume into the shared test database
+// and asked for the planner's preference; CI's database, holding other
+// packages' rows, legitimately preferred a workspace btree for the contacts
+// arm, and the test failed with no regression present.
+//
+// Deterministic instead: on a scratch database of its own, with sequential
+// scans disabled, the test drops every OTHER index on the four searched tables
+// (constraint-backed ones included — this schema can lose its FKs), keeping at
+// most one search index per table per pass. The search index is then the only
+// enabled access path for its table, so the planner will always scan it — but
+// that alone proves nothing, because every search index LEADS with
+// workspace_id and can be scanned for `workspace_id = $n` even when the text
+// predicate no longer matches its expression. So the assertion reads the plan
+// as JSON and requires the text operator itself (@@ for full-text, ~~ i.e.
+// LIKE for trigram) in that index's own Index Cond: the expression is served
+// by the index, not merely filtered after it. No data and no ANALYZE are
+// involved, which is what makes the result independent of statistics and of
+// anything else in the shared database.
+//
+// Verified against the failures it exists for: in the generated SQL, changing
+// the message predicate to inbox_search_document(m.subject, left(m.body_text,
+// 99)), the contact predicate to lower(c.search_text) LIKE, and the sender
+// predicate to m.from_email LIKE each make it report that index's expression
+// unserved — while a check for the index NAME alone still passed on all three.
 func TestSearchQueryUsesTheFullTextIndexesAgainstPostgres(t *testing.T) {
 	ctx := context.Background()
-	f := newFixture(t, ctx)
-	campaignID, _, _ := searchCampaign(t, ctx, f, "Hello")
-	th := plainThread(t, ctx, f, "Volume", "seed", time.Now().UTC())
-	tx, err := f.pool.Begin(ctx)
+	dsn := dbtest.ScratchDSN(t, "inbox_search_plan")
+	if err := db.Migrate(dsn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	pool, err := db.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	for _, stmt := range []struct {
-		sql  string
-		args []any
-	}{
-		{`INSERT INTO inbox_messages (thread_id, workspace_id, mailbox_id, direction, subject, body_text, occurred_at)
-		  SELECT $1, $2, $3, 'inbound', 'subject ' || md5(g::text), 'body ' || md5(g::text) || ' ' || md5((g * 7)::text), now()
-		  FROM generate_series(1, 5000) g`, []any{th.ID, f.ws, f.mailbox}},
-		{`INSERT INTO sequence_steps (workspace_id, campaign_id, step_order, subject, body_text)
-		  SELECT $1, $2, g, 'subject ' || md5(g::text), 'body ' || md5(g::text) || ' ' || md5((g * 7)::text)
-		  FROM generate_series(1, 2000) g`, []any{f.ws, campaignID}},
-		{`INSERT INTO sequence_step_variants (workspace_id, step_id, label, subject, body_text)
-		  SELECT workspace_id, id, 'B', subject, body_text FROM sequence_steps WHERE campaign_id = $1`, []any{campaignID}},
-		{`INSERT INTO contacts (workspace_id, email)
-		  SELECT $1, md5(g::text) || '@volume.test' FROM generate_series(1, 5000) g`, []any{f.ws}},
-		{`UPDATE inbox_messages SET from_email = md5(id::text) || '@sender.test' WHERE thread_id = $1`, []any{th.ID}},
-		{`ANALYZE contacts`, nil},
-		{`ANALYZE inbox_messages`, nil},
-		{`ANALYZE sequence_steps`, nil},
-		{`ANALYZE sequence_step_variants`, nil},
-	} {
-		if _, err := tx.Exec(ctx, stmt.sql, stmt.args...); err != nil {
-			t.Fatalf("seed volume (%.40s…): %v", stmt.sql, err)
-		}
+
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan = off`); err != nil {
+		t.Fatalf("disable seqscan: %v", err)
 	}
-	// The address predicates are exercised too, so their trigram indexes are
-	// asserted alongside the full-text ones.
-	pattern := "pricing"
-	for _, stmt := range []struct {
+
+	ws := uuid.New()
+	pattern := "pricing" // exercises the address predicates too
+	statements := []struct {
 		constant string
 		params   any
 	}{
 		{"inboxSearchPrecheck", gen.InboxSearchPrecheckParams{
-			WorkspaceID: f.ws, Query: "pricing", CandidateCap: inbox.MaxSearchCandidates + 1, AddressPattern: &pattern,
+			WorkspaceID: ws, Query: "pricing", CandidateCap: inbox.MaxSearchCandidates + 1, AddressPattern: &pattern,
 		}},
 		{"searchInboxThreads", gen.SearchInboxThreadsParams{
-			HighlightStart: "\uE000", HighlightStop: "\uE001", Query: "pricing", WorkspaceID: f.ws,
+			HighlightStart: "\uE000", HighlightStop: "\uE001", Query: "pricing", WorkspaceID: ws,
 			CandidateCap: inbox.MaxSearchCandidates + 1, AddressPattern: &pattern, PageLimit: 26,
 		}},
+	}
+
+	// Two passes, because inbox_messages carries TWO search indexes and both
+	// lead with workspace_id: kept together, either one can serve the other's
+	// workspace_id = $n qual, and which the planner picks is a cost decision
+	// again. Each pass keeps at most one search index per table, mapped to the
+	// operator its Index Cond must carry: @@ (full-text match) or ~~ (LIKE,
+	// served by a trigram index).
+	for _, pass := range []map[string]string{
+		{
+			"idx_inbox_messages_search":         "@@",
+			"idx_sequence_steps_search":         "@@",
+			"idx_sequence_step_variants_search": "@@",
+			"idx_contacts_search":               "~~",
+		},
+		{"idx_inbox_messages_from_email_search": "~~"},
 	} {
-		rows, err := tx.Query(ctx, "EXPLAIN "+generatedSQL(t, stmt.constant), paramArgs(stmt.params)...)
-		if err != nil {
+		assertIndexesServeTheirExpressions(t, ctx, tx, pass, statements)
+	}
+}
+
+// assertIndexesServeTheirExpressions drops every index on the four searched
+// tables except keep's, inside a savepoint it rolls back afterwards, then
+// asserts that in each EXPLAINed statement every kept index is scanned with
+// its operator in its own Index Cond. Sequential scans must already be
+// disabled on tx.
+func assertIndexesServeTheirExpressions(t *testing.T, ctx context.Context, tx pgx.Tx, keep map[string]string, statements []struct {
+	constant string
+	params   any
+}) {
+	t.Helper()
+	pass, err := tx.Begin(ctx) // a savepoint: the next pass starts from the full schema
+	if err != nil {
+		t.Fatalf("savepoint: %v", err)
+	}
+	defer func() { _ = pass.Rollback(ctx) }()
+
+	// A constraint-backed index (PK/UNIQUE) has to go through its constraint;
+	// CASCADE takes dependent FKs with it. A DO block takes no parameters, so
+	// the keep-list is spliced in — from the test's constant lists, never input.
+	names := make([]string, 0, len(keep))
+	for name := range keep {
+		names = append(names, name)
+	}
+	if _, err := pass.Exec(ctx, `
+		DO $$
+		DECLARE r record;
+		BEGIN
+			FOR r IN
+				SELECT i.indexrelid::regclass AS idx, i.indrelid::regclass AS tbl, c.conname
+				FROM pg_index i
+				LEFT JOIN pg_constraint c ON c.conindid = i.indexrelid AND c.conrelid = i.indrelid
+				WHERE i.indrelid IN ('inbox_messages'::regclass, 'sequence_steps'::regclass,
+				                     'sequence_step_variants'::regclass, 'contacts'::regclass)
+				  AND i.indexrelid::regclass::text NOT IN ('`+strings.Join(names, "', '")+`')
+			LOOP
+				IF r.conname IS NOT NULL THEN
+					EXECUTE format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I CASCADE', r.tbl, r.conname);
+				ELSE
+					EXECUTE format('DROP INDEX IF EXISTS %s CASCADE', r.idx);
+				END IF;
+			END LOOP;
+		END $$`); err != nil {
+		t.Fatalf("drop competing indexes: %v", err)
+	}
+
+	for _, stmt := range statements {
+		var raw []byte
+		if err := pass.QueryRow(ctx, "EXPLAIN (FORMAT JSON) "+generatedSQL(t, stmt.constant), paramArgs(stmt.params)...).Scan(&raw); err != nil {
 			t.Fatalf("explain %s: %v", stmt.constant, err)
 		}
-		lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil {
-			t.Fatalf("collect %s plan: %v", stmt.constant, err)
+		var plans []struct {
+			Plan planNode `json:"Plan"`
 		}
-		plan := strings.Join(lines, "\n")
-		for _, index := range []string{
-			"idx_inbox_messages_search", "idx_sequence_steps_search", "idx_sequence_step_variants_search",
-			"idx_contacts_search", "idx_inbox_messages_from_email_search",
-		} {
-			if !strings.Contains(plan, index) {
-				t.Errorf("%s plan does not use %s:\n%s", stmt.constant, index, plan)
+		if err := json.Unmarshal(raw, &plans); err != nil || len(plans) != 1 {
+			t.Fatalf("decode %s plan: %v", stmt.constant, err)
+		}
+		conds := map[string][]string{}
+		plans[0].Plan.indexConds(conds)
+		for index, op := range keep {
+			if !slices.ContainsFunc(conds[index], func(c string) bool { return strings.Contains(c, op) }) {
+				t.Errorf("%s: %s does not serve its %s expression (its Index Conds: %q)\nplan: %s",
+					stmt.constant, index, op, conds[index], raw)
 			}
 		}
+	}
+}
+
+// planNode is the part of an EXPLAIN (FORMAT JSON) node this test reads.
+type planNode struct {
+	IndexName string     `json:"Index Name"`
+	IndexCond string     `json:"Index Cond"`
+	Plans     []planNode `json:"Plans"`
+}
+
+// indexConds collects, per index scanned anywhere in the tree, every Index
+// Cond it was scanned with.
+func (n planNode) indexConds(into map[string][]string) {
+	if n.IndexName != "" {
+		into[n.IndexName] = append(into[n.IndexName], n.IndexCond)
+	}
+	for _, child := range n.Plans {
+		child.indexConds(into)
 	}
 }
 
