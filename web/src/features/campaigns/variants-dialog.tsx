@@ -1,11 +1,12 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { Loader2, Plus, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
 import { Skeleton } from '@/components/ui/skeleton'
 import { NoticeBanner, type Notice } from '@/components/shared/notice-banner'
+import { RichTextEditor, SubjectEditor } from '@/components/shared/rich-text-editor'
+import { unknownTokens } from '@/components/shared/rich-text/merge-tags'
 import {
   AlertDialog,
   AlertDialogContent,
@@ -24,6 +25,8 @@ import {
 } from './api'
 import type { StepWithId } from './step-card'
 import { variantErrorMessage, splitShares } from './variant-error'
+import { useMergeFields } from './merge-fields'
+import { UnknownMergeFieldsNotice } from './unknown-merge-fields'
 
 /** The base copy's key in the split map — the step's own content is variant A. */
 const BASE_KEY = 'base'
@@ -221,7 +224,7 @@ function BaseArm({
   )
 }
 
-/** One alternative: label, weight, and its own subject/body. */
+/** One alternative: label, weight, and its own subject/body, held to the step form's merge-field rule. */
 function VariantArm({
   campaignID,
   stepID,
@@ -244,8 +247,14 @@ function VariantArm({
     body_text: variant.body_text,
     body_html: variant.body_html,
   })
+  const mergeFields = useMergeFields()
+  const unknown = unknownTokens([draft.subject, draft.body_text, draft.body_html], mergeFields.classify)
+  const subjectLabelId = useId()
+  const bodyLabelId = useId()
+  const unknownId = useId()
 
   async function onSave() {
+    if (unknown.length > 0) return
     const result = await updateVariant({ id: campaignID, stepId: stepID, variantId: variant.id, stepVariantRequest: draft })
     if ('error' in result) {
       onNotice({ tone: 'error', text: variantErrorMessage('update', result.error) })
@@ -293,19 +302,36 @@ function VariantArm({
         </Button>
       </header>
 
-      <Input
-        aria-label={`Variant ${variant.label} subject`}
+      <span id={subjectLabelId} className="sr-only">
+        Variant {variant.label} subject
+      </span>
+      <SubjectEditor
+        labelledBy={subjectLabelId}
+        initialText={variant.subject}
         placeholder="Subject (leave empty to thread onto the previous email)"
-        value={draft.subject}
-        onChange={(e) => setDraft({ ...draft, subject: e.target.value })}
+        variables={mergeFields.variables}
+        classifyVariable={mergeFields.classify}
+        onChange={(subject) => setDraft((d) => ({ ...d, subject }))}
       />
-      <Textarea
-        aria-label={`Variant ${variant.label} body`}
-        rows={4}
-        value={draft.body_text}
-        onChange={(e) => setDraft({ ...draft, body_text: e.target.value })}
+      <span id={bodyLabelId} className="sr-only">
+        Variant {variant.label} body
+      </span>
+      <RichTextEditor
+        labelledBy={bodyLabelId}
+        initialHtml={variant.body_html}
+        initialText={variant.body_text}
+        variables={mergeFields.variables}
+        classifyVariable={mergeFields.classify}
+        onChange={(body) => setDraft((d) => ({ ...d, body_text: body.text, body_html: body.html }))}
       />
-      <Button variant="outline" size="sm" disabled={saving} onClick={() => void onSave()}>
+      <UnknownMergeFieldsNotice id={unknownId} names={unknown} />
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={saving}
+        aria-describedby={unknown.length > 0 ? unknownId : undefined}
+        onClick={() => void onSave()}
+      >
         {saving && <Loader2 className="size-3.5 animate-spin" />}
         Save variant
       </Button>

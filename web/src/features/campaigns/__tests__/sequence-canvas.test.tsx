@@ -3,6 +3,7 @@ import type { Connection, Edge } from '@xyflow/react'
 import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
 import { installReactFlowDom } from '@/test/react-flow-dom'
+import { pressKey, replaceText, typeInto, warmRichTextEditors } from '@/test/rich-text'
 import { SequenceEditor } from '../sequence-editor'
 
 // The canvas is the editor's default view, rendered through the real React
@@ -34,7 +35,7 @@ vi.mock('@/components/shared/flow/flow-canvas', async (importOriginal) => {
 // generous budget of its own: under a fully parallel suite the first transform
 // of @xyflow alone can take several seconds.
 beforeAll(async () => {
-  await import('../sequence-canvas')
+  await Promise.all([import('../sequence-canvas'), warmRichTextEditors()])
 }, 30_000)
 
 beforeAll(() => {
@@ -95,6 +96,7 @@ beforeEach(() => {
         ])
       }
       if (url.endsWith('/variants')) return jsonResponse([])
+      if (url.endsWith('/custom-fields')) return jsonResponse([])
       if (url.endsWith('/steps/reorder')) {
         if (reorderFails) return reorderFails
         const { step_ids } = body as { step_ids: string[] }
@@ -212,9 +214,9 @@ test('clicking a step opens the existing step form beside the canvas and saves t
   focusAndClick(trigger)
 
   const panel = await screen.findByRole('complementary', { name: 'Step 1' })
-  const subject = within(panel).getByLabelText('Subject')
-  expect(subject).toHaveValue('Intro')
-  fireEvent.change(subject, { target: { value: 'Intro v2' } })
+  const subject = await within(panel).findByRole('textbox', { name: 'Subject' })
+  expect(subject).toHaveTextContent('Intro')
+  replaceText(subject, 'Intro v2')
   submitForm(panel)
 
   await waitFor(() =>
@@ -239,6 +241,20 @@ test('Escape closes the editor panel and returns focus to the step that opened i
   expect(trigger).toHaveFocus()
 })
 
+test('Escape that closes the merge-field menu leaves the panel and its edits open', async () => {
+  const canvas = await renderCanvas()
+  focusAndClick(within(canvas).getByRole('button', { name: 'Edit step 1: Intro' }))
+  const panel = await screen.findByRole('complementary', { name: 'Step 1' })
+  const body = await within(panel).findByRole('textbox', { name: 'Body' })
+
+  typeInto(body, '{{')
+  await within(panel).findByRole('listbox', { name: 'Merge fields' })
+  pressKey(body, 'Escape')
+
+  expect(within(panel).queryByRole('listbox')).not.toBeInTheDocument()
+  expect(screen.getByRole('complementary', { name: 'Step 1' })).toBeInTheDocument()
+})
+
 // --- Add ------------------------------------------------------------------
 
 test('inserting on an edge mid-sequence creates the step, places it, and focuses it', async () => {
@@ -246,7 +262,7 @@ test('inserting on an edge mid-sequence creates the step, places it, and focuses
   focusAndClick(await within(canvas).findByRole('button', { name: 'Add a step after step 1' }))
 
   const panel = await screen.findByRole('complementary', { name: 'New step after step 1' })
-  fireEvent.change(within(panel).getByLabelText('Subject'), { target: { value: 'Inserted' } })
+  replaceText(await within(panel).findByRole('textbox', { name: 'Subject' }), 'Inserted')
   submitForm(panel)
 
   await waitFor(() => expect(reorderBodies().at(-1)).toEqual({ step_ids: ['s-1', 's-new', 's-2', 's-3'] }))
@@ -286,7 +302,7 @@ test('a failed placement says the step exists but landed at the end', async () =
   const canvas = await renderCanvas()
   fireEvent.click(await within(canvas).findByRole('button', { name: 'Add a step at the start' }))
   const panel = await screen.findByRole('complementary', { name: 'New first step' })
-  fireEvent.change(within(panel).getByLabelText('Subject'), { target: { value: 'Opener' } })
+  replaceText(await within(panel).findByRole('textbox', { name: 'Subject' }), 'Opener')
   submitForm(panel)
 
   const alert = await screen.findByRole('alert')
