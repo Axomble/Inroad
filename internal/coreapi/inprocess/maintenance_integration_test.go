@@ -195,7 +195,7 @@ func TestPurgeDeadLettersPurgesOnlyOutsideRetentionWindow(t *testing.T) {
 	// The default window (config.DefaultRetentionDeadLettersDays), which the
 	// retention sweep now passes in rather than the query hard-coding.
 	req := coreapi.RetentionRequest{OlderThan: 90 * 24 * time.Hour, Limit: 5000}
-	res, err := (client{q: q}).PurgeDeadLetters(ctx, req)
+	res, err := (client{pool: pool, q: q}).PurgeDeadLetters(ctx, req)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestPurgeDeadLettersPurgesOnlyOutsideRetentionWindow(t *testing.T) {
 
 	// Idempotent: the sweep runs daily, so "nothing left in window" is its steady
 	// state rather than an edge case.
-	if _, err := (client{q: q}).PurgeDeadLetters(ctx, req); err != nil {
+	if _, err := (client{pool: pool, q: q}).PurgeDeadLetters(ctx, req); err != nil {
 		t.Fatalf("second purge: %v", err)
 	}
 	if !exists(freshA) || !exists(freshB) {

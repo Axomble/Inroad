@@ -108,6 +108,15 @@ func (c *recordingCore) PurgeSends(context.Context, coreapi.RetentionRequest) (c
 func (c *recordingCore) PurgeDeadLetters(context.Context, coreapi.RetentionRequest) (coreapi.RetentionBatch, error) {
 	return coreapi.RetentionBatch{}, nil
 }
+func (c *recordingCore) LoadRetentionProgress(context.Context, string) (coreapi.RetentionProgress, error) {
+	return coreapi.RetentionProgress{}, nil
+}
+func (c *recordingCore) SaveRetentionProgress(context.Context, string, coreapi.RetentionCursor, bool) error {
+	return nil
+}
+func (c *recordingCore) TryRetentionSweepLock(context.Context) (func() error, bool, error) {
+	return func() error { return nil }, true, nil
+}
 
 // --- recipientesp.Core (resolved by type assertion in Register) ---
 

@@ -1,4 +1,4 @@
--- Reverse of the up file, in reverse order.
+-- Reverse of the up file.
 --
 -- Dropping tracking_event_rollups DESTROYS every rolled-up engagement count: a
 -- campaign's historical open/click numbers drop to whatever raw tracking_events
@@ -6,10 +6,6 @@
 -- rows they came from were deleted when they were rolled up. Run this only on a
 -- deployment whose retention sweep has never rolled anything up, or accept that
 -- loss knowingly.
-DROP INDEX IF EXISTS idx_inbox_threads_campaign_contact;
-DROP INDEX IF EXISTS idx_sends_created_at;
-DROP INDEX IF EXISTS idx_inbox_threads_last_message_at;
-DROP INDEX IF EXISTS idx_deliverability_events_received_at;
-DROP INDEX IF EXISTS idx_tracking_events_created_at;
+DROP TABLE IF EXISTS retention_cursors;
 DROP VIEW IF EXISTS tracking_engagement;
 DROP TABLE IF EXISTS tracking_event_rollups;

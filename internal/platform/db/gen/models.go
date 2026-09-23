@@ -898,6 +898,14 @@ type ReplyLabel struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+type RetentionCursor struct {
+	TableName      string             `json:"table_name"`
+	AfterAt        pgtype.Timestamptz `json:"after_at"`
+	AfterID        uuid.UUID          `json:"after_id"`
+	CycleStartedAt pgtype.Timestamptz `json:"cycle_started_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ScheduledJobRun struct {
 	ID           uuid.UUID          `json:"id"`
 	JobName      string             `json:"job_name"`

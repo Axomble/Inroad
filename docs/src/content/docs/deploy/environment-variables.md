@@ -757,7 +757,8 @@ number of **days**. `0` or blank disables that table's sweep. `0` never means
 | `INROAD_RETENTION_DEAD_LETTERS_DAYS` | Captured retry-exhausted tasks (`task_dead_letters`), every status | `90` | 7 |
 
 :::caution[The four recipient-data windows are off by default, and choosing them is not an engineering decision]
-Sends, inbox conversations, tracking events and deliverability events all record
+The first four windows cover five tables (`sends`, `inbox_threads`,
+`inbox_messages`, `tracking_events`, `deliverability_events`). All five record
 information about the **people your workspaces email**: addresses, message
 bodies, when they opened what, and from which IP address. How long you may keep
 that data, or must keep it, depends on your legal obligations, your contracts
@@ -775,6 +776,29 @@ with the reason. Each minimum sits just above the widest window over which a rat
 the product acts on reads that table, so a shorter window would change a
 live decision, not just remove history.
 
+### What these windows do not cover
+
+These tables also hold data about recipients, and **no retention window
+touches them**:
+
+| Table(s) | What it holds |
+| :--- | :--- |
+| `contacts`, `contact_emails` | The contact record itself |
+| `suppression` | The unsubscribe and bounce list |
+| `inbox_compose_drafts`, `inbox_pending_composes` | Emails a person wrote in the inbox composer and has not sent, or has queued |
+| `inbox_pending_replies` | Queued manual replies (removed only with their conversation) |
+| `crm_threads`, `crm_messages`, `crm_thread_participants`, `events` | The CRM's copy of conversations and its activity log |
+| `notes`, `tasks` | Free text operators write about contacts |
+| `agent_threads`, `agent_messages`, `agent_message_parts` | AI assistant chats, which may quote recipient data |
+| `sequence_enrollments`, `list_members` | Who was enrolled in what |
+| `webhook_deliveries` | Outbound webhook payloads (fixed 30-day purge) |
+| `idempotency_keys` | Replayable API responses (fixed 24-hour purge) |
+
+Contacts are deleted by deleting the contact, which also removes their sends,
+tracking and enrollments. Removing the suppression list would make an
+unsubscribed person mailable again. **Whether any other table on this list needs
+a window is also a Privacy/Legal decision.** This project doesn't make it.
+
 ### What "delete" means for each table
 
 - **Tracking events are rolled up, not lost.** Before a raw event is deleted it is
@@ -784,12 +808,15 @@ live decision, not just remove history.
   per-variant results, the campaign ranking, a contact's engagement and the bot
   classifier's own inputs are therefore **unchanged** when events age out. What's
   gone is the per-hit detail: user agent, client IP and click URL. That includes
-  the individual open/click entries in a CRM deal's activity feed.
+  the individual open/click entries in a CRM deal's activity feed. A future
+  re-run of bot classification over old events can't reach rolled-up rows,
+  because the evidence it would judge is exactly what the rollup dropped.
 - **A deliverability event is kept while a rate can still read it.** Two kinds
   are kept past the window:
-  - an event on a **running** campaign's send, received after that campaign's
-    guardrails were switched on. The circuit breaker can fall back to that whole
-    period when recent volume is low.
+  - an event on a **running or paused** campaign's send, received after that
+    campaign's guardrails were switched on. The circuit breaker can fall back to
+    that whole period when recent volume is low, and a paused campaign is one
+    resume away from being assessed on it.
   - each workspace's **newest complaint**. That row is what lets the dashboard
     tell "complaint feed live, zero complaints" apart from "not measured".
 
@@ -805,7 +832,8 @@ live decision, not just remove history.
   - queued or sending (the row *is* the send claim)
   - part of an **active** enrollment. The next step threads off it, and a reply is
     matched back through it.
-  - on a running campaign, sent after its guardrails were switched on
+  - on a **running or paused** campaign, sent after its guardrails were switched
+    on. A campaign that can still run keeps its sending history.
   - shown in an inbox conversation that still exists (the campaign side of the
     conversation is rebuilt from sends)
   - named by a deliverability event that is still kept
@@ -814,9 +842,21 @@ live decision, not just remove history.
   Deleting a send removes it from **every** report (sent counts, per-step
   results, the deliverability series), together with its tracking events and
   rollups, so open and click rates stay consistent. Unsubscribe links in old mail
-  keep working because they don't depend on the send. **Old open pixels and
-  tracked links do stop working:** a click on a link from a deleted send returns
-  404 instead of redirecting.
+  keep working because they don't depend on the send. What does stop working:
+  - **Tracked links and pixels in old mail.** A click on a link from a deleted
+    send returns 404 instead of redirecting, including a click that arrives while
+    its send is being deleted.
+  - **Matching late mail about it.** Inroad matches incoming mail to a campaign
+    through the send's Message-ID, so for a deleted send:
+    - a late **reply** isn't captured in the unified inbox, and doesn't stop or
+      mark any enrollment
+    - a late **bounce** doesn't suppress the address
+    - a mail-borne **abuse complaint** (ARF report) is declined rather than
+      ingested, so it neither counts toward a rate nor suppresses
+
+    Each is logged (`no_matching_send`). Complaints and bounces posted by a
+    provider *webhook* are still recorded against the workspace; they just lose
+    their campaign attribution.
 
 The windows interact. A send stays while an inbox conversation or deliverability
 event still holds it, so the sends window has no effect beyond those two unless
@@ -826,26 +866,80 @@ the send.
 
 ### How the sweep runs
 
-- **Hourly, in bounded batches.** Each batch is 5,000 rows, deleted in one
-  short transaction and resumed from the last row deleted. A run takes at most 40
-  batches per table and starts no new batch after 5 minutes. A table that still
-  has rows past its window logs `retention backlog not drained this run` at WARN
-  and continues next hour.
-- **Safe on several replicas.** Rows are claimed with `SKIP LOCKED` and ages are
-  measured on the database clock. Two overlapping runs take disjoint rows, and
-  a row a live send has locked is skipped rather than waited on.
+- **One sweeper at a time.** Each run takes a Postgres advisory lock. A replica
+  whose run overlaps another does nothing and succeeds. This also keeps the
+  tracking rollup and the sends purge from running at once, which would otherwise
+  deadlock each other.
+- **Bounded batches, resumed across runs.** A batch examines a fixed number of
+  rows past its cursor: 20,000 for sends, inbox conversations and deliverability
+  events, and 5,000 for tracking events and dead letters. It deletes the ones no
+  guard keeps. A row a guard keeps costs one scanned slot and is stepped over,
+  never re-read. Each table's position is saved in `retention_cursors`. The next
+  run resumes from there, and starts over from the oldest row when the table
+  drains, or after a day, so rows a guard stopped protecting are rechecked.
+- **Each batch is capped at one minute** (a statement timeout inside its own
+  transaction). A run takes at most 40 batches per table and starts no new batch
+  after 5 minutes. A table that still has rows past its window logs
+  `retention backlog not drained this run` at WARN and continues next hour.
+- **Ages use the database clock**, and rows the live path has locked (a send
+  being claimed) are skipped rather than waited on.
 - **Observable.** Each run logs one `retention applied` line per enabled table,
-  with rows, dependent rows and whether it drained. The counter
-  `inroad_retention_rows_deleted_total{table,scope}` counts deletions
+  with rows scanned, rows deleted, dependent rows and whether it drained. The
+  counter `inroad_retention_rows_deleted_total{table,scope}` counts deletions
   (`scope="dependent"` is an inbox thread's messages, or a send's tracking rows).
   The run is recorded as `retention` in the scheduled-job ledger. At startup the
   worker logs which tables are enabled (`msg=retention enabled_days=…`).
-- **Upgrading adds indexes.** The migration that ships this
-  (`20260923110315_recipient_data_retention`) builds age indexes on `sends`,
-  `tracking_events`, `deliverability_events` and `inbox_threads`. Building one
-  blocks writes to that table for as long as the build takes: seconds per million
-  rows. On a very large installation, create them `CONCURRENTLY` by hand first.
-  The migration file lists them, and it skips any that already exist.
+
+### Upgrading: the index migrations
+
+The release that ships retention adds these migrations:
+
+- `20260923110315`: the rollup table, the `tracking_engagement` view and the
+  cursor table. Instant, because all three are new and empty.
+- `20260923144743` to `20260923144748`: one age or lookup index each, built
+  `CREATE INDEX CONCURRENTLY`. Writes to `sends`, `tracking_events` and the other
+  tables continue during the build. Each file is a single statement, which is
+  what lets golang-migrate run it outside a transaction; don't add a second.
+- `20260923144749`: drops `idx_tracking_events_send` concurrently. A wider
+  existing index serves every lookup it served.
+- `20260923144750`: autovacuum settings for `sends`, `tracking_events` and
+  `deliverability_events` (vacuum after 1% plus 50,000 dead rows, instead of
+  20%). This does not block reads or writes.
+
+A concurrent build takes longer than a blocking one on a busy table. If one is
+interrupted (a crash, a cancelled deploy), Postgres leaves the index behind marked
+**INVALID** and golang-migrate marks the schema *dirty*. Because the file says
+`IF NOT EXISTS`, simply re-running would skip the broken index. Recover like
+this:
+
+```sql
+-- find it
+SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
+-- remove it
+DROP INDEX CONCURRENTLY IF EXISTS <index name>;
+-- clear the dirty flag, back to the version before the failed file
+UPDATE schema_migrations SET version = <previous version>, dirty = false;
+```
+
+Then run the migrations again.
+
+### Enabling a window for the first time
+
+The first run after you enable a window meets the whole backlog at once. For a
+deployment that has kept years of data:
+
+1. **Start wide and step down.** Enable, say, 730 days first. Once the WARN line
+   `retention backlog not drained` stops appearing for that table, lower the
+   window towards the target. Each step deletes a slice rather than everything.
+2. **Watch the first days.** Watch `inroad_retention_rows_deleted_total`, the
+   WARN line and replication lag, if you have replicas. At the default caps a
+   table deletes at most about 4.8 million rows a day, so the backlog drains
+   over days rather than in one lock-heavy hour.
+3. **Vacuum once it has drained.** Autovacuum is tuned to follow the sweep, but
+   after the first large drain run `VACUUM (ANALYZE)` on the tables you enabled.
+   This refreshes the planner's statistics. The disk space itself is reused
+   rather than returned to the OS; only `VACUUM FULL` or `pg_repack` shrinks the
+   files, and both need a maintenance window.
 
 ## Database connection budget
 

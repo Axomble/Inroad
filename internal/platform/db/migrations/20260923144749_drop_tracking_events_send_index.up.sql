@@ -1,0 +1,26 @@
+-- ONE STATEMENT, deliberately, and it must stay that way. golang-migrate's
+-- pgx/v5 driver sends a migration file as a single simple-protocol Exec; with
+-- one statement that is not a transaction block, so CREATE/DROP INDEX
+-- CONCURRENTLY is allowed and the table keeps taking writes while the index
+-- builds. A second statement in this file would turn it into an implicit
+-- transaction and the CONCURRENTLY would be refused
+-- (internal/platform/db/concurrentindex_test.go pins the one statement;
+-- retention_integration_test.go asserts the build and pg_index.indisvalid).
+--
+-- IF A BUILD FAILS (a crash, a cancelled deploy, a deadlock) Postgres leaves the
+-- index behind marked INVALID, golang-migrate marks the schema dirty, and IF NOT
+-- EXISTS would then skip the broken index forever. Recover with:
+--     DROP INDEX CONCURRENTLY IF EXISTS <name>;
+--     UPDATE schema_migrations SET version = <previous version>, dirty = false;
+-- and re-run the migrations. The deploy docs carry the same procedure.
+--
+-- Why: idx_tracking_events_send (send_id) is redundant with
+-- idx_tracking_send_recent (send_id, kind, is_machine, created_at DESC), which
+-- leads with the same column. Every reader that finds tracking rows by send —
+-- GetSendTrackingContext, CountRecentSendOpensFromSubnet, ContactTrackingStats'
+-- join, the CRM deal feed's join, the sandbox seeder's NOT EXISTS, PurgeSends'
+-- dependent delete and the sends FK's ON DELETE CASCADE — has send_id as its
+-- leading predicate, which the wider index serves. Dropping it pays for
+-- idx_tracking_events_created_at: tracking_events stays at the same number of
+-- indexes to maintain on every pixel hit.
+DROP INDEX CONCURRENTLY IF EXISTS idx_tracking_events_send;

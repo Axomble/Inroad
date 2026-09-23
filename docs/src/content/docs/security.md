@@ -995,33 +995,6 @@ write history that never happened.
     a 90-day purge runs in the maintenance sweep — comfortably beyond the widest
     30-day read window.
 
-82. **Recipient-data retention is off until an operator turns it on, and never
-    deletes what a live decision still reads.** `maintenance:retention`
-    (`internal/worker/maintenance/retention.go`, SQL in
-    `queries/retention.sql`) sweeps `sends`, `inbox_threads`/`inbox_messages`,
-    `tracking_events` and `deliverability_events` only when their
-    `INROAD_RETENTION_*_DAYS` is set. The default is disabled because the window is
-    a Privacy/Legal decision. Rules a change must keep:
-    - **Disabled is zero calls.** A zero window is skipped before any query runs,
-      and the in-process client refuses a non-positive window anyway. Otherwise
-      `now() - 0` would match every row.
-    - **Floors are enforced at worker startup** (`RetentionPolicy.Validate`). A
-      window that would empty a table a rate still reads stops the process.
-    - **Guards are SQL, beside their reasons.** A send that any of these still
-      uses is never deleted: an active enrollment, a running campaign's breaker
-      window, an existing inbox thread, a retained deliverability event, or a CRM
-      deal. Two deliverability events are never deleted: one inside a running
-      campaign's breaker window, and a workspace's newest complaint (it keeps
-      `complaint_feed` answering "measured").
-    - **Tracking events roll up exactly once.** The rollup is inserted from the
-      DELETE's own `RETURNING` in one statement, and every aggregate reads the
-      `tracking_engagement` view, so reporting does not change. The rollup keeps
-      no user agent, client IP or URL.
-    - **Cross-tenant by design, control plane only.** Every batch deletes across
-      workspaces by age, so `maintenance.Retainer` is deliberately absent from
-      `*remote.Client` (invariant 73). The capability census asserts it is
-      absent.
-
 56. **A receiver's authentication verdict is believed only from a header that
     receiver demonstrably wrote.** `warmup_observations` records the SPF/DKIM/DMARC
     results the receiving provider reached (`spf_result`, `dkim_result`,
@@ -2052,6 +2025,47 @@ write history that never happened.
     The fleet listener remains the boundary that matters. **Restrict it to the
     fleet network**, treat the token as equivalent to every mailbox credential
     in the installation, and rotate it on any suspicion.
+
+82. **Recipient-data retention is off until an operator turns it on, and never
+    deletes what a live decision still reads.** (Number tentative; to be
+    renumbered on merge.) `maintenance:retention`
+    (`internal/worker/maintenance/retention.go`, SQL in `queries/retention.sql`)
+    sweeps `sends`, `inbox_threads`/`inbox_messages`, `tracking_events` and
+    `deliverability_events` only when their `INROAD_RETENTION_*_DAYS` is set. The
+    default is disabled because the window is a Privacy/Legal decision. Rules a
+    change must keep:
+    - **Disabled is zero calls.** A zero window is skipped before any query, and
+      the in-process client refuses a non-positive window anyway. Otherwise
+      `now() - 0` would match every row.
+    - **Floors are enforced at worker startup** (`RetentionPolicy.Validate`). A
+      window that would empty a table a rate still reads stops the process.
+    - **Guards are SQL, beside their reasons.** A send is never deleted while any
+      of these still uses it: an active enrollment, a running *or paused*
+      campaign's breaker window, an existing inbox thread, a retained
+      deliverability event, or a CRM deal. Two deliverability events are never
+      deleted: one inside a running or paused campaign's breaker window, and a
+      workspace's newest complaint (it keeps `complaint_feed` saying "measured").
+      Paused counts as running because a resumed campaign is assessed on that
+      history at once.
+    - **Every reader of tracking events reads `tracking_engagement`** (raw plus
+      rolled up), never `tracking_events` directly. Otherwise it silently loses
+      everything older than the tracking window. The exceptions are an allowlist
+      with reasons, enforced by `internal/platform/db/trackingreaders_test.go`:
+      - the bot classifier's 10-minute burst rule
+      - the CRM deal activity feed, an event log that a rollup cannot preserve;
+        rolled-up events leave it
+      - the sandbox seeder
+      - retention itself
+    - **Tracking events roll up exactly once.** The rollup is inserted from the
+      DELETE's own `RETURNING`, in one statement. The rollup keeps no user agent,
+      client IP or URL.
+    - **Batches are bounded by rows scanned**, run in their own transaction with
+      a 60-second `statement_timeout`, and the run holds a single-sweeper advisory
+      lock. The lock is what keeps the rollup and the sends purge, which lock the
+      same rows in opposite orders, from running concurrently on two replicas.
+    - **Cross-tenant by design, control plane only.** Every batch deletes across
+      workspaces by age, so `maintenance.Retainer` is deliberately absent from
+      `*remote.Client` (invariant 73). The capability census asserts it is absent.
 
 ## Fleet operator read surface
 70. **The scheduled-job ledger never serves its error text.** `scheduled_job_runs`

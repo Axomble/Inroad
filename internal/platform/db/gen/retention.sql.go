@@ -12,19 +12,48 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getRetentionCursor = `-- name: GetRetentionCursor :one
+SELECT after_at, after_id, (cycle_started_at < now() - interval '24 hours')::boolean AS cycle_expired
+FROM retention_cursors
+WHERE table_name = $1
+`
+
+type GetRetentionCursorRow struct {
+	AfterAt      pgtype.Timestamptz `json:"after_at"`
+	AfterID      uuid.UUID          `json:"after_id"`
+	CycleExpired bool               `json:"cycle_expired"`
+}
+
+// Where a table's sweep got to. cycle_expired is computed on the database clock
+// so the "once a day, start over" rule does not depend on which worker asks.
+func (q *Queries) GetRetentionCursor(ctx context.Context, tableName string) (GetRetentionCursorRow, error) {
+	row := q.db.QueryRow(ctx, getRetentionCursor, tableName)
+	var i GetRetentionCursorRow
+	err := row.Scan(&i.AfterAt, &i.AfterID, &i.CycleExpired)
+	return i, err
+}
+
 const purgeDeliverabilityEvents = `-- name: PurgeDeliverabilityEvents :one
-WITH doomed AS (
+WITH scanned AS MATERIALIZED (
     SELECT d.id, d.received_at
     FROM deliverability_events d
     WHERE d.received_at < now() - make_interval(secs => $1::bigint)
       AND (d.received_at, d.id) > ($2::timestamptz, $3::uuid)
-      AND NOT EXISTS (
+    ORDER BY d.received_at, d.id
+    LIMIT $4::int
+),
+doomed AS (
+    SELECT d.id
+    FROM deliverability_events d
+    JOIN scanned c ON c.id = d.id
+    WHERE NOT EXISTS (
           SELECT 1
           FROM sends s
-          JOIN campaigns c ON c.id = s.campaign_id AND c.workspace_id = s.workspace_id
+          JOIN campaigns cam ON cam.id = s.campaign_id AND cam.workspace_id = s.workspace_id
           WHERE s.id = d.send_id AND s.workspace_id = d.workspace_id
-            AND c.status = 'running'
-            AND d.received_at >= c.guardrails_enabled_at
+            AND cam.status IN ('running', 'paused')
+            AND d.received_at >= cam.guardrails_enabled_at
+          OFFSET 0
       )
       AND NOT (
           d.kind = 'complaint'
@@ -32,24 +61,24 @@ WITH doomed AS (
               SELECT 1 FROM deliverability_events n
               WHERE n.workspace_id = d.workspace_id AND n.kind = 'complaint'
                 AND (n.received_at, n.id) > (d.received_at, d.id)
+              OFFSET 0
           )
       )
-    ORDER BY d.received_at, d.id
-    LIMIT $4::int
     FOR UPDATE OF d SKIP LOCKED
 ),
 deleted AS (
     DELETE FROM deliverability_events d
     USING doomed x
     WHERE d.id = x.id
-    RETURNING d.id, d.received_at
+    RETURNING 1
 ),
-last_row AS (
-    SELECT received_at, id FROM deleted ORDER BY received_at DESC, id DESC LIMIT 1
+last_scanned AS (
+    SELECT received_at, id FROM scanned ORDER BY received_at DESC, id DESC LIMIT 1
 )
-SELECT (SELECT count(*) FROM deleted)::bigint AS deleted_rows,
-       COALESCE((SELECT received_at FROM last_row), '0001-01-01T00:00:00Z'::timestamptz)::timestamptz AS last_at,
-       COALESCE((SELECT id FROM last_row), '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS last_id
+SELECT (SELECT count(*) FROM scanned)::bigint AS scanned_rows,
+       (SELECT count(*) FROM deleted)::bigint AS deleted_rows,
+       COALESCE((SELECT received_at FROM last_scanned), '0001-01-01T00:00:00Z'::timestamptz)::timestamptz AS last_at,
+       COALESCE((SELECT id FROM last_scanned), '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS last_id
 `
 
 type PurgeDeliverabilityEventsParams struct {
@@ -60,6 +89,7 @@ type PurgeDeliverabilityEventsParams struct {
 }
 
 type PurgeDeliverabilityEventsRow struct {
+	ScannedRows int64              `json:"scanned_rows"`
 	DeletedRows int64              `json:"deleted_rows"`
 	LastAt      pgtype.Timestamptz `json:"last_at"`
 	LastID      uuid.UUID          `json:"last_id"`
@@ -68,32 +98,34 @@ type PurgeDeliverabilityEventsRow struct {
 // Delete provider bounce/complaint events past the window, EXCEPT the two kinds
 // of row a rate still reads.
 //
-// (1) An event inside a running campaign's breaker window. The breaker's rolling
+// (1) An event inside a running OR PAUSED campaign's breaker window. The
 //
-//	window is 7 days, but when a campaign has too few recent sends it falls
-//	back to "everything since supervision began" — campaigns.
-//	guardrails_enabled_at (internal/app/deliverability/service.go
-//	assessCampaign). That fallback is unbounded in age, so no fixed floor on
-//	the window can protect it; this guard does. It keeps a superset of what the
-//	breaker can read: the breaker's floor is the LATER of enabled_at and the
-//	last operator override, so anything it reads is on or after enabled_at.
-//	The warmup health rate (30 days) and the workspace rollup (7 days) are
-//	fixed windows, protected by the 90-day floor maintenance.RetentionPolicy
-//	enforces on this table.
+//	breaker's rolling window is 7 days, but when a campaign has too few recent
+//	sends it falls back to "everything since supervision began" —
+//	campaigns.guardrails_enabled_at (internal/app/deliverability/service.go
+//	assessCampaign). That fallback is unbounded in age, so no fixed floor can
+//	protect it; this guard does. Paused counts as running because a paused
+//	campaign is one resume away from being assessed on exactly this history:
+//	its stopped-as-bounced enrollments survive (they are not in any sweep), so
+//	deleting the events and sends beside them while it was paused would
+//	leave a numerator with a shrunken denominator and trip the breaker the
+//	moment it resumed. The guard keeps a superset of what the breaker reads —
+//	its floor is the LATER of enabled_at and the last operator override.
+//	Warmup health (30 days) and the workspace rollup (7 days) are fixed
+//	windows, protected by the 90-day floor RetentionPolicy enforces.
 //
 // (2) The workspace's newest complaint. GetCampaignDeliverabilityCounts and
 //
 //	GetWorkspaceDeliverabilityCounts report complaint_feed = "has a complaint
-//	feed EVER reported here", which is what separates measured-and-clean from
-//	NOT MEASURED. Deleting a workspace's last complaint would flip a live feed
-//	to "not measured" — a data-loss bug that reads as a configuration change.
-//	Keeping one row preserves that answer; (received_at, id) makes "newest"
-//	total, so two overlapping sweeps agree on which row it is.
+//	feed EVER reported here", which separates measured-and-clean from NOT
+//	MEASURED. Deleting a workspace's last complaint would flip a live feed to
+//	"not measured". Keeping one row preserves that answer; (received_at, id)
+//	makes "newest" total.
 //
 // The dedup key (workspace_id, provider_event_id) goes with the row: a provider
-// replaying an event after it was deleted would be ingested again, counted at
-// its NEW received_at. Provider retry windows are hours to days; the 90-day floor
-// is what makes that unreachable in practice.
+// replaying an event after it was deleted would be ingested again, at its NEW
+// received_at. Provider retry windows are hours to days; the 90-day floor makes
+// that unreachable in practice.
 func (q *Queries) PurgeDeliverabilityEvents(ctx context.Context, arg PurgeDeliverabilityEventsParams) (PurgeDeliverabilityEventsRow, error) {
 	row := q.db.QueryRow(ctx, purgeDeliverabilityEvents,
 		arg.OlderThanSeconds,
@@ -102,38 +134,52 @@ func (q *Queries) PurgeDeliverabilityEvents(ctx context.Context, arg PurgeDelive
 		arg.BatchLimit,
 	)
 	var i PurgeDeliverabilityEventsRow
-	err := row.Scan(&i.DeletedRows, &i.LastAt, &i.LastID)
+	err := row.Scan(
+		&i.ScannedRows,
+		&i.DeletedRows,
+		&i.LastAt,
+		&i.LastID,
+	)
 	return i, err
 }
 
 const purgeInboxThreads = `-- name: PurgeInboxThreads :one
-WITH doomed AS (
+WITH scanned AS MATERIALIZED (
     SELECT t.id, t.last_message_at
     FROM inbox_threads t
     WHERE t.last_message_at < now() - make_interval(secs => $1::bigint)
       AND (t.last_message_at, t.id) > ($2::timestamptz, $3::uuid)
-      AND NOT EXISTS (
+    ORDER BY t.last_message_at, t.id
+    LIMIT $4::int
+),
+doomed AS (
+    SELECT t.id
+    FROM inbox_threads t
+    JOIN scanned c ON c.id = t.id
+    WHERE NOT EXISTS (
           SELECT 1 FROM inbox_pending_replies p
           WHERE p.thread_id = t.id AND p.workspace_id = t.workspace_id
             AND p.status IN ('scheduled', 'sending')
+          OFFSET 0
       )
       AND NOT EXISTS (
           SELECT 1 FROM inbox_thread_snoozes z
           WHERE z.thread_id = t.id AND z.workspace_id = t.workspace_id
             AND z.snooze_until > now()
+          OFFSET 0
       )
       AND NOT EXISTS (
           SELECT 1 FROM sequence_enrollments e
           WHERE e.campaign_id = t.campaign_id AND e.contact_id = t.contact_id
             AND e.workspace_id = t.workspace_id AND e.status = 'active'
+          OFFSET 0
       )
       AND NOT EXISTS (
           SELECT 1 FROM inbox_messages m
           WHERE m.thread_id = t.id AND m.workspace_id = t.workspace_id
             AND m.occurred_at >= now() - make_interval(secs => $1::bigint)
+          OFFSET 0
       )
-    ORDER BY t.last_message_at, t.id
-    LIMIT $4::int
     FOR UPDATE OF t SKIP LOCKED
 ),
 deleted_messages AS (
@@ -146,15 +192,16 @@ deleted_threads AS (
     DELETE FROM inbox_threads t
     USING doomed d
     WHERE t.id = d.id
-    RETURNING t.id, t.last_message_at
+    RETURNING 1
 ),
-last_row AS (
-    SELECT last_message_at, id FROM deleted_threads ORDER BY last_message_at DESC, id DESC LIMIT 1
+last_scanned AS (
+    SELECT last_message_at, id FROM scanned ORDER BY last_message_at DESC, id DESC LIMIT 1
 )
-SELECT (SELECT count(*) FROM deleted_threads)::bigint AS deleted_rows,
+SELECT (SELECT count(*) FROM scanned)::bigint AS scanned_rows,
+       (SELECT count(*) FROM deleted_threads)::bigint AS deleted_rows,
        (SELECT count(*) FROM deleted_messages)::bigint AS deleted_messages,
-       COALESCE((SELECT last_message_at FROM last_row), '0001-01-01T00:00:00Z'::timestamptz)::timestamptz AS last_at,
-       COALESCE((SELECT id FROM last_row), '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS last_id
+       COALESCE((SELECT last_message_at FROM last_scanned), '0001-01-01T00:00:00Z'::timestamptz)::timestamptz AS last_at,
+       COALESCE((SELECT id FROM last_scanned), '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS last_id
 `
 
 type PurgeInboxThreadsParams struct {
@@ -165,6 +212,7 @@ type PurgeInboxThreadsParams struct {
 }
 
 type PurgeInboxThreadsRow struct {
+	ScannedRows     int64              `json:"scanned_rows"`
 	DeletedRows     int64              `json:"deleted_rows"`
 	DeletedMessages int64              `json:"deleted_messages"`
 	LastAt          pgtype.Timestamptz `json:"last_at"`
@@ -177,7 +225,7 @@ type PurgeInboxThreadsRow struct {
 // The unit is the THREAD, not the message. Deleting old messages one by one
 // would leave a conversation with its opening missing and its later replies
 // intact, which an operator would read as corruption, and the thread's
-// synthesized outbound leg (from sends) would then no longer line up with the
+// synthesized outbound leg (from sends) would no longer line up with the
 // replies to it. A thread is eligible when its last_message_at — bumped by every
 // inbound reply and manual send — is past the window, i.e. the whole
 // conversation is.
@@ -191,12 +239,13 @@ type PurgeInboxThreadsRow struct {
 //   - a thread with any message inside the window, belt and braces for a writer
 //     that did not bump last_message_at.
 //
-// Labels, snoozes and finished pending replies cascade with the thread.
+// Labels, snoozes and finished pending replies cascade with the thread (the
+// pending-reply cascade seeks idx_inbox_pending_replies_thread).
 //
 // The messages are deleted explicitly, in their own CTE, rather than left to the
 // thread FK's ON DELETE CASCADE, so the count is real. The cascade then finds
-// nothing left to do. The bound is on THREADS; a thread's messages come with it
-// whatever their number, which is what keeps a conversation whole.
+// nothing left to do. A thread's messages come with it whatever their number,
+// which is what keeps a conversation whole.
 func (q *Queries) PurgeInboxThreads(ctx context.Context, arg PurgeInboxThreadsParams) (PurgeInboxThreadsRow, error) {
 	row := q.db.QueryRow(ctx, purgeInboxThreads,
 		arg.OlderThanSeconds,
@@ -206,6 +255,7 @@ func (q *Queries) PurgeInboxThreads(ctx context.Context, arg PurgeInboxThreadsPa
 	)
 	var i PurgeInboxThreadsRow
 	err := row.Scan(
+		&i.ScannedRows,
 		&i.DeletedRows,
 		&i.DeletedMessages,
 		&i.LastAt,
@@ -215,40 +265,50 @@ func (q *Queries) PurgeInboxThreads(ctx context.Context, arg PurgeInboxThreadsPa
 }
 
 const purgeSends = `-- name: PurgeSends :one
-WITH doomed AS (
+WITH scanned AS MATERIALIZED (
     SELECT s.id, s.created_at
     FROM sends s
     WHERE s.created_at < now() - make_interval(secs => $1::bigint)
-      AND (s.sent_at IS NULL OR s.sent_at < now() - make_interval(secs => $1::bigint))
-      AND s.status IN ('sent', 'failed', 'skipped')
       AND (s.created_at, s.id) > ($2::timestamptz, $3::uuid)
+    ORDER BY s.created_at, s.id
+    LIMIT $4::int
+),
+doomed AS (
+    SELECT s.id
+    FROM sends s
+    JOIN scanned c ON c.id = s.id
+    WHERE (s.sent_at IS NULL OR s.sent_at < now() - make_interval(secs => $1::bigint))
+      AND s.status IN ('sent', 'failed', 'skipped')
       AND NOT EXISTS (
           SELECT 1 FROM sequence_enrollments e
           WHERE e.campaign_id = s.campaign_id AND e.contact_id = s.contact_id
             AND e.workspace_id = s.workspace_id AND e.status = 'active'
+          OFFSET 0
       )
       AND NOT EXISTS (
-          SELECT 1 FROM campaigns c
-          WHERE c.id = s.campaign_id AND c.workspace_id = s.workspace_id
-            AND c.status = 'running'
-            AND s.sent_at >= c.guardrails_enabled_at
+          SELECT 1 FROM campaigns cam
+          WHERE cam.id = s.campaign_id AND cam.workspace_id = s.workspace_id
+            AND cam.status IN ('running', 'paused')
+            AND s.sent_at >= cam.guardrails_enabled_at
+          OFFSET 0
       )
       AND NOT EXISTS (
           SELECT 1 FROM inbox_threads t
           WHERE t.workspace_id = s.workspace_id AND t.campaign_id = s.campaign_id
             AND t.contact_id = s.contact_id
+          OFFSET 0
       )
       AND NOT EXISTS (
           SELECT 1 FROM deliverability_events d
           WHERE d.send_id = s.id AND d.workspace_id = s.workspace_id
+          OFFSET 0
       )
       AND NOT EXISTS (
           SELECT 1 FROM deals dl
           WHERE dl.workspace_id = s.workspace_id AND dl.primary_contact_id = s.contact_id
             AND dl.source_campaign_id = s.campaign_id
+          OFFSET 0
       )
-    ORDER BY s.created_at, s.id
-    LIMIT $4::int
     FOR UPDATE OF s SKIP LOCKED
 ),
 deleted_tracking AS (
@@ -267,15 +327,16 @@ deleted_sends AS (
     DELETE FROM sends s
     USING doomed d
     WHERE s.id = d.id
-    RETURNING s.id, s.created_at
+    RETURNING 1
 ),
-last_row AS (
-    SELECT created_at, id FROM deleted_sends ORDER BY created_at DESC, id DESC LIMIT 1
+last_scanned AS (
+    SELECT created_at, id FROM scanned ORDER BY created_at DESC, id DESC LIMIT 1
 )
-SELECT (SELECT count(*) FROM deleted_sends)::bigint AS deleted_rows,
+SELECT (SELECT count(*) FROM scanned)::bigint AS scanned_rows,
+       (SELECT count(*) FROM deleted_sends)::bigint AS deleted_rows,
        ((SELECT count(*) FROM deleted_tracking) + (SELECT count(*) FROM deleted_rollups))::bigint AS deleted_tracking,
-       COALESCE((SELECT created_at FROM last_row), '0001-01-01T00:00:00Z'::timestamptz)::timestamptz AS last_at,
-       COALESCE((SELECT id FROM last_row), '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS last_id
+       COALESCE((SELECT created_at FROM last_scanned), '0001-01-01T00:00:00Z'::timestamptz)::timestamptz AS last_at,
+       COALESCE((SELECT id FROM last_scanned), '00000000-0000-0000-0000-000000000000'::uuid)::uuid AS last_id
 `
 
 type PurgeSendsParams struct {
@@ -286,6 +347,7 @@ type PurgeSendsParams struct {
 }
 
 type PurgeSendsRow struct {
+	ScannedRows     int64              `json:"scanned_rows"`
 	DeletedRows     int64              `json:"deleted_rows"`
 	DeletedTracking int64              `json:"deleted_tracking"`
 	LastAt          pgtype.Timestamptz `json:"last_at"`
@@ -296,10 +358,10 @@ type PurgeSendsRow struct {
 //
 // Deleting a send removes it from EVERY report — sent counts, per-step and
 // per-variant results, outcome attribution, the deliverability series — and
-// with it its tracking events and rollups (both FK ON DELETE CASCADE), so a
-// rate's numerator and denominator shrink together rather than the rate
-// drifting. That is what "retention" means for this table, and it is why it is
-// off unless an operator turns it on.
+// with it its tracking events and rollups, so a rate's numerator and
+// denominator shrink together rather than the rate drifting. That is what
+// "retention" means for this table, and it is why it is off unless an operator
+// turns it on.
 //
 // Kept regardless of age, each guard naming the reader it protects:
 //   - status queued/sending — work in flight; the row IS the send claim
@@ -308,30 +370,30 @@ type PurgeSendsRow struct {
 //     its next step off earlier sends (LatestSentForContact: In-Reply-To and
 //     References), branches on their engagement, and stops on a reply matched
 //     through sends.message_id (GetSendByMessageID);
-//   - a running campaign's send on or after guardrails_enabled_at — the
-//     breaker's fallback denominator (GetCampaignDeliverabilityCounts; see
-//     PurgeDeliverabilityEvents for the window);
+//   - a RUNNING OR PAUSED campaign's send on or after guardrails_enabled_at —
+//     the breaker's fallback denominator (see PurgeDeliverabilityEvents for why
+//     paused counts): a campaign that can still run keeps its history;
 //   - an inbox thread for (campaign, contact) — the thread's outbound leg is
 //     synthesized from these rows (ListSentOutboundStepsForThread) and its
 //     "who spoke last" rule reads them (inbox_thread_awaiting_reply). The thread
 //     has its own retention; once it is gone the send is free;
 //   - a deliverability event naming it — the FK is ON DELETE SET NULL, which
 //     would silently strip the event of its campaign and mailbox attribution
-//     while the event itself is still retained. Events have their own retention;
+//     while the event itself is still retained;
 //   - a CRM deal sourced from (campaign, contact) — the deal's activity feed
-//     lists the campaign's sent messages (crm integration_store ListEvents), and
-//     a deal is a long-lived record an operator expects to keep its history.
+//     lists the campaign's sent messages (crm integration_store ListEvents).
 //
 // NOT a guard, deliberately: suppression. Nothing in suppression references a
-// send, and an unsubscribe link carries (workspace, email) in its token, not a
-// send id, so old unsubscribe links keep working after their send is deleted.
-// What does stop working is an old OPEN PIXEL or CLICK LINK: the tracking
-// endpoint resolves the send from the token and returns 404 when it is gone
-// (internal/app/tracking) — a click on a years-old email no longer redirects.
-// The window is what bounds how old "old" is; the deploy docs say so.
+// send, and an unsubscribe token carries (workspace, email), not a send id, so
+// old unsubscribe links keep working. What does stop working is an old OPEN
+// PIXEL or CLICK LINK — the tracking endpoint returns 404 for a send that is
+// gone — and matching a late reply or DSN back to the campaign, which goes
+// through sends.message_id.
 //
 // The tracking events and rollups are deleted explicitly, before the FK cascade
-// would, so the count reported is real.
+// would, so the count reported is real. Those deletes take no SKIP LOCKED: a
+// concurrent RollupTrackingEvents holding those rows is excluded by the sweep's
+// single-instance lock, not by this statement.
 func (q *Queries) PurgeSends(ctx context.Context, arg PurgeSendsParams) (PurgeSendsRow, error) {
 	row := q.db.QueryRow(ctx, purgeSends,
 		arg.OlderThanSeconds,
@@ -341,12 +403,24 @@ func (q *Queries) PurgeSends(ctx context.Context, arg PurgeSendsParams) (PurgeSe
 	)
 	var i PurgeSendsRow
 	err := row.Scan(
+		&i.ScannedRows,
 		&i.DeletedRows,
 		&i.DeletedTracking,
 		&i.LastAt,
 		&i.LastID,
 	)
 	return i, err
+}
+
+const releaseRetentionSweepLock = `-- name: ReleaseRetentionSweepLock :one
+SELECT pg_advisory_unlock(hashtext('inroad:maintenance:retention'))::boolean AS released
+`
+
+func (q *Queries) ReleaseRetentionSweepLock(ctx context.Context) (bool, error) {
+	row := q.db.QueryRow(ctx, releaseRetentionSweepLock)
+	var released bool
+	err := row.Scan(&released)
+	return released, err
 }
 
 const rollupTrackingEvents = `-- name: RollupTrackingEvents :one
@@ -403,40 +477,53 @@ type RollupTrackingEventsRow struct {
 }
 
 // Configurable retention for the recipient-identifying tables (migration
-// 20260923110315). Each query is ONE bounded batch; the loop, the per-run budget
-// and the enable/disable decision live in internal/worker/maintenance/retention.go.
+// 20260923110315). Each query is ONE bounded batch; the loop, the per-run budget,
+// the persisted cursor and the enable/disable decision live in
+// internal/worker/maintenance/retention.go.
 //
 // Shared shape, and why:
 //
 //   - The window arrives as seconds and the cutoff is computed from the
-//     DATABASE's now(), never from a worker clock — two replicas with skewed
-//     clocks must agree on what "older than 400 days" means.
-//   - A batch is `SELECT ... ORDER BY <age>, id LIMIT n FOR UPDATE SKIP LOCKED`
-//     feeding a DELETE, as one statement: one short transaction per batch, so no
-//     lock is held across batches and none is held while the worker sleeps.
-//   - SKIP LOCKED is what makes this safe on several replicas at once. asynq
-//     elects no scheduler leader, so two sweeps can overlap; each takes a
-//     disjoint set of rows instead of queueing behind the other, and a row the
-//     live path has locked (a send mid-claim) is skipped rather than waited on.
-//   - The batch resumes strictly after (after_at, after_id), the last row the
-//     previous batch deleted. The zero cursor (year 1, the nil UUID) is before
-//     every row. See the migration for why each age index carries id.
+//     DATABASE's now(), never from a worker clock — replicas with skewed clocks
+//     must agree on what "older than 400 days" means.
+//   - A batch is bounded by the rows it SCANS, not the rows it deletes. The
+//     guarded tables first take the next `batch_limit` rows past the cursor in
+//     (age, id) order — an index range scan of fixed length — and only then apply
+//     the guards to those candidates. The cursor returned is the last row
+//     SCANNED, kept or not, so a run never re-reads a guard-kept row, and a batch
+//     whose candidates are all kept still costs one bounded scan instead of
+//     walking every kept row in the table looking for a deletable one. Bounding
+//     deletes alone was the earlier shape, and on a table whose oldest million
+//     rows are all kept it made a single statement read all of them.
+//   - Each guard is a NOT EXISTS ... OFFSET 0. The OFFSET 0 is load-bearing: it
+//     stops the planner pulling the sublink up into an anti-join, which it would
+//     otherwise happily do as a HASH anti-join over the entire guard table (every
+//     inbox thread, every enrollment) once per batch. As a SubPlan each guard is
+//     one index probe per candidate, which is bounded by the batch size.
+//   - Candidates are locked FOR UPDATE SKIP LOCKED, so a row the live path holds
+//     (a send mid-claim) is skipped rather than waited on. The sweep itself is
+//     single-instance across replicas (TryRetentionSweepLock).
+//   - The zero cursor (year 1, the nil UUID) is before every row.
 //   - Global (no workspace pin), for the same reason as every purge in
 //     maintenance.sql: retention is deployment maintenance, not a tenant read.
 //     Each query deletes by age and guard alone and returns only counts and a
 //     cursor, so it can neither surface nor cross tenant data. Every join a
 //     guard makes is pinned on workspace_id on both sides.
 //
+// The caller runs each of these inside a transaction with SET LOCAL
+// statement_timeout (inprocess/retention.go), so no batch can outlive its
+// budget however the plan turns out.
 // Fold raw tracking events past the window into tracking_event_rollups, then
 // they are gone. See the migration for what the rollup keeps and what it drops.
 //
 // The rollup is fed from the DELETE's own RETURNING, in the same statement,
 // which is what makes it exactly-once: a row is counted if and only if THIS
-// statement deleted it. Two overlapping sweeps cannot both count a row, because
-// SKIP LOCKED hands it to one of them; a sweep that fails mid-statement rolls
-// back its delete and its increment together. Reading the rows first and
-// deleting them second, in two statements, would double-count on any retry
-// between the two.
+// statement deleted it. A failed statement rolls back its delete and its
+// increment together. Reading the rows first and deleting them second, in two
+// statements, would double-count on any retry between the two.
+//
+// Scanned and deleted are the same rows here — there is no guard — so the
+// LIMIT bounds both.
 //
 // Grouped by (send_id, kind, is_machine) — the conflict key — rather than by
 // every carried column, because an INSERT whose SELECT produces two rows with
@@ -459,4 +546,54 @@ func (q *Queries) RollupTrackingEvents(ctx context.Context, arg RollupTrackingEv
 		&i.LastID,
 	)
 	return i, err
+}
+
+const saveRetentionCursor = `-- name: SaveRetentionCursor :exec
+INSERT INTO retention_cursors (table_name, after_at, after_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (table_name) DO UPDATE
+SET after_at         = EXCLUDED.after_at,
+    after_id         = EXCLUDED.after_id,
+    cycle_started_at = CASE WHEN $4::boolean THEN now() ELSE retention_cursors.cycle_started_at END,
+    updated_at       = now()
+`
+
+type SaveRetentionCursorParams struct {
+	TableName string             `json:"table_name"`
+	AfterAt   pgtype.Timestamptz `json:"after_at"`
+	AfterID   uuid.UUID          `json:"after_id"`
+	NewCycle  bool               `json:"new_cycle"`
+}
+
+// Record a table's position. new_cycle restarts the day's clock: the sweep sets
+// it when it starts over from the oldest row (the table drained, or the cycle
+// expired), so "a row a guard stopped protecting is revisited within a day"
+// holds however large the backlog.
+func (q *Queries) SaveRetentionCursor(ctx context.Context, arg SaveRetentionCursorParams) error {
+	_, err := q.db.Exec(ctx, saveRetentionCursor,
+		arg.TableName,
+		arg.AfterAt,
+		arg.AfterID,
+		arg.NewCycle,
+	)
+	return err
+}
+
+const tryRetentionSweepLock = `-- name: TryRetentionSweepLock :one
+SELECT pg_try_advisory_lock(hashtext('inroad:maintenance:retention'))::boolean AS acquired
+`
+
+// The single-sweeper lock. Session-level, taken on a connection the sweep holds
+// for its whole run, so exactly one retention run proceeds deployment-wide
+// however many replicas run the scheduler. Two concurrent runs were safe row by
+// row (SKIP LOCKED) but not table by table: PurgeSends deletes tracking rows
+// that a concurrent RollupTrackingEvents holds, while the rollup's insert needs
+// a KEY SHARE on the very send PurgeSends has locked — a deadlock Postgres would
+// resolve by aborting one of them every time they met. hashtext() turns the
+// name into the lock key so it is greppable rather than a magic number.
+func (q *Queries) TryRetentionSweepLock(ctx context.Context) (bool, error) {
+	row := q.db.QueryRow(ctx, tryRetentionSweepLock)
+	var acquired bool
+	err := row.Scan(&acquired)
+	return acquired, err
 }

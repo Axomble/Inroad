@@ -12,11 +12,13 @@ package tracking
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -43,14 +45,27 @@ type Event struct {
 	ClientIP netip.Addr
 }
 
+// ErrSendGone reports that the send a hit names was deleted between ResolveSend
+// and RecordEvent — the retention sweep (maintenance:retention) deleting it, or
+// its campaign or contact being deleted, in the moment between the two
+// statements. It is the same outcome as ResolveSend finding nothing, reached one
+// statement later, and callers treat it exactly like that: record nothing, and
+// answer the way an unknown send is answered. It is not an error worth a log
+// line; it is the documented behaviour of a link from a deleted send.
+var ErrSendGone = errors.New("tracking: the send no longer exists")
+
+// foreignKeyViolation is Postgres's SQLSTATE for an insert whose parent row is
+// gone — here, tracking_events' tenant FKs to sends and campaigns.
+const foreignKeyViolation = "23503"
+
 // Store is the repository interface this domain depends on. It is defined
 // here (by the consumer), not by the persistence layer, so the service can
 // be unit-tested against a fake without a database.
 type Store interface {
 	// RecordEvent inserts a tracking_events row. WorkspaceID and CampaignID
 	// must already be resolved server-side (via ResolveSend) -- callers
-	// must never pass values sourced from the token or the request, since
-	// send_id has no FK and is the only integrity boundary here.
+	// must never pass values sourced from the token or the request. A send
+	// deleted since it was resolved is reported as ErrSendGone.
 	RecordEvent(ctx context.Context, ev Event) error
 	// ResolveSend maps a sendID to the workspace/campaign that own it and the
 	// time it was sent, looked up from the sends row itself. ok is false if no
@@ -102,6 +117,10 @@ func (s *PgStore) RecordEvent(ctx context.Context, ev Event) error {
 		params.ClientIp = &addr
 	}
 	if err := s.q.InsertTrackingEvent(ctx, params); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation {
+			return ErrSendGone
+		}
 		return fmt.Errorf("insert tracking event: %w", err)
 	}
 	return nil

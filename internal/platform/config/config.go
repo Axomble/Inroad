@@ -221,8 +221,9 @@ type Config struct {
 	// Retention windows for the maintenance:retention sweep, in whole DAYS. Zero
 	// disables that table's sweep; it never means "keep nothing".
 	//
-	// The four recipient-identifying tables (sends, inbox threads, tracking
-	// events, deliverability events) default to 0 — DISABLED — and that default
+	// The four recipient-data windows (sends; inbox threads with their
+	// messages; tracking events; deliverability events) default to 0 —
+	// DISABLED — and that default
 	// is a decision, not an omission: how long to keep data about the people a
 	// workspace emails is a Privacy/Legal call for each deployment, and a code
 	// default would be this project making it for them. Dead letters default to

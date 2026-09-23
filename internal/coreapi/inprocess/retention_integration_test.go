@@ -66,7 +66,7 @@ func newRetentionFixture(t *testing.T) *retentionFixture {
 			t.Errorf("cleanup workspaces: %v", err)
 		}
 	})
-	return &retentionFixture{pool: pool, q: q, c: client{q: q}, ws: fx.ws, campaignID: fx.campaignID, mailboxID: fx.mailboxID, listID: listID}
+	return &retentionFixture{pool: pool, q: q, c: client{pool: pool, q: q}, ws: fx.ws, campaignID: fx.campaignID, mailboxID: fx.mailboxID, listID: listID}
 }
 
 func (f *retentionFixture) exec(t *testing.T, sql string, args ...any) {
@@ -198,7 +198,7 @@ func drain(t *testing.T, fn batchFn, window time.Duration, limit int32) coreapi.
 		total.Deleted += res.Deleted
 		total.Dependents += res.Dependents
 		total.RolledUp += res.RolledUp
-		if res.Deleted < int64(limit) {
+		if res.Scanned < int64(limit) {
 			return total
 		}
 		cursor = res.Next
@@ -647,11 +647,12 @@ func TestPurgeSendsDeletesOnlySendsNothingLiveDependsOn(t *testing.T) {
 	}
 }
 
-// The sends sweep keeps a send a guard names however many batches it takes, and
-// the keyset walks PAST it rather than stopping: ~8-year-old rows so the counts
-// are exact. Five rows, the second one guarded, limit 2: the batches delete 2
-// and 2 and then find nothing — the guarded row is never counted and never
-// blocks the rows behind it.
+// Batches are bounded by rows SCANNED, and the cursor moves past a kept row
+// rather than stopping at it: ~8-year-old rows so the counts are exact. Five
+// rows, the second one guarded, limit 2: batch one scans rows 0-1 and deletes
+// only row 0, batch two scans and deletes 2-3, batch three scans the last row
+// and is short — drained. A kept row costs one scanned slot, never a stall, and
+// the batch after it resumes BEHIND it instead of re-reading it.
 func TestPurgeSendsKeysetWalksPastGuardedRows(t *testing.T) {
 	f := newRetentionFixture(t)
 	window := 3000 * retentionDay
@@ -666,20 +667,20 @@ func TestPurgeSendsKeysetWalksPastGuardedRows(t *testing.T) {
 
 	ctx := context.Background()
 	var cursor coreapi.RetentionCursor
-	var counts []int64
+	var scanned, deleted []int64
 	for range 5 {
 		res, err := f.c.PurgeSends(ctx, coreapi.RetentionRequest{OlderThan: window, Limit: 2, After: cursor})
 		if err != nil {
 			t.Fatalf("batch: %v", err)
 		}
-		counts = append(counts, res.Deleted)
-		if res.Deleted < 2 {
+		scanned, deleted = append(scanned, res.Scanned), append(deleted, res.Deleted)
+		if res.Scanned < 2 {
 			break
 		}
 		cursor = res.Next
 	}
-	if !reflect.DeepEqual(counts, []int64{2, 2, 0}) {
-		t.Fatalf("batch sizes = %v, want [2 2 0]", counts)
+	if !reflect.DeepEqual(scanned, []int64{2, 2, 1}) || !reflect.DeepEqual(deleted, []int64{1, 2, 1}) {
+		t.Fatalf("batches scanned %v deleted %v, want scanned [2 2 1] deleted [1 2 1]", scanned, deleted)
 	}
 	for i, id := range ids {
 		if got, want := f.exists(t, "sends", id), i == 1; got != want {
@@ -729,6 +730,140 @@ func TestRetentionHandlerDisabledIsANoOpAndEnabledChainsTables(t *testing.T) {
 	for table, id := range map[string]uuid.UUID{"sends": s, "deliverability_events": ev, "inbox_threads": th, "task_dead_letters": dl} {
 		if f.exists(t, table, id) {
 			t.Errorf("an enabled policy left the %s row in place", table)
+		}
+	}
+}
+
+// --- review follow-ups --------------------------------------------------------
+
+// A PAUSED campaign keeps its breaker history exactly as a running one does. Its
+// stopped-as-bounced enrollments survive every sweep, so if its sends and events
+// were pruned while it was paused, the moment it resumed the breaker would divide
+// a surviving bounce numerator by a shrunken delivered denominator and pause it
+// again. The assertion is on the breaker's own inputs
+// (GetCampaignDeliverabilityCounts over the fallback window): identical before
+// and after a purge while paused, and so after the resume.
+func TestPausedCampaignKeepsItsBreakerHistoryThroughRetention(t *testing.T) {
+	f := newRetentionFixture(t)
+	window := 400 * retentionDay
+	ctx := context.Background()
+	campaign := f.campaign(t)
+	f.exec(t, `UPDATE campaigns SET status = 'paused', guardrails_enabled_at = now() - interval '500 days' WHERE id = $1`, campaign)
+
+	var sends []uuid.UUID
+	for range 20 {
+		sends = append(sends, f.send(t, campaign, f.contact(t), 410, "sent"))
+	}
+	for _, s := range sends[:3] {
+		f.deliverabilityEvent(t, "bounce", &s, 405)
+	}
+	since := pgtype.Timestamptz{Time: time.Now().Add(-500 * retentionDay), Valid: true}
+	counts := func() gen.GetCampaignDeliverabilityCountsRow {
+		t.Helper()
+		row, err := f.q.GetCampaignDeliverabilityCounts(ctx, gen.GetCampaignDeliverabilityCountsParams{
+			WorkspaceID: f.ws, CampaignID: campaign, Since: since,
+		})
+		if err != nil {
+			t.Fatalf("counts: %v", err)
+		}
+		return row
+	}
+	before := counts()
+	if before.Delivered != 20 || before.Bounced != 3 {
+		t.Fatalf("fixture: delivered=%d bounced=%d, want 20/3", before.Delivered, before.Bounced)
+	}
+
+	drain(t, f.c.PurgeDeliverabilityEvents, window, 5000)
+	drain(t, f.c.PurgeSends, window, 5000)
+	f.exec(t, `UPDATE campaigns SET status = 'running' WHERE id = $1`, campaign)
+	if after := counts(); after != before {
+		t.Fatalf("breaker inputs changed across a purge while paused: before %+v, after resume %+v", before, after)
+	}
+}
+
+// The single-sweeper lock is exclusive across sessions and released cleanly, so
+// a second replica's run is refused while the first holds it and succeeds after.
+func TestRetentionSweepLockIsExclusiveAndReleases(t *testing.T) {
+	f := newRetentionFixture(t)
+	ctx := context.Background()
+	release, ok, err := f.c.TryRetentionSweepLock(ctx)
+	if err != nil || !ok {
+		t.Fatalf("first lock: ok=%t err=%v", ok, err)
+	}
+	if _, ok2, err := f.c.TryRetentionSweepLock(ctx); err != nil || ok2 {
+		t.Fatalf("second lock while held: ok=%t err=%v, want refused", ok2, err)
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	again, ok3, err := f.c.TryRetentionSweepLock(ctx)
+	if err != nil || !ok3 {
+		t.Fatalf("lock after release: ok=%t err=%v", ok3, err)
+	}
+	if err := again(); err != nil {
+		t.Fatalf("second release: %v", err)
+	}
+}
+
+// Progress round-trips, and the day-long cycle is judged on the database clock:
+// a cycle started more than 24 hours ago reports expired, and saving with
+// newCycle restarts it.
+func TestRetentionProgressRoundTripsAndExpiresDaily(t *testing.T) {
+	f := newRetentionFixture(t)
+	ctx := context.Background()
+	table := "test-table-" + uuid.NewString()
+	t.Cleanup(func() {
+		if _, err := f.pool.Exec(context.Background(), `DELETE FROM retention_cursors WHERE table_name = $1`, table); err != nil {
+			t.Errorf("cleanup cursor: %v", err)
+		}
+	})
+
+	if got, err := f.c.LoadRetentionProgress(ctx, table); err != nil || got != (coreapi.RetentionProgress{}) {
+		t.Fatalf("never-swept table = %+v, %v; want the zero progress", got, err)
+	}
+	want := coreapi.RetentionCursor{At: time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC), ID: uuid.New()}
+	if err := f.c.SaveRetentionProgress(ctx, table, want, false); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := f.c.LoadRetentionProgress(ctx, table)
+	if err != nil || !got.Cursor.At.Equal(want.At) || got.Cursor.ID != want.ID || got.CycleExpired {
+		t.Fatalf("loaded %+v, %v; want %+v, not expired", got, err, want)
+	}
+
+	f.exec(t, `UPDATE retention_cursors SET cycle_started_at = now() - interval '25 hours' WHERE table_name = $1`, table)
+	if got, err := f.c.LoadRetentionProgress(ctx, table); err != nil || !got.CycleExpired {
+		t.Fatalf("a 25-hour-old cycle = %+v, %v; want expired", got, err)
+	}
+	if err := f.c.SaveRetentionProgress(ctx, table, coreapi.RetentionCursor{}, true); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if got, err := f.c.LoadRetentionProgress(ctx, table); err != nil || got.CycleExpired {
+		t.Fatalf("after a new cycle = %+v, %v; want not expired", got, err)
+	}
+}
+
+// SET LOCAL scopes the batch's statement timeout to its own transaction: the
+// pooled connection it ran on must come back with the server default, or every
+// later query on it would inherit a one-minute ceiling.
+func TestRetentionStatementTimeoutDoesNotLeakOntoThePool(t *testing.T) {
+	f := newRetentionFixture(t)
+	ctx := context.Background()
+	var before string
+	if err := f.pool.QueryRow(ctx, `SHOW statement_timeout`).Scan(&before); err != nil {
+		t.Fatalf("show: %v", err)
+	}
+	for range 3 {
+		if _, err := f.c.PurgeDeadLetters(ctx, coreapi.RetentionRequest{OlderThan: 3000 * retentionDay, Limit: 1}); err != nil {
+			t.Fatalf("batch: %v", err)
+		}
+	}
+	for range 8 { // more than the test pool's connections, so every one is checked
+		var after string
+		if err := f.pool.QueryRow(ctx, `SHOW statement_timeout`).Scan(&after); err != nil {
+			t.Fatalf("show: %v", err)
+		}
+		if after != before {
+			t.Fatalf("statement_timeout on a pooled connection = %q after a batch, want the default %q", after, before)
 		}
 	}
 }

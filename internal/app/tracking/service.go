@@ -2,6 +2,7 @@ package tracking
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/netip"
 	"net/url"
@@ -92,7 +93,12 @@ func (s *Service) RecordClick(ctx context.Context, hit Hit) (destURL string, ok 
 	if !ok {
 		return "", false
 	}
-	s.record(ctx, hit, sendID, send, botfilter.KindClick, rawURL)
+	// A send deleted between resolve and record answers exactly as a send that
+	// was never found does — 404, no redirect — so a click racing the retention
+	// sweep behaves like the click that arrives a second later.
+	if gone := s.record(ctx, hit, sendID, send, botfilter.KindClick, rawURL); gone {
+		return "", false
+	}
 	return rawURL, true
 }
 
@@ -115,8 +121,10 @@ func (s *Service) resolve(ctx context.Context, parse func() (string, bool)) (uui
 	return sendID, send, true
 }
 
-// record classifies the hit and stores it, machine verdicts included.
-func (s *Service) record(ctx context.Context, hit Hit, sendID uuid.UUID, send Send, kind botfilter.Kind, rawURL string) {
+// record classifies the hit and stores it, machine verdicts included. It reports
+// whether the send turned out to be gone (ErrSendGone): the one store failure a
+// caller answers differently, because it is not a failure but a deleted send.
+func (s *Service) record(ctx context.Context, hit Hit, sendID uuid.UUID, send Send, kind botfilter.Kind, rawURL string) (sendGone bool) {
 	verdict, reason := s.classify(ctx, hit, sendID, send, kind)
 	err := s.store.RecordEvent(ctx, Event{
 		WorkspaceID: send.WorkspaceID,
@@ -129,14 +137,18 @@ func (s *Service) record(ctx context.Context, hit Hit, sendID uuid.UUID, send Se
 		Reason:      reason,
 		ClientIP:    hit.IP,
 	})
+	if errors.Is(err, ErrSendGone) {
+		return true
+	}
 	if err != nil {
-		// The response is already decided (a pixel, or a redirect), so there is
-		// nothing to return this to and nothing useful to tell the caller. It
-		// is logged rather than discarded so a broken tracking write is visible
-		// as something other than a mysteriously flat open rate. No token, no
-		// URL and no user agent: this endpoint's inputs are recipient data.
+		// Any other failure leaves the response as decided (a pixel, or a
+		// redirect): nothing is lost for the recipient. It is logged rather
+		// than discarded so a broken tracking write is visible as something
+		// other than a mysteriously flat open rate. No token, no URL and no
+		// user agent: this endpoint's inputs are recipient data.
 		s.log.ErrorContext(ctx, "record tracking event", "error", err, "kind", string(kind), "send_id", sendID)
 	}
+	return false
 }
 
 // classify gathers the classifier's inputs and returns its verdict.

@@ -41,11 +41,14 @@ type fakeStore struct {
 	// subnets records the subnet PriorEvents was asked about, proving the
 	// burst query is skipped when there is no usable client IP.
 	subnets []netip.Prefix
+	// recordErr is what RecordEvent returns, to drive a send deleted between
+	// resolve and record (ErrSendGone) and an ordinary write failure.
+	recordErr error
 }
 
 func (f *fakeStore) RecordEvent(_ context.Context, ev Event) error {
 	f.calls = append(f.calls, ev)
-	return nil
+	return f.recordErr
 }
 
 func (f *fakeStore) ResolveSend(_ context.Context, sendID uuid.UUID) (Send, bool) {
@@ -265,6 +268,51 @@ func TestClickRedirect_UnknownSend_404NoRedirectNoEvent(t *testing.T) {
 	}
 	if len(store.calls) != 0 {
 		t.Fatalf("recorded %d events for an unknown send, want 0", len(store.calls))
+	}
+}
+
+// A send deleted between ResolveSend and RecordEvent — the retention sweep
+// winning the race against a click — must answer exactly as a send that was
+// never found: 404, no redirect. Redirecting would make the outcome depend on
+// which of two statements the delete landed between.
+func TestClickRedirect_SendDeletedMidHit_404NoRedirect(t *testing.T) {
+	r, store, sendID := newTestHandler(t)
+	store.recordErr = ErrSendGone
+	tok := track.MakeClickToken(testSecret, sendID.String(), "https://example.test/landing")
+
+	w := get(t, r, "/t/c/"+tok, testUA, "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (the documented answer for a send that is gone)", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "" {
+		t.Fatalf("Location = %q, want no redirect", loc)
+	}
+}
+
+// Any OTHER write failure is not a deleted send: the click still redirects, so a
+// database blip never breaks a recipient's link.
+func TestClickRedirect_RecordFailureStillRedirects(t *testing.T) {
+	r, store, sendID := newTestHandler(t)
+	store.recordErr = errors.New("connection reset")
+	dest := "https://example.test/landing"
+	tok := track.MakeClickToken(testSecret, sendID.String(), dest)
+
+	w := get(t, r, "/t/c/"+tok, testUA, "")
+	if w.Code != http.StatusFound || w.Header().Get("Location") != dest {
+		t.Fatalf("status = %d Location = %q, want 302 to %s", w.Code, w.Header().Get("Location"), dest)
+	}
+}
+
+// The pixel never fails, gone send or not: a mail client rendering it must see
+// no difference an attacker could use to probe which sends exist.
+func TestOpenGIF_SendDeletedMidHit_StillServesPixel(t *testing.T) {
+	r, store, sendID := newTestHandler(t)
+	store.recordErr = ErrSendGone
+	tok := track.MakeOpenToken(testSecret, sendID.String())
+
+	w := get(t, r, "/t/o/"+tok+".gif", testUA, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the same pixel as ever)", w.Code)
 	}
 }
 

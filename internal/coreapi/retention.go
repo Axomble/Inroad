@@ -26,11 +26,13 @@ type RetentionRequest struct {
 	// The cutoff is computed from the DATABASE clock, so replicas with skewed
 	// clocks agree on it.
 	OlderThan time.Duration
-	// Limit bounds the rows of the table itself this batch may delete, which
-	// bounds how long its one transaction holds locks.
+	// Limit bounds the rows the batch SCANS past the cursor — and so the rows it
+	// can delete, and the length of its one transaction. Scanning, not deleting,
+	// is what is bounded: a batch whose rows are all kept by a guard costs the
+	// same as one that deletes them all.
 	Limit int32
-	// After resumes strictly after the last row a previous batch in the same run
-	// deleted. The zero value starts from the oldest row.
+	// After resumes strictly after the last row a previous batch scanned. The
+	// zero value starts from the oldest row.
 	After RetentionCursor
 }
 
@@ -43,9 +45,11 @@ type RetentionCursor struct {
 
 // RetentionBatch is what one batch did.
 type RetentionBatch struct {
-	// Deleted is how many rows of the table itself were removed. It is bounded
-	// by RetentionRequest.Limit, and Deleted < Limit means nothing eligible is
-	// left past the cursor.
+	// Scanned is how many rows past the cursor the batch examined, kept or
+	// deleted. Scanned < RetentionRequest.Limit means nothing is left past the
+	// cursor: the table is drained.
+	Scanned int64
+	// Deleted is how many of those rows of the table itself were removed.
 	Deleted int64
 	// Dependents counts rows removed from OTHER tables along with them, so the
 	// sweep's metrics are honest about what a delete cost: the messages of a
@@ -55,6 +59,18 @@ type RetentionBatch struct {
 	// RolledUp is how many tracking_event_rollups rows the batch inserted or
 	// incremented. Tracking events only; zero everywhere else.
 	RolledUp int64
-	// Next is the cursor to resume from. Meaningful only when Deleted > 0.
+	// Next is the cursor to resume from: the last row SCANNED. Meaningful only
+	// when Scanned > 0.
 	Next RetentionCursor
+}
+
+// RetentionProgress is where a table's sweep got to in a previous run.
+type RetentionProgress struct {
+	// Cursor is the position to resume from; the zero value means "from the
+	// oldest row".
+	Cursor RetentionCursor
+	// CycleExpired reports that the table has been walked without starting over
+	// for more than a day. The sweep then starts over from the oldest row, so a
+	// row a guard stopped protecting behind the cursor is revisited.
+	CycleExpired bool
 }

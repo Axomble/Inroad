@@ -24,6 +24,7 @@ import (
 // the handler asked for (the window, the limit, the cursor it resumed from).
 type fakeTable struct {
 	backlog    int64
+	kept       int64 // rows per batch a guard keeps: scanned, not deleted
 	dependents int64 // per deleted row
 	err        error
 	errAfter   int // fail on this call number (1-based); 0 = never
@@ -41,15 +42,53 @@ func (f *fakeTable) batch(_ context.Context, req coreapi.RetentionRequest) (core
 	}
 	n := min(f.backlog, int64(req.Limit))
 	f.backlog -= n
+	deleted := max(n-f.kept, 0)
 	// The cursor encodes the call number, so a test can check the NEXT request
 	// resumed from exactly the cursor THIS batch returned.
 	next := coreapi.RetentionCursor{At: time.Unix(int64(len(f.calls)), 0).UTC(), ID: uuid.New()}
-	return coreapi.RetentionBatch{Deleted: n, Dependents: n * f.dependents, Next: next}, nil
+	return coreapi.RetentionBatch{Scanned: n, Deleted: deleted, Dependents: deleted * f.dependents, Next: next}, nil
+}
+
+type savedProgress struct {
+	cursor   coreapi.RetentionCursor
+	newCycle bool
 }
 
 type fakeRetainer struct {
 	deliverability, inbox, tracking, sends, deadLetters fakeTable
 	order                                               []string
+
+	progress map[string]coreapi.RetentionProgress // what Load returns
+	saved    map[string]savedProgress             // what Save recorded
+
+	lockBusy   bool // another run holds the lock
+	lockErr    error
+	lockTries  int
+	releases   int
+	releaseErr error
+}
+
+func (f *fakeRetainer) LoadRetentionProgress(_ context.Context, table string) (coreapi.RetentionProgress, error) {
+	return f.progress[table], nil
+}
+
+func (f *fakeRetainer) SaveRetentionProgress(_ context.Context, table string, cursor coreapi.RetentionCursor, newCycle bool) error {
+	if f.saved == nil {
+		f.saved = map[string]savedProgress{}
+	}
+	f.saved[table] = savedProgress{cursor: cursor, newCycle: newCycle}
+	return nil
+}
+
+func (f *fakeRetainer) TryRetentionSweepLock(context.Context) (func() error, bool, error) {
+	f.lockTries++
+	if f.lockErr != nil {
+		return nil, false, f.lockErr
+	}
+	if f.lockBusy {
+		return nil, false, nil
+	}
+	return func() error { f.releases++; return f.releaseErr }, true, nil
 }
 
 func (f *fakeRetainer) PurgeDeliverabilityEvents(ctx context.Context, req coreapi.RetentionRequest) (coreapi.RetentionBatch, error) {
@@ -101,6 +140,120 @@ func TestRetentionDisabledPolicyCallsNothing(t *testing.T) {
 	}
 	if len(core.order) != 0 {
 		t.Fatalf("a fully disabled policy made %d calls (%v), want none", len(core.order), core.order)
+	}
+	if core.lockTries != 0 {
+		t.Fatal("a fully disabled policy took the sweep lock; it should touch the database not at all")
+	}
+}
+
+// Another replica's run holds the lock: this one must do nothing and SUCCEED —
+// the other run is doing the work, and an error would make asynq retry a run
+// that has nothing to do.
+func TestRetentionDoesNothingWhileAnotherRunHoldsTheLock(t *testing.T) {
+	core := &fakeRetainer{lockBusy: true, sends: fakeTable{backlog: 10}}
+	if err := runRetention(t, core, allEnabled(), nil, RetentionOptions{}); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if len(core.order) != 0 {
+		t.Fatalf("a run without the lock swept %v", core.order)
+	}
+}
+
+// The lock is released exactly once, including when a table failed — a lock
+// left held would make every later run on every replica skip.
+func TestRetentionReleasesTheLockEvenWhenATableFails(t *testing.T) {
+	boom := errors.New("statement timeout")
+	core := &fakeRetainer{sends: fakeTable{err: boom}}
+	err := runRetention(t, core, allEnabled(), nil, RetentionOptions{})
+	if !errors.Is(err, boom) {
+		t.Fatalf("handler error = %v, want %v", err, boom)
+	}
+	if core.releases != 1 {
+		t.Fatalf("lock released %d times, want exactly 1", core.releases)
+	}
+}
+
+// A failure to take or release the lock is a failure of the run.
+func TestRetentionLockErrorsFailTheRun(t *testing.T) {
+	lockErr := errors.New("connection refused")
+	if err := runRetention(t, &fakeRetainer{lockErr: lockErr}, allEnabled(), nil, RetentionOptions{}); !errors.Is(err, lockErr) {
+		t.Fatalf("lock error: handler = %v, want %v", err, lockErr)
+	}
+	releaseErr := errors.New("unlock failed")
+	if err := runRetention(t, &fakeRetainer{releaseErr: releaseErr}, allEnabled(), nil, RetentionOptions{}); !errors.Is(err, releaseErr) {
+		t.Fatalf("release error: handler = %v, want %v", err, releaseErr)
+	}
+}
+
+// Across runs: a table that did not drain saves where it stopped, and the next
+// run resumes there instead of re-reading every row before it.
+func TestRetentionResumesTheNextRunFromTheSavedCursor(t *testing.T) {
+	core := &fakeRetainer{sends: fakeTable{backlog: 100}}
+	opts := RetentionOptions{BatchSize: 10, MaxBatchesPerTable: 2}
+	if err := runRetention(t, core, RetentionPolicy{Sends: 100 * day}, nil, opts); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	saved := core.saved["sends"]
+	if saved.cursor.At != time.Unix(2, 0).UTC() || saved.newCycle {
+		t.Fatalf("saved after an undrained run = %+v, want the second batch's cursor and no new cycle", saved)
+	}
+
+	core.progress = map[string]coreapi.RetentionProgress{"sends": {Cursor: saved.cursor}}
+	core.sends.calls = nil
+	if err := runRetention(t, core, RetentionPolicy{Sends: 100 * day}, nil, opts); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if got := core.sends.calls[0].After; got != saved.cursor {
+		t.Fatalf("second run started from %+v, want the saved %+v", got, saved.cursor)
+	}
+}
+
+// A drained table starts over from the oldest row next run, with a new cycle —
+// rows a guard kept behind the cursor are re-checked.
+func TestRetentionStartsOverAfterDraining(t *testing.T) {
+	core := &fakeRetainer{
+		sends:    fakeTable{backlog: 3},
+		progress: map[string]coreapi.RetentionProgress{"sends": {Cursor: coreapi.RetentionCursor{At: time.Unix(99, 0).UTC()}}},
+	}
+	if err := runRetention(t, core, RetentionPolicy{Sends: 100 * day}, nil, RetentionOptions{BatchSize: 10}); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if got := core.saved["sends"]; got.cursor != (coreapi.RetentionCursor{}) || !got.newCycle {
+		t.Fatalf("saved after draining = %+v, want the zero cursor and a new cycle", got)
+	}
+}
+
+// A cycle older than a day starts over from the oldest row even though the
+// table never drained — otherwise a table too large to drain in a run would
+// never revisit the rows behind its cursor.
+func TestRetentionStartsOverWhenTheCycleExpires(t *testing.T) {
+	core := &fakeRetainer{
+		sends: fakeTable{backlog: 1000},
+		progress: map[string]coreapi.RetentionProgress{"sends": {
+			Cursor: coreapi.RetentionCursor{At: time.Unix(99, 0).UTC()}, CycleExpired: true,
+		}},
+	}
+	if err := runRetention(t, core, RetentionPolicy{Sends: 100 * day}, nil, RetentionOptions{BatchSize: 10, MaxBatchesPerTable: 1}); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if got := core.sends.calls[0].After; got != (coreapi.RetentionCursor{}) {
+		t.Fatalf("an expired cycle resumed from %+v, want the oldest row", got)
+	}
+	if !core.saved["sends"].newCycle {
+		t.Fatal("an expired cycle was not restarted")
+	}
+}
+
+// A batch whose every scanned row was KEPT is not the end of the table: the
+// drain signal is rows scanned, not rows deleted. Judging by deletes would stop
+// the sweep at the first run of kept rows and never reach the rows behind it.
+func TestRetentionAnAllKeptBatchIsNotTakenAsDrained(t *testing.T) {
+	core := &fakeRetainer{sends: fakeTable{backlog: 25, kept: 10}}
+	if err := runRetention(t, core, RetentionPolicy{Sends: 100 * day}, nil, RetentionOptions{BatchSize: 10}); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	if got := len(core.sends.calls); got != 3 {
+		t.Fatalf("calls = %d, want 3 (10 kept, 10 kept, 5 short) — kept rows must not end the walk", got)
 	}
 }
 
