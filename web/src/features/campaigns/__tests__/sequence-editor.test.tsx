@@ -1,6 +1,7 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { beforeAll, beforeEach, afterEach, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
+import { replaceText, warmRichTextEditors } from '@/test/rich-text'
 import { SequenceEditor } from '../sequence-editor'
 
 // Capture the DndContext.onDragEnd callback so the reorder test can invoke it
@@ -48,7 +49,7 @@ vi.mock('@dnd-kit/sortable', async (importOriginal) => {
 // Warm the lazy sortable list so tests that wait for its drag handles don't
 // race a cold dynamic import inside findBy*'s 1s window.
 beforeAll(async () => {
-  await import('../sortable-step-list')
+  await Promise.all([import('../sortable-step-list'), warmRichTextEditors()])
 }, 30_000)
 
 // Radix AlertDialog focus/pointer plumbing that jsdom doesn't implement.
@@ -112,6 +113,7 @@ beforeEach(() => {
       }
       requests.push({ method, url, body })
 
+      if (url.endsWith('/custom-fields')) return jsonResponse([])
       if (url.includes('/steps/reorder')) return jsonResponse(steps)
       if (url.match(/\/steps\/[^/]+$/) && method === 'PUT') return jsonResponse(steps[0])
       if (url.match(/\/steps\/[^/]+$/) && method === 'DELETE') return deleteResponder()
@@ -183,8 +185,8 @@ test('add step calls createStep with the converted delay and subject', async () 
 
   fireEvent.click(screen.getByRole('button', { name: /^add step$/i }))
 
-  const subject = await screen.findByLabelText('Subject')
-  fireEvent.change(subject, { target: { value: 'Follow up' } })
+  const subject = await screen.findByRole('textbox', { name: 'Subject' })
+  replaceText(subject, 'Follow up')
   fireEvent.change(screen.getByLabelText('Delay · days'), { target: { value: '2' } })
   fireEvent.change(screen.getByLabelText('Hours'), { target: { value: '3' } })
 
@@ -206,9 +208,9 @@ test('edit step calls updateStep against the step id', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: /edit step 1/i }))
 
-  const subject = await screen.findByLabelText('Subject')
-  expect(subject).toHaveValue('Intro')
-  fireEvent.change(subject, { target: { value: 'Intro v2' } })
+  const subject = await screen.findByRole('textbox', { name: 'Subject' })
+  expect(subject).toHaveTextContent('Intro')
+  replaceText(subject, 'Intro v2')
 
   const form = subject.closest('form')
   expect(form).not.toBeNull()

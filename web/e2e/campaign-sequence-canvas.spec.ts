@@ -28,9 +28,10 @@ const TWO_STEPS: Step[] = [
 async function mockApi(
   page: Page,
   initialSteps: Step[] = TWO_STEPS,
-): Promise<{ reorders: string[][]; creates: unknown[] }> {
+): Promise<{ reorders: string[][]; creates: unknown[]; updates: Partial<Step>[] }> {
   const reorders: string[][] = []
   const creates: unknown[] = []
+  const updates: Partial<Step>[] = []
   let steps: Step[] = initialSteps
   const membership = { workspace_id: 'workspace-e2e', workspace_name: 'Atlas Labs', role: 'owner' }
 
@@ -63,6 +64,20 @@ async function mockApi(
     }
 
     if (path.endsWith('/variants')) return route.fulfill(json([]))
+    if (path.endsWith('/custom-fields')) {
+      return route.fulfill(
+        json([
+          { id: 'cf-1', key: 'industry', label: 'Industry', type: 'text', options: [], created_at: '', archived: false, archived_at: null },
+        ]),
+      )
+    }
+    const stepMatch = path.match(/\/steps\/(step-\d+)$/)
+    if (stepMatch && request.method() === 'PUT') {
+      const body = request.postDataJSON() as Partial<Step>
+      updates.push(body)
+      const step = steps.find((s) => s.id === stepMatch[1])
+      return route.fulfill(json({ ...step, ...body }))
+    }
     if (path.endsWith(`/campaigns/${CAMPAIGN_ID}/steps/reorder`)) {
       const { step_ids } = request.postDataJSON() as { step_ids: string[] }
       reorders.push(step_ids)
@@ -104,7 +119,7 @@ async function mockApi(
     return route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"unhandled e2e route"}' })
   })
 
-  return { reorders, creates }
+  return { reorders, creates, updates }
 }
 
 async function signIn(page: Page) {
@@ -205,4 +220,56 @@ test('dragging from a step’s exit onto another step makes it next', async ({ p
 
   await expect.poll(() => reorders.at(-1)).toEqual(['step-1', 'step-3', 'step-2'])
   await expect(canvas.getByRole('button', { name: 'Edit step 2: Last call' })).toBeVisible()
+})
+
+// The step editor's merge fields in a real browser: jsdom can't place a caret,
+// type through the browser's own input pipeline, or make a node view
+// non-editable, so the unit suite drives the editor through its API instead.
+test('the step editor turns merge fields into chips, flags an unknown one, and refuses to save it', async ({ page }) => {
+  const { updates } = await mockApi(page)
+  await signIn(page)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/steps`)
+
+  const canvas = page.getByRole('region', { name: 'Sequence flow' })
+  await canvas.getByRole('button', { name: 'Edit step 1: A quick idea' }).click()
+  const panel = page.getByRole('complementary', { name: 'Step 1' })
+  const body = panel.getByRole('textbox', { name: 'Body' })
+  await expect(body).toHaveText('hello')
+
+  // `{{` opens the menu; the workspace's custom field is offered by label.
+  await body.click()
+  await page.keyboard.press('End')
+  await page.keyboard.type(' {{ind')
+  const menu = panel.getByRole('listbox', { name: 'Merge fields' })
+  await expect(menu.getByRole('option')).toHaveText(['Industry{{custom.industry}}'])
+  await page.keyboard.press('Enter')
+  await expect(menu).toHaveCount(0)
+  const chip = body.locator('[data-variable-status="known"]')
+  await expect(chip).toHaveText('{{custom.industry}}')
+  // An atom: the browser can't put a caret inside it.
+  await expect(body.locator('.node-variable')).toHaveAttribute('contenteditable', 'false')
+
+  // A typo typed by hand becomes a flagged chip, and Save does nothing.
+  await page.keyboard.type(' {{firstname}}')
+  await expect(body.locator('[data-variable-status="unknown"]')).toHaveText('{{firstname}}?')
+  await expect(panel.getByRole('alert')).toContainText('{{firstname}}')
+  await panel.getByRole('button', { name: 'Save step' }).click()
+  await page.waitForTimeout(300)
+  expect(updates).toHaveLength(0)
+
+  // One Backspace removes the whole chip; then bold everything and save.
+  await body.click()
+  await page.keyboard.press('End')
+  await page.keyboard.press('Backspace')
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  await page.keyboard.press('ControlOrMeta+a')
+  await panel.getByRole('button', { name: 'Bold' }).click()
+  await panel.getByRole('button', { name: 'Save step' }).click()
+
+  await expect.poll(() => updates.length).toBe(1)
+  expect(updates[0]).toMatchObject({
+    subject: 'A quick idea',
+    body_text: 'hello {{custom.industry}} ',
+    body_html: '<p><strong>hello {{custom.industry}} </strong></p>',
+  })
 })

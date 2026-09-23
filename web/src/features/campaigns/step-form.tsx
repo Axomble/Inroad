@@ -1,12 +1,13 @@
 import { useId, useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { Controller, useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
+import { RichTextEditor, SubjectEditor } from '@/components/shared/rich-text-editor'
+import { unknownTokens } from '@/components/shared/rich-text/merge-tags'
 import { useAppSelector } from '@/store/hooks'
 // The email-verification gate is the auth feature's own concern — it owns both
 // the state and the copy, so a call site names only the action.
@@ -19,6 +20,8 @@ import {
 } from './api'
 import { delayToSeconds, secondsToDelay } from './step-delay'
 import { TEST_SEND_GATED_ACTION, stepErrorMessage, testSendErrorMessage } from './step-error'
+import { useMergeFields } from './merge-fields'
+import { UnknownMergeFieldsNotice } from './unknown-merge-fields'
 
 /**
  * Two schemas, not one: the first step's subject opens the thread, so it is
@@ -31,6 +34,7 @@ const followUpSchema = z.object({
   hours: z.number({ message: 'Number' }).int().min(0, '0+').max(23, 'Max 23'),
   subject: z.string().max(500, 'Max 500 characters'),
   body_text: z.string().optional(),
+  body_html: z.string().optional(),
 })
 const firstStepSchema = followUpSchema.extend({
   subject: z.string().min(1, 'Required').max(500, 'Max 500 characters'),
@@ -40,8 +44,10 @@ type Values = z.infer<typeof followUpSchema>
 /**
  * Inline add/edit form for a sequence step. Collects the delay as whole
  * days + hours (converted to `delay_seconds`), a required subject, and an
- * optional body. `create` appends at the end; `edit` targets an existing step
- * and allows the delay to change. Edit is available in any campaign status
+ * optional body. Subject and body are merge-field-aware editors: a placeholder
+ * nothing will fill in is flagged in place and blocks the save. `create`
+ * appends at the end; `edit` targets an existing step and allows the delay to
+ * change. Edit is available in any campaign status
  * (content is live-reference); add is draft-only, enforced by the caller.
  */
 export function StepForm({
@@ -68,8 +74,12 @@ export function StepForm({
 
   const daysId = useId()
   const hoursId = useId()
-  const subjectId = useId()
-  const bodyId = useId()
+  const subjectLabelId = useId()
+  const subjectHintId = useId()
+  const bodyLabelId = useId()
+  const bodyHintId = useId()
+  const unknownId = useId()
+  const mergeFields = useMergeFields()
   const testAddressId = useId()
 
   // Defaults to the signed-in operator's own inbox — the most common test
@@ -92,6 +102,8 @@ export function StepForm({
   const initialDelay = secondsToDelay(originalDelaySeconds)
   const {
     register,
+    control,
+    setValue,
     handleSubmit,
     formState: { errors, isSubmitting },
   } = useForm<Values>({
@@ -101,10 +113,19 @@ export function StepForm({
       hours: initialDelay.hours,
       subject: step?.subject ?? '',
       body_text: step?.body_text ?? '',
+      body_html: step?.body_html ?? '',
     },
   })
+  const copy = useWatch({ control, name: ['subject', 'body_text', 'body_html'] })
+  const unknown = unknownTokens(
+    copy.map((template) => template ?? ''),
+    mergeFields.classify,
+  )
 
   async function onSubmit(values: Values) {
+    // The notice above the buttons already says why; saving would only move
+    // the failure to send time, where it is permanent.
+    if (unknown.length > 0) return
     // `secondsToDelay` floors to whole days+hours, so a delay carrying a
     // sub-hour remainder would round-trip lossily. Keep the original seconds
     // untouched unless the user actually changed the day/hour inputs.
@@ -113,6 +134,7 @@ export function StepForm({
       delay_seconds: delaySecondsUnchanged ? originalDelaySeconds : delayToSeconds(values.days, values.hours),
       subject: values.subject,
       body_text: values.body_text ?? '',
+      body_html: values.body_html ?? '',
     }
     if (isEdit && step?.id) {
       const result = await updateStep({ id: campaignId, stepId: step.id, stepRequest })
@@ -163,20 +185,32 @@ export function StepForm({
 
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center gap-2">
-          <Label htmlFor={subjectId}>Subject</Label>
+          <Label id={subjectLabelId}>Subject</Label>
           {!isFirstStep && <span className="text-[12px] text-muted-foreground">optional</span>}
         </div>
-        <Input
-          id={subjectId}
-          placeholder={isFirstStep ? 'Quick question, {{first_name}}' : 'Leave blank to stay in the thread'}
-          aria-invalid={!!errors.subject}
-          {...register('subject')}
+        <Controller
+          control={control}
+          name="subject"
+          render={({ field }) => (
+            <SubjectEditor
+              labelledBy={subjectLabelId}
+              describedBy={subjectHintId}
+              initialText={field.value}
+              placeholder={isFirstStep ? 'Quick question, {{first_name}}' : 'Leave blank to stay in the thread'}
+              invalid={!!errors.subject}
+              variables={mergeFields.variables}
+              classifyVariable={mergeFields.classify}
+              onChange={field.onChange}
+            />
+          )}
         />
         {errors.subject ? (
-          <span className="text-xs text-danger">{errors.subject.message}</span>
+          <span id={subjectHintId} className="text-xs text-danger">
+            {errors.subject.message}
+          </span>
         ) : (
           !isFirstStep && (
-            <span className="text-xs text-muted-foreground">
+            <span id={subjectHintId} className="text-xs text-muted-foreground">
               Blank sends this step as a reply in the same thread — the subject becomes “Re:” the first
               step's subject.
             </span>
@@ -185,18 +219,27 @@ export function StepForm({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor={bodyId}>Body</Label>
-        <Textarea
-          id={bodyId}
-          rows={5}
+        <Label id={bodyLabelId}>Body</Label>
+        <RichTextEditor
+          labelledBy={bodyLabelId}
+          describedBy={bodyHintId}
+          initialHtml={step?.body_html ?? ''}
+          initialText={step?.body_text ?? ''}
           placeholder={'Hi {{first_name}},\n\n…'}
-          {...register('body_text')}
+          variables={mergeFields.variables}
+          classifyVariable={mergeFields.classify}
+          onChange={(body) => {
+            setValue('body_text', body.text)
+            setValue('body_html', body.html)
+          }}
         />
-        <span className="text-xs text-muted-foreground">
-          {'{{first_name}}'} and {'{{email}}'} are personalized per contact; {'{option a|option b}'}{' '}
-          spins a random variant per send
+        <span id={bodyHintId} className="text-xs text-muted-foreground">
+          Type {'{{'} to insert a merge field — each one is filled in per contact. {'{option a|option b}'} spins a
+          random variant per send.
         </span>
       </div>
+
+      <UnknownMergeFieldsNotice id={unknownId} names={unknown} />
 
       {error && (
         <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
