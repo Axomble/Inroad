@@ -99,12 +99,14 @@ func (f recordFixture) deal(t *testing.T, ctx context.Context, ws, company, cont
 		ws, pipeline, stage, company, contact, name)
 }
 
-// send writes one send at the given step and returns its id.
+// send writes one send at the given step and returns its id, stamping
+// sends.tracked from the campaign's flag as the claim would (see sendFor).
 func (f recordFixture) send(t *testing.T, ctx context.Context, step int, status string, sentAt *time.Time) uuid.UUID {
 	t.Helper()
 	return f.scalar(t, ctx,
-		`INSERT INTO sends(workspace_id,campaign_id,contact_id,mailbox_id,to_email,status,step_order,sent_at)
-		 VALUES($1,$2,$3,$4,'dana@acme.test',$5,$6,$7) RETURNING id`,
+		`INSERT INTO sends(workspace_id,campaign_id,contact_id,mailbox_id,to_email,status,step_order,sent_at,tracked)
+		 VALUES($1,$2,$3,$4,'dana@acme.test',$5,$6,$7,
+		        (SELECT tracking_enabled FROM campaigns WHERE id = $2 AND workspace_id = $1)) RETURNING id`,
 		f.ws, f.campaign, f.contactID, f.mailbox, status, step, sentAt)
 }
 
@@ -607,14 +609,68 @@ func (f recordFixture) campaignWithTracking(t *testing.T, ctx context.Context, n
 	 VALUES($1,$2,$3,$4,'S','running',$5) RETURNING id`, f.ws, name, f.mailbox, list, tracking)
 }
 
-// sendFor writes a send for an arbitrary campaign at a given step.
+// sendFor writes a send for an arbitrary campaign at a given step. Like the
+// real claim, it stamps sends.tracked from the campaign's tracking flag AS IT
+// IS AT WRITE TIME — so a test that toggles the campaign afterwards is asking
+// exactly the question the per-send column exists to answer.
 func (f recordFixture) sendFor(t *testing.T, ctx context.Context, campaign uuid.UUID, step int, status string, sentAt *time.Time) {
 	t.Helper()
 	if _, err := f.pool.Exec(ctx,
-		`INSERT INTO sends(workspace_id,campaign_id,contact_id,mailbox_id,to_email,status,step_order,sent_at)
-		 VALUES($1,$2,$3,$4,'dana@acme.test',$5,$6,$7)`,
+		`INSERT INTO sends(workspace_id,campaign_id,contact_id,mailbox_id,to_email,status,step_order,sent_at,tracked)
+		 VALUES($1,$2,$3,$4,'dana@acme.test',$5,$6,$7,
+		        (SELECT tracking_enabled FROM campaigns WHERE id = $2 AND workspace_id = $1))`,
 		f.ws, campaign, f.contactID, f.mailbox, status, step, sentAt); err != nil {
 		t.Fatalf("send: %v", err)
+	}
+}
+
+// setCampaignTracking flips a campaign's CURRENT tracking flag, the way the
+// campaign's tracking toggle does (queries/campaign.sql SetCampaignTracking).
+func (f recordFixture) setCampaignTracking(t *testing.T, ctx context.Context, campaign uuid.UUID, on bool) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE campaigns SET tracking_enabled = $3 WHERE id = $1 AND workspace_id = $2`,
+		campaign, f.ws, on); err != nil {
+		t.Fatalf("toggle tracking: %v", err)
+	}
+}
+
+// Turning tracking OFF later must not rewrite history. The send went out with
+// tracking on, so a zero open count for it is a measured zero; reading the
+// campaign's current flag declared it unmeasured the moment someone toggled.
+func TestEngagementOpensMeasurableSurvivesTrackingTurnedOffLater(t *testing.T) {
+	ctx := context.Background()
+	f := recordSetup(t, ctx)
+	campaign := f.campaignWithTracking(t, ctx, "Tracked then off", true)
+	f.sendFor(t, ctx, campaign, 1, "sent", &f.sentAt)
+	f.setCampaignTracking(t, ctx, campaign, false)
+
+	got, err := f.svc.Engagement(ctx, f.ws, f.contactID)
+	if err != nil {
+		t.Fatalf("Engagement: %v", err)
+	}
+	if !got.OpensMeasurable {
+		t.Fatal("opens_measurable = false after tracking was turned off, but the send went " +
+			"out tracked — the toggle retroactively rewrote a measured zero as unmeasured")
+	}
+}
+
+// And the mirror: turning tracking ON later must not make an untracked send look
+// as if an open could have been recorded for it.
+func TestEngagementOpensMeasurableIgnoresTrackingTurnedOnLater(t *testing.T) {
+	ctx := context.Background()
+	f := recordSetup(t, ctx)
+	campaign := f.campaignWithTracking(t, ctx, "Off then tracked", false)
+	f.sendFor(t, ctx, campaign, 1, "sent", &f.sentAt)
+	f.setCampaignTracking(t, ctx, campaign, true)
+
+	got, err := f.svc.Engagement(ctx, f.ws, f.contactID)
+	if err != nil {
+		t.Fatalf("Engagement: %v", err)
+	}
+	if got.OpensMeasurable {
+		t.Fatal("opens_measurable = true after tracking was turned on, but the only send " +
+			"went out untracked and could never have recorded an open")
 	}
 }
 

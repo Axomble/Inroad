@@ -48,12 +48,20 @@ WHERE e.id = $1 AND e.workspace_id = $2;
 -- reclaim recomputes the same variant, but the weights could have been edited
 -- between the two attempts. Re-stamping it keeps the row describing what is
 -- actually about to be sent rather than what a previous attempt intended.
+--
+-- tracked is re-stamped on the reclaim path for the same reason: it records
+-- whether THIS message carries the open pixel and rewritten links, which is
+-- decided by the job being claimed (coreapi.StepSendJob.CarriesTracking), and
+-- the campaign's tracking toggle may have moved between the two attempts. It is
+-- written here, at claim time, and never again: this row is what every
+-- "could an open have been recorded" aggregate reads, so a later toggle of
+-- campaigns.tracking_enabled cannot rewrite history.
 INSERT INTO sends (id, workspace_id, campaign_id, contact_id, mailbox_id, to_email,
-                   step_order, references_header, status, claimed_at, variant_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), sqlc.narg(variant_id))
+                   step_order, references_header, status, claimed_at, variant_id, tracked)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending', now(), sqlc.narg(variant_id), sqlc.arg(tracked))
 ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
 DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
-              variant_id = EXCLUDED.variant_id
+              variant_id = EXCLUDED.variant_id, tracked = EXCLUDED.tracked
     WHERE sends.status = 'sending'
       AND sends.workspace_id = $2
       AND sends.claimed_at < now() - make_interval(secs => sqlc.arg(lease_seconds)::int)
@@ -68,6 +76,19 @@ DO UPDATE SET status = 'sending', claimed_at = now(), error = '',
 -- rather than a timing heuristic. Nothing on the send path branches on it; the
 -- claim's meaning is unchanged.
 RETURNING id, (created_at = claimed_at) AS freshly_inserted;
+
+-- name: StepSendNotYetDue :one
+-- The claim's not-due gate, evaluated on the DATABASE's clock. not_due_until is
+-- the enrollment's next_due_at as the job read it — a value the database
+-- stamped with its own now() — so the only sound clock to compare it against is
+-- the same one. Comparing it against the Go process's time.Now() (as the gate
+-- used to) made the outcome depend on app/DB clock skew: a database clock
+-- running ahead turned a due-now enrollment into ClaimDeferred.
+--
+-- Called inside the claim transaction, so now() here is the SAME instant the
+-- ClaimStepSend INSERT stamps as claimed_at. A NULL not_due_until ("no
+-- recorded due time") is never "not yet due", which is what the COALESCE says.
+SELECT COALESCE(sqlc.narg(not_due_until)::timestamptz > now(), false)::bool AS not_yet_due;
 
 -- name: LatestSentForContact :one
 -- The most recent successfully-sent step for a (campaign, contact), used to

@@ -357,9 +357,10 @@ type Client interface {
 	// matches 0 rows and is a safe no-op.
 	//
 	// Pushing next_due_at does NOT cancel the asynq advance task already queued
-	// for the OLD time. The claim-time guard (see StepSendJob.NotDueUntil /
-	// NotYetDue, enforced in ClaimStepSend) is what actually stops that task
-	// from firing into the stated absence; this method only moves the date.
+	// for the OLD time. The claim-time guard (see StepSendJob.NotDueUntil,
+	// enforced on the database's clock in ClaimStepSend) is what actually
+	// stops that task from firing into the stated absence; this method only
+	// moves the date.
 	DeferEnrollment(ctx context.Context, enrollmentID, workspaceID string, until time.Time) error
 	// IncrementEnrollmentCapDeferrals bumps the enrollment's cap-deferral counter
 	// and returns the new value. The advance handler uses it to break out of the
@@ -735,6 +736,10 @@ type StepSendJob struct {
 	// the asynq advance task ALREADY queued for the old time: without this
 	// guard that task fires on schedule and sends into the stated absence.
 	// Zero when the enrollment has no due time recorded.
+	//
+	// It is a DATABASE timestamp, so the claim compares it against the
+	// database's own now() (the StepSendNotYetDue query), never a process
+	// clock. See NotYetDue for the one place a process clock still reads it.
 	NotDueUntil        time.Time   `json:"not_due_until"`
 	EffectiveDailyCap  int         `json:"effective_daily_cap"`
 	SentToday          int         `json:"sent_today"`
@@ -748,9 +753,9 @@ type StepSendJob struct {
 	UnsubURL           string      `json:"unsub_url"`
 	InReplyTo          string      `json:"in_reply_to"`
 	References         string      `json:"references"`
-	// TrackingEnabled mirrors the campaign's tracking_enabled column: when true
-	// and BodyHTML is non-empty, the worker rewrites links and appends an open
-	// pixel before sending.
+	// TrackingEnabled mirrors the campaign's tracking_enabled column AS READ
+	// when this job was built. Whether the message actually carries tracking is
+	// CarriesTracking, which also needs an HTML body.
 	TrackingEnabled bool `json:"tracking_enabled"`
 	// Schedule is the campaign's sending window, carried on the job so
 	// MarkStepSent can place the NEXT step's due time inside it without a second
@@ -780,14 +785,32 @@ type StepSendJob struct {
 }
 
 // NotYetDue reports whether this step's enrollment is scheduled for a moment
-// still in the future — i.e. an advance task queued for an earlier due time is
-// trying to send early. Pure and clock-injected so both the claim (which
-// enforces it) and the worker (which reschedules on it) read one rule.
+// still in the future relative to now.
+//
+// It is NOT the claim's gate. NotDueUntil was stamped by the database's clock,
+// and comparing it against a Go process clock makes the answer depend on the
+// skew between two hosts — which is exactly how a due-now enrollment used to be
+// refused as ClaimDeferred. The claim evaluates the same rule on the database's
+// clock instead (queries/stepsend.sql StepSendNotYetDue, which keeps the
+// zero-means-due convention below). What remains here is the worker's ESTIMATE
+// of how long to wait after a deferral (advance.go notDueBackoff), where skew
+// only moves a retry by the skew and cannot decide whether anything sends.
 //
 // A zero NotDueUntil means "no recorded due time", which is never "not due":
 // the pre-taxonomy behaviour is to send.
 func (j StepSendJob) NotYetDue(now time.Time) bool {
 	return !j.NotDueUntil.IsZero() && now.Before(j.NotDueUntil)
+}
+
+// CarriesTracking reports whether this message goes out with an open pixel and
+// click-rewritten links. Both live only in the HTML body, so a text-only step on
+// a tracked campaign carries none — it could never have recorded an open.
+//
+// One rule for two readers: the worker applies the rewrite on it, and the claim
+// persists it as sends.tracked, so the row says what the message actually was
+// rather than what the campaign is set to later.
+func (j StepSendJob) CarriesTracking() bool {
+	return j.TrackingEnabled && j.BodyHTML != ""
 }
 
 // StepResult is the outcome of one step send.

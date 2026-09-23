@@ -3980,11 +3980,11 @@ export type ContactEngagement = {
   click_rate: number;
   /** Enrollments over the contact's lifetime - active, completed, and stopped. */
   campaigns_enrolled: number;
-  /** Whether an open COULD have been recorded for this contact: true when at least one send that actually went out belonged to a campaign with tracking enabled.
+  /** Whether an open COULD have been recorded for this contact: true when at least one send that actually went out carried tracking - its campaign had tracking enabled AT SEND TIME and the step had an HTML body (the open pixel and click rewriting exist only in HTML).
     
     Use it as `emails_sent > 0 && !opens_measurable` to render `opens_indicative` and `clicks` as "not measured" instead of 0. Do NOT derive this from `campaigns[].tracking_enabled`: that list is capped at 20, so for a contact with more enrollments whose newest are untracked and whose older ones were tracked, a client-side `some()` answers false and explains away a genuine zero. This field is computed over the whole send history and is correct at any enrollment count.
     
-    Caveat: `campaigns.tracking_enabled` is mutable (PUT /campaigns/{id}/tracking), and no per-send record of the flag at send time exists, so this reflects each campaign's CURRENT setting. Toggling tracking off after a send can therefore turn a measured zero into an "unmeasured" one retroactively. Reporting the current setting is the best available answer, not a perfect one.
+    Each send records whether it carried tracking when it was sent, so toggling a campaign's tracking later (PUT /campaigns/{id}/tracking) does not change this for sends already made. Caveat: sends made before that per-send record existed were backfilled - as tracked if any open or click was recorded for them, otherwise from the campaign's setting at upgrade time - so for those older sends a toggle made before the upgrade can still be reflected here.
     
     When a non-zero count coexists with `opens_measurable: false`, trust the count - a recorded event outranks an inference about whether it could have been recorded. */
   opens_measurable: boolean;

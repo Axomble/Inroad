@@ -105,28 +105,16 @@ import (
 // send authorised by a claim nobody took, which is the double send this slice
 // exists to prevent.
 //
-// # Which clock decides "not yet due", and why moving it here helped
+// # Which clock decides "not yet due"
 //
-// The claim's first gate is job.NotYetDue(time.Now()), and NotDueUntil is
-// sequence_enrollments.next_due_at — a value stamped by the DATABASE's clock.
-// Comparing it against a Go process's clock is only sound while the two are in
-// the same time domain: a database clock running AHEAD of the process
-// evaluating the guard turns a just-enrolled, due-now enrollment into
-// ClaimDeferred, and the call returns (ClaimDeferred, nil) before touching any
-// SQL, so nothing about it looks like a clock problem.
-//
-// Sending the claim over this transport moves that evaluation ONTO THE CONTROL
-// PLANE, which is where the database's clock lives — so on role=send, the
-// fleet host's own clock stops mattering to the gate entirely. That is a real
-// improvement and it is worth recording, because a fleet host is by definition
-// a machine whose NTP we do not administer.
-//
-// It does NOT fix the in-process path, where the guard still compares a
-// database timestamp against the worker process's clock. That is pre-existing,
-// out of this slice's scope to change (the guard is the claim protocol, and
-// rewriting it is not a transport decision), and bounded in practice because
-// role=all and role=control run beside their database. It is called out here
-// rather than left to be rediscovered from a bare "outcome=3".
+// The claim's not-due gate compares job.NotDueUntil — sequence_enrollments.
+// next_due_at, stamped by the DATABASE's clock — against the database's own
+// now(), inside the claim transaction (queries/stepsend.sql StepSendNotYetDue).
+// No process clock takes part, so neither the fleet host running this client
+// nor the control plane serving the route can turn a due-now enrollment into
+// ClaimDeferred by being behind the database. (It used to compare against the
+// control plane's time.Now(), which moved the problem off the fleet host but
+// left it between the control plane and its database.)
 func (c *Client) ClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
 	if err := parseIDs(job.WorkspaceID); err != nil {
 		return coreapi.ClaimSkip, err

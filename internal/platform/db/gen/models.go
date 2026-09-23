@@ -925,6 +925,7 @@ type Send struct {
 	ReferencesHeader string             `json:"references_header"`
 	ClaimedAt        pgtype.Timestamptz `json:"claimed_at"`
 	VariantID        pgtype.UUID        `json:"variant_id"`
+	Tracked          bool               `json:"tracked"`
 }
 
 type SendingDomain struct {

@@ -91,9 +91,8 @@ func (q *Queries) ContactEnrollmentCounts(ctx context.Context, arg ContactEnroll
 const contactSendStats = `-- name: ContactSendStats :one
 SELECT count(*) FILTER (WHERE s.status = 'sent')::bigint AS emails_sent,
        (max(s.sent_at) FILTER (WHERE s.status = 'sent'))::timestamptz AS last_sent_at,
-       COALESCE(bool_or(s.status = 'sent' AND c.tracking_enabled), false)::bool AS opens_measurable
+       COALESCE(bool_or(s.status = 'sent' AND s.tracked), false)::bool AS opens_measurable
 FROM sends s
-LEFT JOIN campaigns c ON c.workspace_id = s.workspace_id AND c.id = s.campaign_id
 WHERE s.workspace_id = $1 AND s.contact_id = $2
 `
 
@@ -120,10 +119,12 @@ type ContactSendStatsRow struct {
 // campaign the contact was enrolled in but never sent to could not have produced
 // an open regardless of its tracking flag.
 //
-// LEFT JOIN so this addition provably cannot change emails_sent: a send whose
-// campaign row is missing still counts. sends.campaign_id is NOT NULL with an
-// ON DELETE CASCADE FK, so that cannot actually happen — the outer join is here
-// to make the count independent of the join rather than to handle a real case.
+// It reads sends.tracked — whether THAT message carried tracking, stamped at
+// claim time — and deliberately NOT campaigns.tracking_enabled. The campaign
+// flag is the CURRENT setting: reading it here meant turning tracking off
+// retroactively declared every past tracked send unmeasurable (and turning it
+// on declared untracked ones measurable), rewriting a contact's history every
+// time someone flipped a toggle.
 func (q *Queries) ContactSendStats(ctx context.Context, arg ContactSendStatsParams) (ContactSendStatsRow, error) {
 	row := q.db.QueryRow(ctx, contactSendStats, arg.WorkspaceID, arg.ContactID)
 	var i ContactSendStatsRow

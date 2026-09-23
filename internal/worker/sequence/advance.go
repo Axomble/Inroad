@@ -370,6 +370,11 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			// (an out-of-office deferral moved next_due_at past the time this
 			// task was queued for). Waiting out a min-interval would just fail
 			// the same guard again in seconds, so wait out the new due time.
+			//
+			// This reads the WORKER's clock, while the claim decided on the
+			// database's. That is deliberate and safe: here it only sizes the
+			// retry delay, so app/DB skew makes the retry early or late by the
+			// skew, and an early retry is simply refused by the claim again.
 			if now := time.Now(); job.NotYetDue(now) {
 				delay = max(delay, notDueBackoff(job, now))
 			}
@@ -404,7 +409,7 @@ func AdvanceHandler(core coreapi.Client, sender Sender, enq Enqueuer, publicURL 
 			// Tracking rewrite runs AFTER the unsub footer so the unsubscribe
 			// link is present in the body when RewriteHTML skips it (never
 			// click-tracked). Uses the pre-derived SendID (== the claimed row id).
-			if job.TrackingEnabled {
+			if job.CarriesTracking() {
 				bodyHTML = track.RewriteHTML(bodyHTML, publicURL, job.SendID, trackingSecret)
 			}
 		}

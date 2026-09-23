@@ -458,16 +458,6 @@ func (c client) localStepSendJob(ctx context.Context, enrollmentID, workspaceID 
 // became 'sent' (the sweeper/retry re-drives it) or ClaimAlreadySent on one that
 // just became 'sent' by another worker (the cursor advance is idempotent).
 func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob) (coreapi.ClaimOutcome, error) {
-	// Not-due guard, BEFORE any row is written: an advance task queued for an
-	// earlier due time must not deliver after next_due_at was pushed out (the
-	// out-of-office deferral). Enqueueing cannot be undone, so the claim — the
-	// single gate every step-send passes through — is where the push is made to
-	// stick. Reported as ClaimDeferred, the existing "wait and retry, don't
-	// advance" outcome.
-	if job.NotYetDue(time.Now()) {
-		c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeDeferred)
-		return coreapi.ClaimDeferred, nil
-	}
 	ws, err := uuid.Parse(job.WorkspaceID)
 	if err != nil {
 		return coreapi.ClaimSkip, err
@@ -495,11 +485,38 @@ func (c client) localClaimStepSend(ctx context.Context, job coreapi.StepSendJob)
 	defer func() { _ = tx.Rollback(ctx) }()
 	qtx := c.q.WithTx(tx)
 
+	// Not-due guard, BEFORE any row is written: an advance task queued for an
+	// earlier due time must not deliver after next_due_at was pushed out (the
+	// out-of-office deferral). Enqueueing cannot be undone, so the claim — the
+	// single gate every step-send passes through — is where the push is made to
+	// stick. Reported as ClaimDeferred, the existing "wait and retry, don't
+	// advance" outcome.
+	//
+	// Evaluated by the DATABASE, on the clock that stamped next_due_at, and in
+	// this transaction so its now() is the very instant the claim below stamps
+	// as claimed_at. It used to be job.NotYetDue(time.Now()), which compared a
+	// database timestamp against this process's clock: with the database ahead
+	// by the skew, a due-now enrollment was refused and retried until the skew
+	// elapsed. The gate is read-only and can only turn a claim into a refusal
+	// that writes nothing, so moving it changes which clock decides, not what a
+	// won claim means.
+	notYetDue, err := qtx.StepSendNotYetDue(ctx, pgtype.Timestamptz{
+		Time: job.NotDueUntil, Valid: !job.NotDueUntil.IsZero(),
+	})
+	if err != nil {
+		return coreapi.ClaimSkip, err
+	}
+	if notYetDue {
+		c.mtx.SendClaimed(stepClaimKind, metrics.ClaimOutcomeDeferred)
+		return coreapi.ClaimDeferred, nil
+	}
+
 	claimed, err := qtx.ClaimStepSend(ctx, gen.ClaimStepSendParams{
 		ID:          sendID,
 		WorkspaceID: ws, CampaignID: campaignID, ContactID: contactID, MailboxID: mailboxID,
 		ToEmail: job.ToEmail, StepOrder: int32(job.StepOrder), ReferencesHeader: job.References,
 		VariantID:    variantUUID(job.VariantID),
+		Tracked:      job.CarriesTracking(),
 		LeaseSeconds: claimLeaseSeconds,
 	})
 	if err != nil {

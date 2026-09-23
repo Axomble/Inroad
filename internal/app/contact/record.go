@@ -181,9 +181,11 @@ type Engagement struct {
 	ClickRate         float64
 	CampaignsEnrolled int64
 	// OpensMeasurable reports whether an open COULD have been recorded for this
-	// contact: true when at least one send that actually went out belonged to a
-	// campaign with tracking on. False with EmailsSent > 0 means the zero opens
-	// and clicks above are unmeasured, not observed.
+	// contact: true when at least one send that actually went out carried
+	// tracking, as recorded on the send row when it was claimed (sends.tracked) —
+	// not the campaign's current flag, which a later toggle would rewrite. False
+	// with EmailsSent > 0 means the zero opens and clicks above are unmeasured,
+	// not observed.
 	//
 	// It is computed server-side over the whole history on purpose. A client can
 	// only see Campaigns, which is capped at CampaignCap — so for a contact with

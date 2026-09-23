@@ -116,16 +116,25 @@ var _ Store = (*PgStore)(nil)
 // idempotent against the (campaign_id, contact_id, step_order) unique index
 // the step-send path already relies on, so the harness can be pointed at an
 // existing sandbox workspace twice without erroring or duplicating history.
+//
+// tracked is taken from the campaign's tracking flag: the harness invents a
+// past in which the campaign was configured as it is now, and it records opens
+// and clicks against these sends, which a send stamped untracked (the column's
+// default) could never have produced.
 func (s *PgStore) RecordSend(ctx context.Context, in SendRecord) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO sends (workspace_id, campaign_id, contact_id, mailbox_id, to_email,
-		                   step_order, status, message_id, references_header, created_at, sent_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'sent', $7, $8, $9, $9)
+		                   step_order, status, message_id, references_header, created_at, sent_at,
+		                   tracked)
+		VALUES ($1, $2, $3, $4, $5, $6, 'sent', $7, $8, $9, $9,
+		        COALESCE((SELECT c.tracking_enabled FROM campaigns c
+		                   WHERE c.id = $2 AND c.workspace_id = $1), false))
 		ON CONFLICT (campaign_id, contact_id, step_order) WHERE step_order IS NOT NULL
 		DO UPDATE SET status = 'sent', message_id = EXCLUDED.message_id,
 		              references_header = EXCLUDED.references_header,
-		              sent_at = EXCLUDED.sent_at, created_at = EXCLUDED.created_at
+		              sent_at = EXCLUDED.sent_at, created_at = EXCLUDED.created_at,
+		              tracked = EXCLUDED.tracked
 		WHERE sends.workspace_id = $1
 		RETURNING id`,
 		in.WorkspaceID, in.CampaignID, in.ContactID, in.MailboxID, in.ToEmail,
