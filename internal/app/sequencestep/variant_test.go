@@ -18,7 +18,7 @@ func variantFixture(baseWeight int32, variants ...Variant) (*Service, *fakeVaria
 	step := gen.SequenceStep{ID: testStepID, StepOrder: 1, Subject: "hi", VariantWeight: baseWeight}
 	store := &fakeStore{getStep: step}
 	vs := &fakeVariantStore{variants: variants, sent: map[uuid.UUID]int64{}}
-	return NewService(store, fakeChecker{status: "running"}, vs), vs
+	return NewService(store, fakeChecker{status: "running"}, vs, &fakeBranchStore{}), vs
 }
 
 func variant(label string, weight int32) Variant {

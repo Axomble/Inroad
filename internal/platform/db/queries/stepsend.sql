@@ -18,6 +18,7 @@
 -- the next advance.
 SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        e.status, e.thread_root_id, e.next_due_at, e.mailbox_id AS enrollment_mailbox_id,
+       e.last_sent_at, e.awaiting_condition_step,
        cam.id AS campaign_id, cam.rotation_mode, cam.tracking_enabled, cam.timezone,
        cam.daily_limit, cam.max_new_leads_per_day, cam.status AS campaign_status,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
@@ -96,7 +97,17 @@ SELECT COALESCE(sqlc.narg(not_due_until)::timestamptz > now(), false)::bool AS n
 -- name: LatestSentForContact :one
 -- The most recent successfully-sent step for a (campaign, contact), used to
 -- thread the next step (In-Reply-To = its message_id; References = its chain).
+--
+-- "Most recent" is by sent_at, with step_order only as the tie-break. On a linear
+-- sequence the two orders are the same (steps send in step_order), but a branched
+-- path need not visit steps in step_order — 1 → 3 → 2 is a valid path — and
+-- threading onto the highest-numbered step would reply to a message that is not
+-- the latest one the contact received.
+--
+-- Workspace-pinned like every other tenant read, even though (campaign_id,
+-- contact_id) already came from a workspace-scoped bundle: the pin costs nothing
+-- and keeps this from depending on its caller's discipline.
 SELECT message_id, references_header FROM sends
-WHERE campaign_id = $1 AND contact_id = $2 AND status = 'sent'
-ORDER BY step_order DESC
+WHERE campaign_id = $1 AND contact_id = $2 AND workspace_id = $3 AND status = 'sent'
+ORDER BY sent_at DESC NULLS LAST, step_order DESC
 LIMIT 1;

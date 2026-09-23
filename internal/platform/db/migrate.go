@@ -13,29 +13,24 @@ import (
 var migrationsFS embed.FS
 
 // Migrate applies all up migrations. It is a no-op if the schema is current.
-func Migrate(url string) (err error) {
-	m, err := newMigrator(url)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, closeMigrator(m)) }()
-	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return err
-	}
-	return nil
+// Concurrent callers on one database are serialized (see migratelock.go).
+func Migrate(url string) error {
+	return withMigrator(url, func(m *migrate.Migrate) error {
+		if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+			return err
+		}
+		return nil
+	})
 }
 
 // MigrateDown rolls back a single migration.
-func MigrateDown(url string) (err error) {
-	m, err := newMigrator(url)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, closeMigrator(m)) }()
-	if err := m.Steps(-1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return err
-	}
-	return nil
+func MigrateDown(url string) error {
+	return withMigrator(url, func(m *migrate.Migrate) error {
+		if err := m.Steps(-1); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+			return err
+		}
+		return nil
+	})
 }
 
 // MigrateTo rolls the schema to an exact version, applying or reverting whatever
@@ -51,16 +46,13 @@ func MigrateDown(url string) (err error) {
 // A test that names the version it wants to land on is correct no matter how many
 // migrations follow it: MigrateTo(dsn, N-1) undoes migration N whatever N+1, N+2
 // do later.
-func MigrateTo(url string, version uint) (err error) {
-	m, err := newMigrator(url)
-	if err != nil {
-		return err
-	}
-	defer func() { err = errors.Join(err, closeMigrator(m)) }()
-	if err := m.Migrate(version); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return err
-	}
-	return nil
+func MigrateTo(url string, version uint) error {
+	return withMigrator(url, func(m *migrate.Migrate) error {
+		if err := m.Migrate(version); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+			return err
+		}
+		return nil
+	})
 }
 
 // Version reports the schema's current migration version and whether it was
@@ -69,17 +61,36 @@ func MigrateTo(url string, version uint) (err error) {
 // error nil — golang-migrate's own ErrNilVersion for that case is a
 // library-specific sentinel a caller three packages away has no reason to
 // know about, so it is translated here rather than propagated.
+//
+// It takes the migration lock like the writers do, because merely opening
+// golang-migrate's driver takes the library's own lock (ensureVersionTable), and
+// a blocked wait for that lock can deadlock a running CREATE INDEX CONCURRENTLY.
+// A status probe during a deploy therefore waits for the migration to finish.
 func Version(url string) (version uint, dirty bool, err error) {
-	m, err := newMigrator(url)
-	if err != nil {
-		return 0, false, err
-	}
-	defer func() { err = errors.Join(err, closeMigrator(m)) }()
-	version, dirty, err = m.Version()
-	if errors.Is(err, migrate.ErrNilVersion) {
-		return 0, false, nil
-	}
+	err = withMigrator(url, func(m *migrate.Migrate) error {
+		var verr error
+		version, dirty, verr = m.Version()
+		if errors.Is(verr, migrate.ErrNilVersion) {
+			version, dirty, verr = 0, false, nil
+		}
+		return verr
+	})
 	return version, dirty, err
+}
+
+// withMigrator holds the migration lock (migratelock.go), builds a migrator,
+// runs fn and closes the migrator, in that order: the migrator must be
+// constructed UNDER the lock, since constructing it is what takes
+// golang-migrate's own lock.
+func withMigrator(url string, fn func(m *migrate.Migrate) error) error {
+	return withMigrationLock(url, func() (err error) {
+		m, err := newMigrator(url)
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, closeMigrator(m)) }()
+		return fn(m)
+	})
 }
 
 func newMigrator(url string) (*migrate.Migrate, error) {

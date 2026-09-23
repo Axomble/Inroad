@@ -47,6 +47,28 @@ func (q *Queries) AdvanceEnrollmentStep(ctx context.Context, arg AdvanceEnrollme
 	return err
 }
 
+const awaitEnrollmentCondition = `-- name: AwaitEnrollmentCondition :exec
+UPDATE sequence_enrollments
+SET next_due_at = $3, awaiting_condition_step = current_step
+WHERE id = $1 AND workspace_id = $2 AND status = 'active'
+`
+
+type AwaitEnrollmentConditionParams struct {
+	ID          uuid.UUID          `json:"id"`
+	WorkspaceID uuid.UUID          `json:"workspace_id"`
+	NextDueAt   pgtype.Timestamptz `json:"next_due_at"`
+}
+
+// A branch condition on the enrollment's current step is still open (or its
+// routed step is not due yet): record when to look again, and that this wait is
+// governed by a condition at this step (see awaiting_condition_step in migration
+// 20260923110214). Stamping next_due_at keeps the sweeper from re-driving the
+// enrollment every tick while it legitimately waits. Guarded on status='active'.
+func (q *Queries) AwaitEnrollmentCondition(ctx context.Context, arg AwaitEnrollmentConditionParams) error {
+	_, err := q.db.Exec(ctx, awaitEnrollmentCondition, arg.ID, arg.WorkspaceID, arg.NextDueAt)
+	return err
+}
+
 const completeEnrollment = `-- name: CompleteEnrollment :exec
 UPDATE sequence_enrollments
 SET current_step = $3, last_sent_at = now(), status = 'completed',
@@ -197,8 +219,29 @@ func (q *Queries) EnrollListMembers(ctx context.Context, arg EnrollListMembersPa
 	return items, nil
 }
 
+const finishEnrollment = `-- name: FinishEnrollment :exec
+UPDATE sequence_enrollments
+SET status = 'completed', completed_at = now(), next_due_at = NULL
+WHERE id = $1 AND workspace_id = $2 AND status = 'active'
+`
+
+type FinishEnrollmentParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// A branch routed this enrollment to the end of its path WITHOUT a send: mark it
+// completed and drop it out of the due index. Unlike CompleteEnrollment it leaves
+// current_step and last_sent_at alone, because nothing was sent — they still
+// describe the last message the contact actually received. Guarded on
+// status='active' for the reason CompleteEnrollment is: a stop is terminal and wins.
+func (q *Queries) FinishEnrollment(ctx context.Context, arg FinishEnrollmentParams) error {
+	_, err := q.db.Exec(ctx, finishEnrollment, arg.ID, arg.WorkspaceID)
+	return err
+}
+
 const getEnrollment = `-- name: GetEnrollment :one
-SELECT id, workspace_id, campaign_id, contact_id, current_step, status, stop_reason, enrolled_at, last_sent_at, next_due_at, thread_root_id, completed_at, stopped_at, cap_deferrals, reply_class, reply_source, reply_confidence, replied_at, mailbox_id FROM sequence_enrollments WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, campaign_id, contact_id, current_step, status, stop_reason, enrolled_at, last_sent_at, next_due_at, thread_root_id, completed_at, stopped_at, cap_deferrals, reply_class, reply_source, reply_confidence, replied_at, mailbox_id, awaiting_condition_step FROM sequence_enrollments WHERE id = $1 AND workspace_id = $2
 `
 
 type GetEnrollmentParams struct {
@@ -229,6 +272,7 @@ func (q *Queries) GetEnrollment(ctx context.Context, arg GetEnrollmentParams) (S
 		&i.ReplyConfidence,
 		&i.RepliedAt,
 		&i.MailboxID,
+		&i.AwaitingConditionStep,
 	)
 	return i, err
 }
@@ -351,6 +395,48 @@ func (q *Queries) ListDueEnrollments(ctx context.Context) ([]ListDueEnrollmentsR
 		return nil, err
 	}
 	return items, nil
+}
+
+const nudgeEnrollmentAwaitingReply = `-- name: NudgeEnrollmentAwaitingReply :exec
+UPDATE sequence_enrollments e
+SET next_due_at = now()
+WHERE e.id = $1 AND e.workspace_id = $2 AND e.status = 'active'
+  AND e.next_due_at > now()
+  AND e.awaiting_condition_step = e.current_step
+  AND NOT COALESCE(
+        (SELECT rl.is_automated FROM reply_labels rl
+         WHERE rl.workspace_id = e.workspace_id AND rl.key = $3::text),
+        $3::text IN ('auto_reply', 'out_of_office'))
+  AND EXISTS (
+        SELECT 1 FROM sequence_step_branches b
+        JOIN sequence_steps s ON s.id = b.step_id AND s.campaign_id = b.campaign_id
+        WHERE b.campaign_id = e.campaign_id AND b.workspace_id = e.workspace_id
+          AND s.step_order = e.current_step
+          AND b.condition IN ('replied', 'not_replied'))
+`
+
+type NudgeEnrollmentAwaitingReplyParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	ReplyClass  string    `json:"reply_class"`
+}
+
+// A reply that did NOT stop the enrollment just arrived. If the enrollment is
+// waiting on a reply condition at its current step, pull its due time to now so
+// the next sweep evaluates the condition instead of waiting out the re-check
+// interval. Automated replies (out-of-office, auto-reply) are excluded: they are
+// the only replies that defer an enrollment, and pulling next_due_at forward
+// would undo that deferral. Never pushes a due time LATER, and is a no-op for
+// every enrollment without a reply condition — which is every linear campaign.
+//
+// awaiting_condition_step = current_step is the second half of that deferral
+// guard: it proves the due time being pulled forward was stamped by a CONDITION
+// wait at this step. An out-of-office deferral is stamped by DeferEnrollment,
+// which never touches that column, so an enrollment whose current due time is a
+// stated absence (not yet parked by a condition at this step) is left alone.
+func (q *Queries) NudgeEnrollmentAwaitingReply(ctx context.Context, arg NudgeEnrollmentAwaitingReplyParams) error {
+	_, err := q.db.Exec(ctx, nudgeEnrollmentAwaitingReply, arg.ID, arg.WorkspaceID, arg.ReplyClass)
+	return err
 }
 
 const setEnrollmentDue = `-- name: SetEnrollmentDue :exec

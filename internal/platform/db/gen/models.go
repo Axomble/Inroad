@@ -959,25 +959,26 @@ type SendingDomain struct {
 }
 
 type SequenceEnrollment struct {
-	ID              uuid.UUID          `json:"id"`
-	WorkspaceID     uuid.UUID          `json:"workspace_id"`
-	CampaignID      uuid.UUID          `json:"campaign_id"`
-	ContactID       uuid.UUID          `json:"contact_id"`
-	CurrentStep     int32              `json:"current_step"`
-	Status          string             `json:"status"`
-	StopReason      *string            `json:"stop_reason"`
-	EnrolledAt      pgtype.Timestamptz `json:"enrolled_at"`
-	LastSentAt      pgtype.Timestamptz `json:"last_sent_at"`
-	NextDueAt       pgtype.Timestamptz `json:"next_due_at"`
-	ThreadRootID    string             `json:"thread_root_id"`
-	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
-	StoppedAt       pgtype.Timestamptz `json:"stopped_at"`
-	CapDeferrals    int32              `json:"cap_deferrals"`
-	ReplyClass      *string            `json:"reply_class"`
-	ReplySource     *string            `json:"reply_source"`
-	ReplyConfidence *float32           `json:"reply_confidence"`
-	RepliedAt       pgtype.Timestamptz `json:"replied_at"`
-	MailboxID       pgtype.UUID        `json:"mailbox_id"`
+	ID                    uuid.UUID          `json:"id"`
+	WorkspaceID           uuid.UUID          `json:"workspace_id"`
+	CampaignID            uuid.UUID          `json:"campaign_id"`
+	ContactID             uuid.UUID          `json:"contact_id"`
+	CurrentStep           int32              `json:"current_step"`
+	Status                string             `json:"status"`
+	StopReason            *string            `json:"stop_reason"`
+	EnrolledAt            pgtype.Timestamptz `json:"enrolled_at"`
+	LastSentAt            pgtype.Timestamptz `json:"last_sent_at"`
+	NextDueAt             pgtype.Timestamptz `json:"next_due_at"`
+	ThreadRootID          string             `json:"thread_root_id"`
+	CompletedAt           pgtype.Timestamptz `json:"completed_at"`
+	StoppedAt             pgtype.Timestamptz `json:"stopped_at"`
+	CapDeferrals          int32              `json:"cap_deferrals"`
+	ReplyClass            *string            `json:"reply_class"`
+	ReplySource           *string            `json:"reply_source"`
+	ReplyConfidence       *float32           `json:"reply_confidence"`
+	RepliedAt             pgtype.Timestamptz `json:"replied_at"`
+	MailboxID             pgtype.UUID        `json:"mailbox_id"`
+	AwaitingConditionStep *int32             `json:"awaiting_condition_step"`
 }
 
 type SequenceStep struct {
@@ -992,6 +993,19 @@ type SequenceStep struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	VariantWeight int32              `json:"variant_weight"`
+}
+
+type SequenceStepBranch struct {
+	StepID        uuid.UUID          `json:"step_id"`
+	WorkspaceID   uuid.UUID          `json:"workspace_id"`
+	CampaignID    uuid.UUID          `json:"campaign_id"`
+	Condition     string             `json:"condition"`
+	WithinDays    *int32             `json:"within_days"`
+	ReplyLabelKey *string            `json:"reply_label_key"`
+	YesStepID     pgtype.UUID        `json:"yes_step_id"`
+	NoStepID      pgtype.UUID        `json:"no_step_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 type SequenceStepVariant struct {

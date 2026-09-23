@@ -1,0 +1,222 @@
+// A small stateful stand-in for the sequence endpoints, installed as `fetch`.
+// Reorder, create, delete and the branch writes change its state, and every
+// GET answers from that state, so a refetch is consistent with the mutations
+// before it — the canvas is exercised through RTK Query exactly as in the app.
+// Not a test file itself: shared by the canvas suites.
+import { vi } from 'vitest'
+import type { StepBranch, StepBranchRequest } from '../api'
+
+export type FakeStep = {
+  id: string
+  step_order: number
+  delay_seconds: number
+  subject: string
+  body_text?: string
+  body_html?: string
+}
+export type CapturedRequest = { method: string; url: string; body: unknown }
+export type FakeReplyLabel = { key: string; label: string; stops_enrollment: boolean }
+
+export type FakeSequenceServer = {
+  steps: FakeStep[]
+  /** Branches by source step. */
+  branches: Map<string, StepBranch>
+  requests: CapturedRequest[]
+  campaign: { id: string; status: string; tracking_enabled: boolean }
+  replyLabels: FakeReplyLabel[]
+  /** When set, the reorder endpoint answers with this instead of reordering. */
+  reorderFails: Response | null
+  /** When set, a branch write (PUT or DELETE) answers with this instead of saving. */
+  branchFails: Response | null
+  /** When true, GET /graph answers 500. */
+  graphFails: boolean
+  /** When set, GET /steps waits on it — "the refetch hasn't come back yet". */
+  listGate: Promise<void> | null
+  /** When set, GET /graph waits on it. */
+  graphGate: Promise<void> | null
+  /** When set, a branch write waits on it before answering — "the PUT is in flight". */
+  branchGate: Promise<void> | null
+}
+
+export function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } })
+}
+
+function renumber(list: FakeStep[]): FakeStep[] {
+  return list.map((step, index) => ({ ...step, step_order: index + 1 }))
+}
+
+function graphOf(server: FakeSequenceServer) {
+  return {
+    campaign_id: server.campaign.id,
+    entry_step_id: server.steps[0]?.id ?? null,
+    nodes: server.steps.map((step, index) => ({
+      step_id: step.id,
+      step_order: step.step_order,
+      default_next_step_id: server.steps[index + 1]?.id ?? null,
+      branch: server.branches.get(step.id) ?? null,
+    })),
+  }
+}
+
+function labelList(server: FakeSequenceServer) {
+  return {
+    labels: server.replyLabels.map((label, index) => ({
+      id: `rl-${label.key}`,
+      key: label.key,
+      label: label.label,
+      color: '#888888',
+      position: index,
+      is_builtin: true,
+      stops_enrollment: label.stops_enrollment,
+      is_automated: false,
+      suppresses_contact: false,
+      captures_deal: false,
+      defers_enrollment: false,
+      created_at: '2026-09-01T00:00:00Z',
+      updated_at: '2026-09-01T00:00:00Z',
+    })),
+  }
+}
+
+let versions = 0
+/** "2026-09-24T10:00:00.000001Z", "…000002Z", … — six fractional digits. */
+function nextVersion(): string {
+  versions += 1
+  return `2026-09-24T10:00:00.${String(versions).padStart(6, '0')}Z`
+}
+
+export function installFakeSequenceServer(steps: FakeStep[]): FakeSequenceServer {
+  const server: FakeSequenceServer = {
+    steps,
+    branches: new Map(),
+    requests: [],
+    campaign: { id: 'c-1', status: 'draft', tracking_enabled: true },
+    replyLabels: [],
+    reorderFails: null,
+    branchFails: null,
+    graphFails: false,
+    listGate: null,
+    graphGate: null,
+    branchGate: null,
+  }
+
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const isRequest = input instanceof Request
+      const url = isRequest ? input.url : typeof input === 'string' ? input : (input as URL).href
+      const method = (isRequest ? input.method : (init?.method ?? 'GET')).toUpperCase()
+      const text = isRequest ? await input.clone().text() : typeof init?.body === 'string' ? init.body : ''
+      const body = text ? (JSON.parse(text) as unknown) : undefined
+      server.requests.push({ method, url, body })
+
+      if (url.endsWith('/reply-labels')) return jsonResponse(labelList(server))
+      if (url.endsWith('/graph')) {
+        if (server.graphGate) await server.graphGate
+        return server.graphFails ? jsonResponse({ error: 'boom' }, 500) : jsonResponse(graphOf(server))
+      }
+      const parsed = new URL(url)
+      const branchPath = /\/steps\/([^/]+)\/branch$/.exec(parsed.pathname)
+      if (branchPath?.[1]) {
+        if (server.branchGate) await server.branchGate
+        if (server.branchFails) return server.branchFails
+        const stepId = branchPath[1]
+        const stored = server.branches.get(stepId) ?? null
+        // The precondition, as the contract states it: absent = no check;
+        // null = only if the step has no branch; a token = only if the stored
+        // updated_at is exactly that string.
+        const conflict = () =>
+          jsonResponse({ error: 'the branch changed', code: 'branch_changed', current: stored }, 409)
+        if (method === 'DELETE') {
+          const expected = parsed.searchParams.get('expected_updated_at')
+          if (expected !== null && (stored === null || stored.updated_at !== expected)) return conflict()
+          server.branches.delete(stepId)
+          return new Response(null, { status: 204 })
+        }
+        const put = body as StepBranchRequest
+        if (Object.hasOwn(put, 'expected_updated_at')) {
+          const expected = put.expected_updated_at
+          if (expected === null ? stored !== null : stored?.updated_at !== expected) return conflict()
+        }
+        const saved: StepBranch = {
+          step_id: stepId,
+          condition: put.condition,
+          within_days: put.within_days ?? null,
+          reply_label_key: put.reply_label_key ?? null,
+          yes_step_id: put.yes_step_id ?? null,
+          no_step_id: put.no_step_id ?? null,
+          // A new version per write, at microsecond precision like the real
+          // server's — a token that a Date round-trip would truncate.
+          updated_at: nextVersion(),
+        }
+        server.branches.set(stepId, saved)
+        return jsonResponse(saved)
+      }
+      if (url.endsWith('/steps/s-1/variants')) {
+        return jsonResponse([
+          { id: 'v-1', step_id: 's-1', label: 'B', weight: 50, subject: '', body_text: '', body_html: '<p>b</p>' },
+          { id: 'v-2', step_id: 's-1', label: 'C', weight: 50, subject: '', body_text: '', body_html: '<p>c</p>' },
+        ])
+      }
+      if (url.endsWith('/variants')) return jsonResponse([])
+      if (url.endsWith('/steps/reorder')) {
+        if (server.reorderFails) return server.reorderFails
+        const { step_ids } = body as { step_ids: string[] }
+        server.steps = renumber(step_ids.flatMap((id) => server.steps.filter((step) => step.id === id)))
+        return jsonResponse(server.steps)
+      }
+      if (/\/steps\/[^/]+$/.test(url) && method === 'PUT') return jsonResponse(server.steps[0])
+      if (/\/steps\/[^/]+$/.test(url) && method === 'DELETE') {
+        const id = url.split('/').at(-1)
+        server.steps = renumber(server.steps.filter((step) => step.id !== id))
+        return new Response(null, { status: 204 })
+      }
+      if (url.endsWith('/steps') && method === 'POST') {
+        const created: FakeStep = {
+          id: 's-new',
+          step_order: server.steps.length + 1,
+          delay_seconds: 0,
+          subject: (body as { subject?: string }).subject ?? '',
+        }
+        server.steps = [...server.steps, created]
+        return jsonResponse(created)
+      }
+      if (url.endsWith('/steps')) {
+        if (server.listGate) await server.listGate
+        return jsonResponse(server.steps)
+      }
+      if (url.endsWith(`/campaigns/${server.campaign.id}`)) return jsonResponse(server.campaign)
+      return jsonResponse({ error: `unhandled ${method} ${url}` }, 404)
+    }),
+  )
+  return server
+}
+
+export function lastRequest(
+  server: FakeSequenceServer,
+  predicate: (request: CapturedRequest) => boolean,
+): CapturedRequest | undefined {
+  return [...server.requests].reverse().find(predicate)
+}
+
+/** The bodies sent to paths ending in `suffix` (query strings aside), in order. */
+export function bodiesTo(server: FakeSequenceServer, suffix: string, method?: string): unknown[] {
+  return requestsTo(server, suffix, method).map((request) => request.body)
+}
+
+/** The requests sent to paths ending in `suffix` (query strings aside), in order. */
+export function requestsTo(server: FakeSequenceServer, suffix: string, method?: string): CapturedRequest[] {
+  return server.requests.filter(
+    (request) => new URL(request.url).pathname.endsWith(suffix) && (method === undefined || request.method === method),
+  )
+}
+
+/** A promise and the function that settles it, for holding a response back. */
+export function gate(): { promise: Promise<void>; release: () => void } {
+  let release = () => {}
+  const promise = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}

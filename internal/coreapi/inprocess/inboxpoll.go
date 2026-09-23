@@ -191,7 +191,18 @@ func (c client) localRecordReplyClass(ctx context.Context, enrollmentID, workspa
 	if err != nil {
 		return err
 	}
-	return c.recordReplyClass(ctx, eid, ws, class, source, confidence)
+	if err := c.recordReplyClass(ctx, eid, ws, class, source, confidence); err != nil {
+		return err
+	}
+	// A reply that did not stop the sequence can still decide a branch
+	// condition on the step the contact is waiting at ("replied within N
+	// days"). Pull that enrollment's due time to now so the next sweep routes it
+	// instead of leaving it for the next hourly recheck. A no-op for every
+	// enrollment not waiting on a reply condition, and for automated replies,
+	// which are the ones that defer an enrollment (see the query).
+	return c.q.NudgeEnrollmentAwaitingReply(ctx, gen.NudgeEnrollmentAwaitingReplyParams{
+		ID: eid, WorkspaceID: ws, ReplyClass: class,
+	})
 }
 
 // MarkUnsubscribed suppresses the address and, when the reply belongs to an
