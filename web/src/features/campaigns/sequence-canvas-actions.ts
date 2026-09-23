@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext } from 'react'
+import type { ConditionDraft } from './branch-draft'
 import type { StepWithId } from './step-card'
 
 /**
@@ -12,7 +13,13 @@ import type { StepWithId } from './step-card'
 export type SequencePanel =
   | { kind: 'edit'; stepId: string; returnFocus: HTMLElement | null }
   | { kind: 'add'; afterId: string | null; returnFocus: HTMLElement | null }
-  | { kind: 'condition'; stepId: string; returnFocus: HTMLElement | null }
+  | {
+      kind: 'condition'
+      stepId: string
+      returnFocus: HTMLElement | null
+      /** Opens the editor on this draft rather than the saved branch (a drag the rules refused). */
+      draft?: ConditionDraft
+    }
 
 /** The element that currently has focus, for `SequencePanel.returnFocus`. */
 export function currentFocus(): HTMLElement | null {

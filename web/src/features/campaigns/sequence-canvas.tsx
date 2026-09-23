@@ -10,7 +10,9 @@ import {
   type SequenceStep,
   type StepBranch,
 } from './api'
-import { withExit } from './branch-draft'
+import { draftFromBranch, validateDraft, withExit } from './branch-draft'
+import { applyBranchWrites, isSuperseded, type BranchWrite } from './branch-overlay'
+import { useBranchRules } from './branch-rules'
 import { branchErrorMessage } from './branch-error'
 import { cycleStepIds } from './branch-loop'
 import { ConditionEditor } from './condition-editor'
@@ -50,9 +52,6 @@ const MIN_CANVAS_HEIGHT = 320
 const MAX_CANVAS_HEIGHT = 720
 const CANVAS_PADDING = 96
 
-// Frozen in use: nothing ever writes to it, it only stands in for "no routing known".
-const NO_BRANCHES: ReadonlyMap<string, StepBranch> = new Map<string, StepBranch>()
-
 export type SequenceCanvasProps = {
   campaignId: string
   /** Server truth, sorted by `step_order`. */
@@ -65,6 +64,11 @@ export type SequenceCanvasProps = {
    */
   graph: CampaignGraph | undefined
   graphFailed: boolean
+  /** Whether the graph is refetching, and when the request behind `graph` started (see branch-overlay.ts). */
+  graphIsFetching: boolean
+  graphStartedAt: number | undefined
+  /** Refetch the routing — before a condition editor opens, so it starts from the server's latest. */
+  onRefreshRouting: () => void
   /** The loop the server last refused, highlighted on its nodes. */
   loopStepIds: readonly string[] | null
   onLoop: (stepIds: string[] | null) => void
@@ -95,6 +99,9 @@ export default function SequenceCanvas({
   canModifyStructure,
   graph: routing,
   graphFailed,
+  graphIsFetching,
+  graphStartedAt,
+  onRefreshRouting,
   loopStepIds,
   onLoop,
   panel,
@@ -104,7 +111,8 @@ export default function SequenceCanvas({
   onNotice,
 }: SequenceCanvasProps) {
   const [reorderSteps, reorderState] = useReorderStepsMutation()
-  const [setBranch] = useSetStepBranchMutation()
+  const [setBranch, setBranchState] = useSetStepBranchMutation()
+  const rules = useBranchRules(campaignId)
   const [focusRequest, setFocusRequest] = useState<string | null>(null)
   const clearFocusRequest = useCallback(() => setFocusRequest(null), [])
 
@@ -125,8 +133,28 @@ export default function SequenceCanvas({
     latestServerSteps.current = serverSteps
   }, [serverSteps])
 
+  // A failed refetch keeps the last graph it had (RTK leaves `data` in place),
+  // so the flow still draws what is known — but nothing may be written against
+  // it until the routing loads again.
   const canEditBranches = !graphFailed && routing !== undefined
-  const branches = useMemo(() => (graphFailed ? NO_BRANCHES : branchesByStep(routing?.nodes)), [graphFailed, routing])
+  const [writes, setWrites] = useState<BranchWrite[]>([])
+  const freshness = useMemo(
+    () => ({ isFetching: graphIsFetching, startedAt: graphStartedAt }),
+    [graphIsFetching, graphStartedAt],
+  )
+  const branches = useMemo(
+    () => applyBranchWrites(branchesByStep(routing?.nodes), writes, freshness),
+    [freshness, routing, writes],
+  )
+  const recordWrite = useCallback(
+    (stepId: string, branch: StepBranch | null) => {
+      // Date.now() once the response is in: the server committed before it
+      // answered, so any graph request started after this moment includes it.
+      const write = { stepId, branch, savedAt: Date.now() }
+      setWrites((current) => [...current.filter((entry) => !isSuperseded(entry, freshness)), write])
+    },
+    [freshness],
+  )
   const loop = useMemo(() => new Set(loopStepIds ?? []), [loopStepIds])
 
   const flow = useMemo(
@@ -208,7 +236,10 @@ export default function SequenceCanvas({
       editingStepId: panel?.kind === 'edit' ? panel.stepId : null,
       editingConditionStepId: panel?.kind === 'condition' ? panel.stepId : null,
       editStep: (stepId) => onPanelChange({ kind: 'edit', stepId, returnFocus: currentFocus() }),
-      editCondition: (stepId) => onPanelChange({ kind: 'condition', stepId, returnFocus: currentFocus() }),
+      editCondition: (stepId) => {
+        onRefreshRouting()
+        onPanelChange({ kind: 'condition', stepId, returnFocus: currentFocus() })
+      },
       openVariants: (step, position) => onVariants({ step, position }),
       requestDelete: (step) => {
         // Deleting the step a panel is about would leave it editing nothing.
@@ -229,6 +260,7 @@ export default function SequenceCanvas({
       moveBlock,
       onDelete,
       onPanelChange,
+      onRefreshRouting,
       onVariants,
       panel,
       reorderState.isLoading,
@@ -251,39 +283,67 @@ export default function SequenceCanvas({
   // is a reorder (structure, draft-only) — and only from a step whose next is
   // still the fall-through, since a condition owns the rest; the reorder must
   // also leave a subject on step 1, the rule the move buttons follow.
+  //
+  // An exit drag is refused while another branch write is in flight: it would
+  // be built from the branch as it stood before that write answered.
   const exitFor = useCallback(
-    (connection: Pick<Edge, 'source' | 'target' | 'sourceHandle'>) =>
-      canEditBranches ? exitForConnection(connection, branches, stepIds) : null,
-    [branches, canEditBranches, stepIds],
+    (connection: Pick<Edge, 'source' | 'target' | 'sourceHandle'>) => {
+      if (!canEditBranches || setBranchState.isLoading) return null
+      const exit = exitForConnection(connection, branches, stepIds)
+      const branch = exit ? branches.get(exit.stepId) : undefined
+      if (!exit || !branch) return null
+      // Dropping an exit where it already goes changes nothing: don't write.
+      const current = exit.exit === 'yes' ? branch.yes_step_id : branch.no_step_id
+      return current === exit.target ? null : { ...exit, branch }
+    },
+    [branches, canEditBranches, setBranchState.isLoading, stepIds],
   )
   const reorderFor = useCallback(
     (connection: Pick<Edge, 'source' | 'target'>): string[] | null => {
-      if (!canModifyStructure || branches.has(connection.source)) return null
+      // With the routing unknown, a reorder could re-link a fall-through into
+      // a branch nobody can see — hold structure drags until it loads.
+      if (!canModifyStructure || graphFailed || branches.has(connection.source)) return null
       if (!isMeaningfulConnection(connection, stepIds)) return null
       const next = orderForConnection(order, connection.source, connection.target)
       return leadsWithSubject(next, subjectOf) ? next : null
     },
-    [branches, canModifyStructure, order, stepIds, subjectOf],
+    [branches, canModifyStructure, graphFailed, order, stepIds, subjectOf],
   )
 
   const setExit = useCallback(
     async (connection: Connection) => {
       const exit = exitFor(connection)
-      const branch = exit ? branches.get(exit.stepId) : undefined
-      if (!exit || !branch) return
+      if (!exit) return
+      const request = withExit(exit.branch, exit.exit, exit.target)
+      // Checked against the same rules the editor applies. A drag that breaks
+      // one (tracking turned off since the condition was saved, a label that
+      // now stops the sequence) opens the editor on the dragged draft with the
+      // problem shown by its field, instead of a banner about a server refusal.
+      const draft = draftFromBranch(
+        exit.exit === 'yes' ? { ...exit.branch, yes_step_id: exit.target } : { ...exit.branch, no_step_id: exit.target },
+      )
+      const problems = validateDraft(draft, {
+        stepId: exit.stepId,
+        stepIds,
+        trackingEnabled: rules.trackingEnabled,
+        htmlEverywhere: undefined,
+        replyLabels: rules.replyLabels,
+      })
+      if (problems.length > 0) {
+        onPanelChange({ kind: 'condition', stepId: exit.stepId, returnFocus: currentFocus(), draft })
+        return
+      }
       onNotice(null)
       onLoop(null)
-      const result = await setBranch({
-        id: campaignId,
-        stepId: exit.stepId,
-        stepBranchRequest: withExit(branch, exit.exit, exit.target),
-      })
+      const result = await setBranch({ id: campaignId, stepId: exit.stepId, stepBranchRequest: request })
       if ('error' in result) {
         onNotice(branchErrorMessage(result.error))
         onLoop(cycleStepIds(result.error))
+        return
       }
+      recordWrite(exit.stepId, result.data)
     },
-    [branches, campaignId, exitFor, onLoop, onNotice, setBranch],
+    [campaignId, exitFor, onLoop, onNotice, onPanelChange, recordWrite, rules, setBranch, stepIds],
   )
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -357,7 +417,9 @@ export default function SequenceCanvas({
             />
           </SidePanel>
         )}
-        {panel?.kind === 'condition' && panelStep && canEditBranches && (
+        {/* Stays mounted if a refetch fails while it's open — with saving
+            held — rather than vanishing with the user's draft in it. */}
+        {panel?.kind === 'condition' && panelStep && routing !== undefined && (
           <SidePanel
             key={`condition:${panelStep.id}`}
             title={`Condition after step ${panelPosition}`}
@@ -369,6 +431,9 @@ export default function SequenceCanvas({
               position={panelPosition}
               steps={steps}
               branch={branches.get(panelStep.id) ?? null}
+              initialDraft={panel.draft}
+              routingUnavailable={graphFailed}
+              onWritten={(branch) => recordWrite(panelStep.id, branch)}
               onSaved={() => closePanel(focusKey(panelStep.id, 'condition'))}
               onDeleted={() => closePanel(focusKey(panelStep.id, 'add-condition'))}
               onCancel={() => closePanel()}

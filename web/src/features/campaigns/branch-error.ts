@@ -22,7 +22,7 @@ const COPY: Record<BranchErrorCode, string> = {
 }
 
 function isBranchErrorCode(code: string | undefined): code is BranchErrorCode {
-  return code !== undefined && code in COPY
+  return code !== undefined && Object.hasOwn(COPY, code)
 }
 
 export function branchErrorMessage(error: unknown): string {

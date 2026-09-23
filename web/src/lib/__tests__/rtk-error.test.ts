@@ -1,4 +1,4 @@
-import { errorCode, httpStatus, isFetchBaseQueryError, parseRetryAfter, retryAfterSeconds, withRetryAfter } from '../rtk-error'
+import { errorCode, errorField, httpStatus, isFetchBaseQueryError, parseRetryAfter, retryAfterSeconds, withRetryAfter } from '../rtk-error'
 
 /**
  * A rate-limited error in the shape a component actually receives: RTK hands
@@ -89,5 +89,19 @@ describe('errorCode', () => {
     expect(errorCode({ status: 500, data: 'oops' })).toBeUndefined()
     expect(errorCode({ message: 'thrown' })).toBeUndefined()
     expect(errorCode(undefined)).toBeUndefined()
+  })
+})
+
+describe('errorField', () => {
+  it('reads one field of an HTTP error body, leaving it for the caller to narrow', () => {
+    expect(errorField({ status: 422, data: { step_ids: ['a', 'b'] } }, 'step_ids')).toEqual(['a', 'b'])
+  })
+  it('is undefined for a missing field, a non-object body, or a non-HTTP error', () => {
+    expect(errorField({ status: 422, data: { code: 'cycle' } }, 'step_ids')).toBeUndefined()
+    expect(errorField({ status: 500, data: 'oops' }, 'code')).toBeUndefined()
+    expect(errorField({ status: 500, data: null }, 'code')).toBeUndefined()
+    expect(errorField({ message: 'thrown' }, 'code')).toBeUndefined()
+    // Only the body's own keys, never its prototype's.
+    expect(errorField({ status: 400, data: {} }, 'toString')).toBeUndefined()
   })
 })

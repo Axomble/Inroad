@@ -4,15 +4,15 @@
 // needs this (a delete can close a loop) and nothing else of branching: keeping
 // it separate keeps the condition editor's copy and rules in the lazy canvas
 // chunk.
-import { errorCode, isFetchBaseQueryError } from '@/lib/rtk-error'
+import { errorCode, errorField } from '@/lib/rtk-error'
 
 /**
  * The steps on the loop, in path order; `null` for any other failure, or a
  * cycle that didn't list its steps in a shape that can be trusted.
  */
 export function cycleStepIds(error: unknown): string[] | null {
-  if (errorCode(error) !== 'cycle' || !isFetchBaseQueryError(error)) return null
-  const ids = (error.data as { step_ids?: unknown }).step_ids
+  if (errorCode(error) !== 'cycle') return null
+  const ids = errorField(error, 'step_ids')
   if (!Array.isArray(ids) || !ids.every((id): id is string => typeof id === 'string')) return null
   return ids.length > 0 ? ids : null
 }

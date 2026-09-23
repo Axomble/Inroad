@@ -61,7 +61,11 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
   // The routing (conditions). Its own query: the step list stays the source of
   // content, and a failure here degrades the flow to the linear view instead
   // of hiding the sequence.
-  const graphQuery = useGetCampaignGraphQuery({ id: campaignId })
+  //
+  // `refetchOnFocus`: another tab's condition edits arrive when this one is
+  // looked at again, not on the next manual reload. It narrows cross-tab
+  // last-writer-wins; it doesn't close it (see branch-overlay.ts).
+  const graphQuery = useGetCampaignGraphQuery({ id: campaignId }, { refetchOnFocus: true })
   const hasBranches = graphQuery.data?.nodes.some((node) => node.branch !== null) ?? false
   // The step whose A/B variants are open, plus its 1-based position for the
   // dialog title. Held here rather than in the card so only one dialog can be
@@ -75,7 +79,14 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
   const [notice, setNotice] = useState<string | null>(null)
   // The loop the server last refused (a branch write, a reorder, a delete),
   // marked on the flow's nodes until the next attempt.
-  const [loop, setLoop] = useState<string[] | null>(null)
+  // Held with the step list and graph it was reported against, and shown only
+  // while those are still what's on screen: once either changes, the marks
+  // may point at a loop that no longer exists.
+  const [loopReport, setLoopReport] = useState<{ ids: string[]; steps: unknown; graph: unknown } | null>(null)
+  const loop =
+    loopReport && loopReport.steps === data && loopReport.graph === graphQuery.data ? loopReport.ids : null
+  const setLoop = (ids: string[] | null) =>
+    setLoopReport(ids ? { ids, steps: data, graph: graphQuery.data } : null)
   const [view, setView] = useState<SequenceView>('canvas')
   const [canvasPanel, setCanvasPanel] = useState<SequencePanel | null>(null)
 
@@ -156,10 +167,10 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
       </SectionBar>
 
       {notice && <NoticeBanner notice={{ tone: 'error', text: notice }} />}
-      {canvasShown && graphQuery.isError && (
+      {serverSteps.length > 0 && graphQuery.isError && (
         <QueryErrorBanner
           className="mx-5 my-3"
-          message="Couldn’t load this sequence’s conditions. The flow shows the steps in order, and conditions can’t be added or edited until they load."
+          message="Couldn’t load this sequence’s conditions, so where each path goes may not be shown, and conditions — and dragging steps — are held until they load."
           onRetry={() => void graphQuery.refetch()}
           retrying={graphQuery.isFetching}
         />
@@ -207,6 +218,9 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
               canModifyStructure={isDraft}
               graph={graphQuery.data}
               graphFailed={graphQuery.isError}
+              graphIsFetching={graphQuery.isFetching}
+              graphStartedAt={graphQuery.startedTimeStamp}
+              onRefreshRouting={() => void graphQuery.refetch()}
               loopStepIds={loop}
               onLoop={setLoop}
               panel={canvasPanel}
