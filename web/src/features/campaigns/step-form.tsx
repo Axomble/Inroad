@@ -56,7 +56,8 @@ export function StepForm({
   step?: SequenceStep
   /** First step opens the thread, so its subject is required. */
   isFirstStep: boolean
-  onDone: () => void
+  /** Called with the saved step, so a caller that just created one can place it (the API appends at the end). */
+  onDone: (saved?: SequenceStep) => void
   onCancel: () => void
 }) {
   const isEdit = step != null
@@ -115,11 +116,11 @@ export function StepForm({
     }
     if (isEdit && step?.id) {
       const result = await updateStep({ id: campaignId, stepId: step.id, stepRequest })
-      if ('data' in result) onDone()
+      if ('data' in result) onDone(result.data)
       return
     }
     const result = await createStep({ id: campaignId, stepRequest })
-    if ('data' in result) onDone()
+    if ('data' in result) onDone(result.data)
   }
 
   return (

@@ -45,6 +45,12 @@ vi.mock('@dnd-kit/sortable', async (importOriginal) => {
   }
 })
 
+// Warm the lazy sortable list so tests that wait for its drag handles don't
+// race a cold dynamic import inside findBy*'s 1s window.
+beforeAll(async () => {
+  await import('../sortable-step-list')
+}, 30_000)
+
 // Radix AlertDialog focus/pointer plumbing that jsdom doesn't implement.
 beforeAll(() => {
   const proto = Element.prototype as unknown as Record<string, unknown>
@@ -123,12 +129,22 @@ afterEach(() => {
   dnd.onDragEnd = undefined
 })
 
+// These tests cover the LIST view. The flow canvas is the default (and has its
+// own suite, sequence-canvas.test.tsx), so switch before anything loads — the
+// toggle is in the section bar from the first render, and switching first
+// means the lazy canvas never mounts here.
+function renderListView(status: string) {
+  const result = renderWithProviders(<SequenceEditor campaignId="c-1" status={status} />)
+  fireEvent.click(screen.getByRole('button', { name: 'List' }))
+  return result
+}
+
 function lastRequest(predicate: (r: CapturedRequest) => boolean): CapturedRequest | undefined {
   return [...requests].reverse().find(predicate)
 }
 
 test('renders steps in order with humanized delay labels', async () => {
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  renderListView('draft')
 
   expect(await screen.findByText('Intro')).toBeInTheDocument()
   expect(screen.getByText('Bump')).toBeInTheDocument()
@@ -142,27 +158,27 @@ test('renders steps in order with humanized delay labels', async () => {
 })
 
 test('shows a loading skeleton before the steps resolve', () => {
-  const { container } = renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  const { container } = renderListView('draft')
   expect(container.querySelector('[data-slot="skeleton"]')).not.toBeNull()
   expect(screen.queryByText('Intro')).not.toBeInTheDocument()
 })
 
 test('renders the empty state when there are no steps', async () => {
   steps = []
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  renderListView('draft')
   expect(await screen.findByText('No steps yet')).toBeInTheDocument()
 })
 
 test('surfaces a typed error banner when the list query fails', async () => {
   stepsResponder = () => jsonResponse({ error: 'boom' }, 500)
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  renderListView('draft')
 
   const alert = await screen.findByRole('alert')
   expect(alert).toHaveTextContent(/Couldn't load the sequence \(500\) — try again\./i)
 })
 
 test('add step calls createStep with the converted delay and subject', async () => {
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  renderListView('draft')
   await screen.findByText('Intro')
 
   fireEvent.click(screen.getByRole('button', { name: /^add step$/i }))
@@ -185,7 +201,7 @@ test('add step calls createStep with the converted delay and subject', async () 
 })
 
 test('edit step calls updateStep against the step id', async () => {
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  renderListView('draft')
   await screen.findByText('Intro')
 
   fireEvent.click(screen.getByRole('button', { name: /edit step 1/i }))
@@ -207,7 +223,7 @@ test('edit step calls updateStep against the step id', async () => {
 })
 
 test('delete step confirms then calls deleteStep', async () => {
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  renderListView('draft')
   // Enabled delete lives on the lazy sortable card — wait for it to mount so the
   // static fallback (delete disabled) isn't what we click.
   await screen.findByRole('button', { name: /reorder step 2/i })
@@ -227,7 +243,7 @@ test('delete step confirms then calls deleteStep', async () => {
 
 test('a failed delete keeps the dialog open and surfaces a typed error', async () => {
   deleteResponder = () => jsonResponse({ error: 'campaign is not a draft' }, 409)
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  renderListView('draft')
   await screen.findByRole('button', { name: /reorder step 2/i })
 
   fireEvent.click(screen.getByRole('button', { name: /delete step 2/i }))
@@ -242,7 +258,7 @@ test('a failed delete keeps the dialog open and surfaces a typed error', async (
 })
 
 test('reorder calls reorderSteps with the new id order', async () => {
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="draft" />)
+  renderListView('draft')
   // Wait for the lazy sortable list (it mounts the DndContext that captures
   // onDragEnd); the static fallback never renders a reorder handle.
   await screen.findByRole('button', { name: /reorder step 1/i })
@@ -263,7 +279,7 @@ test('reorder calls reorderSteps with the new id order', async () => {
 })
 
 test('non-draft campaign hides add/delete/reorder but keeps content edit', async () => {
-  renderWithProviders(<SequenceEditor campaignId="c-1" status="running" />)
+  renderListView('running')
   await screen.findByText('Intro')
 
   // Edit stays enabled (content is live-reference).

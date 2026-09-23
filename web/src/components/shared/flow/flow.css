@@ -1,0 +1,49 @@
+/* React Flow themed by the app's own tokens. Every value is a var() from
+   styles/globals.css, so light and dark follow the <html> class exactly as the
+   rest of the app does — no `colorMode` prop to keep in sync with the theme. */
+.inroad-flow .react-flow {
+  --xy-background-color: transparent;
+  --xy-background-pattern-color: var(--border);
+  --xy-edge-stroke: var(--border-strong);
+  --xy-edge-stroke-selected: var(--muted-foreground);
+  --xy-edge-stroke-width: 1.5;
+  --xy-connectionline-stroke: var(--ring);
+  --xy-connectionline-stroke-width: 1.5;
+  --xy-handle-background-color: var(--surface);
+  --xy-handle-border-color: var(--border-strong);
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-background-color-hover: var(--surface-2);
+  --xy-controls-button-color: var(--muted-foreground);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: none;
+  --xy-attribution-background-color: transparent;
+}
+
+.inroad-flow .react-flow__controls {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.inroad-flow .react-flow__controls-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.inroad-flow .react-flow__attribution a {
+  color: var(--faint);
+}
+
+.inroad-flow .react-flow__handle {
+  width: 9px;
+  height: 9px;
+  border-width: 1.5px;
+}
+
+/* A handle you can drag from reads as live: filled with the accent. */
+.inroad-flow .react-flow__handle.connectable.source:hover,
+.inroad-flow .react-flow__handle.connectingfrom {
+  background: var(--primary);
+  border-color: var(--primary-edge);
+}

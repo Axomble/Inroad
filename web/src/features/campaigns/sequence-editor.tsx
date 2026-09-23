@@ -1,5 +1,5 @@
 import { Suspense, lazy, useMemo, useState } from 'react'
-import { Plus } from 'lucide-react'
+import { List, Plus, Workflow } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { SectionBar, EmptyBlock } from '@/components/layout/page'
+import { NoticeBanner } from '@/components/shared/notice-banner'
 import { httpStatus } from '@/lib/rtk-error'
 import { useListStepsQuery, useDeleteStepMutation, type SequenceStep } from './api'
 import { StepCard, type StepWithId } from './step-card'
@@ -26,6 +27,13 @@ import { stepErrorMessage } from './step-error'
 // Suspense boundary (fallback = the static list) only when a draft is opened.
 const SortableStepList = lazy(() => import('./sortable-step-list'))
 
+// The flow canvas is the default view, but `@xyflow/react` + dagre are the
+// heaviest thing on this screen and nothing else in the app needs them — so
+// they stay in their own chunk, fetched when the canvas first mounts.
+const SequenceCanvas = lazy(() => import('./sequence-canvas'))
+
+type SequenceView = 'canvas' | 'list'
+
 const DRAFT_ONLY_HINT = 'Structural changes are draft-only'
 
 /** Narrows a step to one with a defined id (every persisted step has one). */
@@ -34,8 +42,10 @@ function hasId(step: SequenceStep): step is StepWithId {
 }
 
 /**
- * The campaign's sequence editor: an ordered list of step cards with add / edit
- * / delete / drag-reorder. Structural edits (add, delete, reorder) are
+ * The campaign's sequence editor, shown as a flow canvas (default) or an ordered
+ * list of step cards, both with add / edit / delete / reorder. The editor owns
+ * what both views share — the query, the delete confirmation, the variants
+ * dialog, the reorder banner — so switching views loses none of it. Structural edits (add, delete, reorder) are
  * draft-only; content edit is available in any status (live-reference). Owns its
  * own loading / empty / error states so the parent mounts it unconditionally.
  */
@@ -52,6 +62,7 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
   const [editingId, setEditingId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<StepWithId | null>(null)
   const [reorderError, setReorderError] = useState<string | null>(null)
+  const [view, setView] = useState<SequenceView>('canvas')
 
   // Server truth, sorted by step_order and narrowed to steps with ids.
   const serverSteps = useMemo(() => {
@@ -79,6 +90,7 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
   return (
     <div className="border-b border-border bg-surface/40">
       <SectionBar label="Sequence" count={serverSteps.length || undefined}>
+        <ViewToggle view={view} onChange={setView} />
         {isDraft ? (
           <Button variant="secondary" size="xs" onClick={() => setAdding((v) => !v)}>
             <Plus className="size-3.5" />
@@ -106,11 +118,7 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
         )}
       </SectionBar>
 
-      {reorderError && (
-        <p role="alert" className="border-b border-border px-5 py-2 text-xs text-danger">
-          {reorderError}
-        </p>
-      )}
+      {reorderError && <NoticeBanner notice={{ tone: 'error', text: reorderError }} />}
 
       {isDraft && adding && (
         <StepForm
@@ -136,6 +144,17 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
               : 'This campaign has no sequence steps.'
           }
         />
+      ) : view === 'canvas' ? (
+        <Suspense fallback={<CanvasLoading />}>
+          <SequenceCanvas
+            campaignId={campaignId}
+            steps={serverSteps}
+            canModifyStructure={isDraft}
+            onDelete={requestDelete}
+            onVariants={setVariantsFor}
+            onReorderError={setReorderError}
+          />
+        </Suspense>
       ) : isDraft ? (
         <Suspense
           fallback={
@@ -265,6 +284,44 @@ function StaticStepList({
         ),
       )}
     </ul>
+  )
+}
+
+/**
+ * Flow / list switch. Both views edit the same steps through the same
+ * mutations; the list stays for dense scanning and for the drag handle.
+ */
+function ViewToggle({ view, onChange }: { view: SequenceView; onChange: (view: SequenceView) => void }) {
+  return (
+    <div role="group" aria-label="Sequence view" className="flex items-center gap-1">
+      <Button
+        variant={view === 'canvas' ? 'secondary' : 'ghost'}
+        size="xs"
+        aria-pressed={view === 'canvas'}
+        onClick={() => onChange('canvas')}
+      >
+        <Workflow className="size-3.5" />
+        Flow
+      </Button>
+      <Button
+        variant={view === 'list' ? 'secondary' : 'ghost'}
+        size="xs"
+        aria-pressed={view === 'list'}
+        onClick={() => onChange('list')}
+      >
+        <List className="size-3.5" />
+        List
+      </Button>
+    </div>
+  )
+}
+
+/** Holds the canvas's footprint while its chunk loads, so the page doesn't jump. */
+function CanvasLoading() {
+  return (
+    <div role="status" aria-label="Loading the sequence flow" className="h-[560px] p-5">
+      <Skeleton className="h-full w-full rounded-lg" />
+    </div>
   )
 }
 

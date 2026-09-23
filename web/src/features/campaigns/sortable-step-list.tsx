@@ -17,10 +17,10 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { GripVertical } from 'lucide-react'
-import { httpStatus } from '@/lib/rtk-error'
 import { useReorderStepsMutation } from './api'
 import { StepCardBody, type StepWithId } from './step-card'
 import { StepForm } from './step-form'
+import { reorderErrorMessage } from './step-error'
 
 /**
  * Draft-only drag-reorder list. Isolated into its own module so `@dnd-kit/*`
@@ -94,10 +94,7 @@ export default function SortableStepList({
     if ('error' in result) {
       setOrder(previous) // revert optimistic order
       refetch() // reconcile with server truth
-      const st = httpStatus(result.error)
-      onReorderError(
-        st === 409 ? 'Reorder is only allowed while the campaign is a draft.' : "Couldn't reorder steps — try again.",
-      )
+      onReorderError(reorderErrorMessage(result.error))
     }
   }
 
