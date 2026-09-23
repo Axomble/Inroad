@@ -5,7 +5,14 @@ import { renderWithProviders } from '@/test/render-with-providers'
 import { installReactFlowDom } from '@/test/react-flow-dom'
 import type { StepBranch } from '../api'
 import { SequenceEditor } from '../sequence-editor'
-import { bodiesTo, gate, installFakeSequenceServer, jsonResponse, type FakeSequenceServer } from './fake-sequence-server'
+import {
+  bodiesTo,
+  gate,
+  installFakeSequenceServer,
+  jsonResponse,
+  requestsTo,
+  type FakeSequenceServer,
+} from './fake-sequence-server'
 
 // Conditions on the flow canvas, through the real React Flow + dagre pipeline
 // against a stateful fake of the sequence endpoints (branch writes included).
@@ -140,7 +147,15 @@ test('adding a condition: pick the condition, window, label and exits; it saves 
 
   await waitFor(() =>
     expect(branchWrites('PUT')).toEqual([
-      { condition: 'replied', within_days: 5, reply_label_key: 'question', yes_step_id: 's-3', no_step_id: null },
+      {
+        condition: 'replied',
+        within_days: 5,
+        reply_label_key: 'question',
+        yes_step_id: 's-3',
+        no_step_id: null,
+        // A new condition is create-only: it applies only if the step still has none.
+        expected_updated_at: null,
+      },
     ]),
   )
   const node = await within(canvas).findByRole('button', {
@@ -245,7 +260,15 @@ test('dragging a condition’s No exit onto a step sets that exit and keeps the 
   await act(async () => props?.onConnect?.(drag('cond:s-1', 's-2', 'no')))
   await waitFor(() =>
     expect(branchWrites('PUT')).toEqual([
-      { condition: 'opened', within_days: 3, reply_label_key: null, yes_step_id: 's-3', no_step_id: 's-2' },
+      {
+        condition: 'opened',
+        within_days: 3,
+        reply_label_key: null,
+        yes_step_id: 's-3',
+        no_step_id: 's-2',
+        // Conditional on the branch the drag was made against.
+        expected_updated_at: '2026-09-23T00:00:00Z',
+      },
     ]),
   )
   // The step that now owns its routing can't also be dragged as a reorder.
@@ -471,4 +494,121 @@ test('loop marks clear once the steps or routing they described change', async (
   fireEvent.keyDown(panel, { key: 'Escape' })
   fireEvent.click(within(canvas).getByRole('button', { name: 'Add a condition after step 1' }))
   await waitFor(() => expect(within(canvas).queryByText('In a loop')).not.toBeInTheDocument())
+})
+
+// --- Optimistic concurrency (expected_updated_at) ------------------------------
+
+const MICRO = '2026-09-24T10:15:30.123456Z'
+
+/** Another tab's write, straight into the server's store — this tab isn't told. */
+function changedInAnotherTab(stepId: string, fields: Partial<StepBranch>) {
+  server.branches.set(stepId, branch(stepId, { updated_at: '2026-09-24T11:00:00.654321Z', ...fields }))
+}
+
+test('the token goes back exactly as the server sent it, microseconds included', async () => {
+  server.branches.set('s-1', branch('s-1', { updated_at: MICRO }))
+  const canvas = await renderCanvas()
+  await within(canvas).findByRole('button', { name: /^Edit the condition after step 1/ })
+
+  await act(async () => canvasProps.current?.onConnect?.(drag('cond:s-1', 's-3', 'yes')))
+  await waitFor(() => expect(branchWrites('PUT')).toHaveLength(1))
+  expect((branchWrites('PUT')[0] as { expected_updated_at: unknown }).expected_updated_at).toBe(MICRO)
+
+  // And on a delete, as the query parameter — the saved version this time.
+  const saved = server.branches.get('s-1')?.updated_at ?? ''
+  expect(saved).toMatch(/\.\d{6}Z$/)
+  fireEvent.click(await within(canvas).findByRole('button', { name: /^Edit the condition after step 1/ }))
+  const panel = await screen.findByRole('complementary', { name: 'Condition after step 1' })
+  await waitFor(() => expect(within(panel).getByLabelText('Yes — go to')).toHaveValue('s-3'))
+  fireEvent.click(within(panel).getByRole('button', { name: 'Remove condition' }))
+  await waitFor(() => expect(requestsTo(server, '/steps/s-1/branch', 'DELETE')).toHaveLength(1))
+  const [removal] = requestsTo(server, '/steps/s-1/branch', 'DELETE')
+  expect(new URL(removal?.url ?? '').searchParams.get('expected_updated_at')).toBe(saved)
+})
+
+test('a drag against a branch changed elsewhere is refused: the server’s version is shown, nothing overwritten', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  const canvas = await renderCanvas()
+  await within(canvas).findByRole('button', { name: /^Edit the condition after step 1: Opened within 3 days/ })
+  changedInAnotherTab('s-1', { condition: 'clicked', yes_step_id: 's-2' })
+  // Hold every refetch: only the 409's own `current` can tell the canvas.
+  const held = gate()
+  server.graphGate = held.promise
+
+  await act(async () => canvasProps.current?.onConnect?.(drag('cond:s-1', 's-3', 'no')))
+  expect(await screen.findByRole('alert')).toHaveTextContent('This condition changed elsewhere — review it and try again.')
+  // The canvas now shows what the other tab saved…
+  expect(
+    await within(canvas).findByRole('button', { name: /^Edit the condition after step 1: Clicked within 3 days/ }),
+  ).toBeInTheDocument()
+  // …and the other tab's branch is untouched: the drag was not re-sent over it.
+  expect(branchWrites('PUT')).toHaveLength(1)
+  expect(server.branches.get('s-1')).toMatchObject({ condition: 'clicked', yes_step_id: 's-2', no_step_id: null })
+  held.release()
+})
+
+test('an editor save with a stale token keeps the edits, shows the server’s version, and offers Load the latest', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  const canvas = await renderCanvas()
+  fireEvent.click(await within(canvas).findByRole('button', { name: /^Edit the condition after step 1/ }))
+  const panel = await screen.findByRole('complementary', { name: 'Condition after step 1' })
+  await waitFor(() => expect(within(panel).getByLabelText('Within (days)')).toHaveValue(3))
+  // After the editor opened (and refetched), another tab saves.
+  changedInAnotherTab('s-1', { condition: 'not_replied', within_days: 5 })
+  const held = gate()
+  server.graphGate = held.promise
+
+  fireEvent.change(within(panel).getByLabelText('Within (days)'), { target: { value: '7' } })
+  fireEvent.click(within(panel).getByRole('button', { name: 'Save condition' }))
+
+  expect(await within(panel).findByText(/changed elsewhere since you started editing — it’s now “No reply within 5 days”/)).toBeInTheDocument()
+  expect(within(panel).getByRole('alert')).toHaveTextContent('This condition changed elsewhere — review it and try again.')
+  // The user's edit is intact, and it can't be saved over a version they haven't seen.
+  expect(within(panel).getByLabelText('Within (days)')).toHaveValue(7)
+  expect(within(panel).getByRole('button', { name: 'Save condition' })).toBeDisabled()
+  expect(server.branches.get('s-1')).toMatchObject({ condition: 'not_replied', within_days: 5 })
+
+  held.release()
+  fireEvent.click(within(panel).getByRole('button', { name: 'Load the latest' }))
+  expect(within(panel).getByLabelText('If they…')).toHaveValue('not_replied')
+  expect(within(panel).getByLabelText('Within (days)')).toHaveValue(5)
+  expect(within(panel).queryByRole('alert')).not.toBeInTheDocument()
+
+  // Saving now is based on the version the user just loaded, so it applies.
+  fireEvent.change(within(panel).getByLabelText('Within (days)'), { target: { value: '8' } })
+  fireEvent.click(within(panel).getByRole('button', { name: 'Save condition' }))
+  await waitFor(() => expect(server.branches.get('s-1')).toMatchObject({ within_days: 8 }))
+  expect((branchWrites('PUT').at(-1) as { expected_updated_at: unknown }).expected_updated_at).toBe(
+    '2026-09-24T11:00:00.654321Z',
+  )
+})
+
+test('two tabs adding a condition to the same step: the second is create-only and doesn’t overwrite the first', async () => {
+  const canvas = await renderCanvas()
+  const panel = await openNewCondition(canvas, 1)
+  changedInAnotherTab('s-1', { condition: 'replied', within_days: 2, yes_step_id: 's-3' })
+
+  fireEvent.click(within(panel).getByRole('button', { name: 'Add condition' }))
+  expect(await within(panel).findByRole('alert')).toHaveTextContent('This condition changed elsewhere')
+  expect((branchWrites('PUT')[0] as { expected_updated_at: unknown }).expected_updated_at).toBeNull()
+  // The untouched form now shows the condition the other tab created — as an edit of it.
+  await waitFor(() => expect(within(panel).getByLabelText('If they…')).toHaveValue('replied'))
+  expect(within(panel).getByRole('button', { name: 'Save condition' })).toBeInTheDocument()
+  expect(server.branches.get('s-1')).toMatchObject({ condition: 'replied', within_days: 2, yes_step_id: 's-3' })
+})
+
+test('removing a condition someone already removed counts as done', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  const canvas = await renderCanvas()
+  fireEvent.click(await within(canvas).findByRole('button', { name: /^Edit the condition after step 1/ }))
+  const panel = await screen.findByRole('complementary', { name: 'Condition after step 1' })
+  await waitFor(() => expect(graphReads()).toBeGreaterThan(1))
+  server.branches.delete('s-1')
+
+  fireEvent.click(within(panel).getByRole('button', { name: 'Remove condition' }))
+  await waitFor(() => expect(screen.queryByRole('complementary')).not.toBeInTheDocument())
+  // The step falls through again, with no error shown.
+  const add = await within(canvas).findByRole('button', { name: 'Add a condition after step 1' })
+  await waitFor(() => expect(add).toHaveFocus())
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 })

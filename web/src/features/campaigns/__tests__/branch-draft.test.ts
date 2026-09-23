@@ -104,32 +104,44 @@ describe('validateDraft mirrors the server', () => {
 
   test('"always" ignores a stale No exit instead of flagging it (no_exit_not_allowed is never sent)', () => {
     expect(fields(draft({ condition: 'always', noStepId: 'a' }))).toEqual([])
-    expect(toBranchRequest(draft({ condition: 'always', noStepId: 'b' })).no_step_id).toBeNull()
+    expect(toBranchRequest(draft({ condition: 'always', noStepId: 'b' }), null).no_step_id).toBeNull()
   })
 })
 
 describe('toBranchRequest', () => {
   test('sends only what the condition uses', () => {
-    expect(toBranchRequest(draft({ condition: 'opened', replyLabelKey: 'question', yesStepId: 'b' }))).toEqual({
+    expect(toBranchRequest(draft({ condition: 'opened', replyLabelKey: 'question', yesStepId: 'b' }), null)).toEqual({
       condition: 'opened',
       within_days: 3,
       // A label can't ride along on a non-reply condition (invalid_reply_label).
       reply_label_key: null,
       yes_step_id: 'b',
       no_step_id: null,
+      // A new condition: create-only.
+      expected_updated_at: null,
     })
-    expect(toBranchRequest(draft({ condition: 'always', withinDays: '9', yesStepId: 'c' }))).toEqual({
+    expect(toBranchRequest(draft({ condition: 'always', withinDays: '9', yesStepId: 'c' }), null)).toEqual({
       condition: 'always',
       within_days: null,
       reply_label_key: null,
       yes_step_id: 'c',
       no_step_id: null,
+      expected_updated_at: null,
     })
-    expect(toBranchRequest(draft({ condition: 'replied', replyLabelKey: 'question' })).reply_label_key).toBe('question')
+    expect(toBranchRequest(draft({ condition: 'replied', replyLabelKey: 'question' }), null).reply_label_key).toBe(
+      'question',
+    )
+  })
+
+  test('the concurrency token is sent back exactly as the server gave it, microseconds and all', () => {
+    const token = '2026-09-24T10:15:30.123456Z'
+    expect(toBranchRequest(draft({}), token).expected_updated_at).toBe(token)
+    expect(withExit({ ...saved, updated_at: token }, 'yes', 'b').expected_updated_at).toBe(token)
   })
 
   test('withExit changes one exit and keeps the rest', () => {
     expect(withExit(saved, 'no', 'b')).toEqual({
+      expected_updated_at: saved.updated_at,
       condition: 'replied',
       within_days: 5,
       reply_label_key: 'question',

@@ -13,7 +13,7 @@ import {
 import { draftFromBranch, validateDraft, withExit } from './branch-draft'
 import { applyBranchWrites, isSuperseded, type BranchWrite } from './branch-overlay'
 import { useBranchRules } from './branch-rules'
-import { branchErrorMessage } from './branch-error'
+import { branchErrorMessage, changedBranch } from './branch-error'
 import { cycleStepIds } from './branch-loop'
 import { ConditionEditor } from './condition-editor'
 import {
@@ -339,6 +339,11 @@ export default function SequenceCanvas({
       if ('error' in result) {
         onNotice(branchErrorMessage(result.error))
         onLoop(cycleStepIds(result.error))
+        // The drag was made against a branch that has since changed (another
+        // tab, another user). Draw what the server has now; the user redoes
+        // the drag against it if they still want it — it is never re-sent.
+        const conflict = changedBranch(result.error)
+        if (conflict) recordWrite(exit.stepId, conflict.current)
         return
       }
       recordWrite(exit.stepId, result.data)
