@@ -1565,10 +1565,13 @@ func (q *Queries) ListLabelsForInboxThreads(ctx context.Context, arg ListLabelsF
 
 const listSentOutboundStepsForThread = `-- name: ListSentOutboundStepsForThread :many
 SELECT s.step_order, s.to_email, s.message_id, s.sent_at, s.created_at,
-       st.subject AS step_subject, st.body_text AS step_body_text, st.body_html AS step_body_html,
+       COALESCE(v.subject, st.subject)::text AS step_subject,
+       COALESCE(v.body_text, st.body_text)::text AS step_body_text,
+       COALESCE(v.body_html, st.body_html)::text AS step_body_html,
        COALESCE(m.email, '') AS from_email, COALESCE(m.display_name, '') AS from_name
 FROM sends s
 JOIN sequence_steps st ON st.campaign_id = s.campaign_id AND st.step_order = s.step_order AND st.workspace_id = s.workspace_id
+LEFT JOIN sequence_step_variants v ON v.id = s.variant_id AND v.workspace_id = s.workspace_id
 LEFT JOIN mailboxes m ON m.id = s.mailbox_id AND m.workspace_id = s.workspace_id
 WHERE s.workspace_id = $1 AND s.campaign_id = $2 AND s.contact_id = $3
   AND s.sent_at IS NOT NULL
@@ -1604,6 +1607,15 @@ type ListSentOutboundStepsForThreadRow struct {
 // sending mailbox; a LEFT JOIN (COALESCE to ”) rather than an INNER JOIN
 // purely as defense in depth — sends.mailbox_id is NOT NULL and FK's
 // ON DELETE CASCADE to mailboxes, so in practice the row always exists.
+//
+// The copy shown is the copy that SENT: an A/B send (sends.variant_id set)
+// carried its variant's subject and body, not the step's base copy, so the
+// variant's columns win via COALESCE — the same rule the send path applies
+// (stepsendjob.go's selectVariant) and inbox search matches against. A send
+// whose variant has since been deleted has variant_id SET NULL by its FK and
+// falls back to the base copy, which is the least wrong answer once the row
+// naming it is gone. The step_* aliases are kept so the Go mapping reads the
+// same columns whichever copy they came from.
 func (q *Queries) ListSentOutboundStepsForThread(ctx context.Context, arg ListSentOutboundStepsForThreadParams) ([]ListSentOutboundStepsForThreadRow, error) {
 	rows, err := q.db.Query(ctx, listSentOutboundStepsForThread, arg.WorkspaceID, arg.CampaignID, arg.ContactID)
 	if err != nil {
