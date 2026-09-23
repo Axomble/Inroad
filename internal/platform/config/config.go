@@ -399,6 +399,14 @@ type Config struct {
 	RateLimitDraftReplyIP        int // POST /inbox/threads/{id}/draft-reply per IP
 	RateLimitDraftReplyWorkspace int // POST /inbox/threads/{id}/draft-reply per workspace
 
+	// Inbox full-text search, in requests per minute. Authenticated and keyed on
+	// the WORKSPACE, like draft-reply, but throttled for CPU rather than money:
+	// each search does real (capped, timed-out) text-matching work over content
+	// external senders control, so an unbounded loop could monopolise database
+	// time shared by every tenant.
+	RateLimitInboxSearchIP        int // GET /inbox/search per IP
+	RateLimitInboxSearchWorkspace int // GET /inbox/search per workspace
+
 	// Realtime connect-ticket minting, in requests per minute. Authenticated, like
 	// draft-reply above, and keyed on the WORKSPACE rather than an email — but
 	// throttled for a different reason: this endpoint mints a CREDENTIAL, so an
@@ -674,6 +682,12 @@ func Load() (*Config, error) {
 	// while the per-workspace cap is what actually bounds spend.
 	cfg.RateLimitDraftReplyIP = env.intVal("INROAD_RATELIMIT_DRAFT_REPLY_IP", 20)
 	cfg.RateLimitDraftReplyWorkspace = env.intVal("INROAD_RATELIMIT_DRAFT_REPLY_WORKSPACE", 60)
+
+	// A debounced search box issues a request per pause in typing, so a human
+	// searching hard stays well under 60/min; a workspace of several operators
+	// under 300. A scripted loop does not.
+	cfg.RateLimitInboxSearchIP = env.intVal("INROAD_RATELIMIT_INBOX_SEARCH_IP", 60)
+	cfg.RateLimitInboxSearchWorkspace = env.intVal("INROAD_RATELIMIT_INBOX_SEARCH_WORKSPACE", 300)
 
 	// Generous by design: one mint per socket connect, and a rolling deploy has
 	// every open tab reconnecting at once. 60/min per IP still covers a shared

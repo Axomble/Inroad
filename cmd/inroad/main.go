@@ -335,13 +335,7 @@ func run() error {
 	realtimeTicketThrottle := throttle.Config{
 		Limiter: redisLimiter, Resolver: ipResolver, Window: throttleWindow,
 		IPLimit: cfg.RateLimitRealtimeTicketIP, AcctLimit: cfg.RateLimitRealtimeTicketWorkspace,
-		AcctKey: func(r *http.Request) string {
-			p, ok := auth.UserFromContext(r.Context())
-			if !ok {
-				return ""
-			}
-			return p.WorkspaceID
-		},
+		AcctKey: workspaceThrottleKey,
 	}.Middleware("realtime-ticket")
 
 	// OAuth 2.1 authorization server (Inroad as an OAuth PROVIDER). Self-contained
@@ -672,8 +666,8 @@ func run() error {
 	// workspace AI configuration, one credential-unsealing path.
 	// One PgStore, handed in five times: it implements inbox.Store (threads and
 	// messages), inbox.SnoozeStore, inbox.LabelStore (triage state),
-	// inbox.PendingReplyStore (deferred replies) and inbox.ComposeStore (drafts
-	// + composed emails). The interfaces are separate so a caller needing only
+	// inbox.PendingReplyStore (deferred replies), inbox.ComposeStore (drafts
+	// + composed emails) and inbox.SearchStore (full-text search). The interfaces are separate so a caller needing only
 	// one need not satisfy the others, not because the persistence is.
 	inboxStore := inbox.NewPgStore(pool)
 	inboxHandler := inbox.NewHandler(inbox.NewService(inboxStore,
@@ -690,6 +684,7 @@ func run() error {
 		inbox.WithPendingReplyEnqueuer(enq),
 		inbox.WithComposeStore(inboxStore),
 		inbox.WithComposeEnqueuer(enq),
+		inbox.WithSearchStore(inboxStore),
 	))
 	// Per-IP and per-WORKSPACE cap on reply drafting. Unlike the pre-auth
 	// throttles above, the account key comes from the authenticated principal
@@ -698,14 +693,16 @@ func run() error {
 	draftReplyThrottle := throttle.Config{
 		Limiter: redisLimiter, Resolver: ipResolver, Window: throttleWindow,
 		IPLimit: cfg.RateLimitDraftReplyIP, AcctLimit: cfg.RateLimitDraftReplyWorkspace,
-		AcctKey: func(r *http.Request) string {
-			p, ok := auth.UserFromContext(r.Context())
-			if !ok {
-				return "" // unreachable behind RequireAuth; IP-throttle only if it happens
-			}
-			return p.WorkspaceID
-		},
+		AcctKey: workspaceThrottleKey,
 	}.Middleware("inbox-draft-reply")
+	// Per-IP and per-WORKSPACE cap on inbox full-text search, keyed exactly like
+	// draft-reply. It bounds database CPU rather than provider spend; each search
+	// is already capped and timed out inside the store (security.md).
+	inboxSearchThrottle := throttle.Config{
+		Limiter: redisLimiter, Resolver: ipResolver, Window: throttleWindow,
+		IPLimit: cfg.RateLimitInboxSearchIP, AcctLimit: cfg.RateLimitInboxSearchWorkspace,
+		AcctKey: workspaceThrottleKey,
+	}.Middleware("inbox-search")
 
 	// The tracking handler shares the trusted-proxy IP resolver so a hit's
 	// source address feeds bot/prefetch classification. X-Forwarded-For is
@@ -814,7 +811,9 @@ func run() error {
 		// Unified inbox: GET /threads, GET /threads/{id}, PUT /threads/{id}/read.
 		// Scope-gated per route inside Routes() (inbox:read / inbox:write); a
 		// session principal holds both implicitly.
-		{pattern: "/api/v1/inbox", handler: inboxHandler.Routes(draftReplyThrottle)},
+		{pattern: "/api/v1/inbox", handler: inboxHandler.Routes(inbox.RouteThrottles{
+			DraftReply: draftReplyThrottle, Search: inboxSearchThrottle,
+		})},
 		// Sequence steps register as a SubRouter under the campaigns mount, so
 		// /campaigns/{id}/steps lives under this group and inherits its RequireAuth.
 		// Routes(identStore) additionally applies RequireVerified to /launch
@@ -1215,4 +1214,16 @@ func (a listCheckerAdapter) ListExists(ctx context.Context, ws, listID uuid.UUID
 		return false, err
 	}
 	return true, nil
+}
+
+// workspaceThrottleKey is the per-account key for an AUTHENTICATED endpoint
+// throttled per workspace (draft-reply, inbox search, realtime tickets): the
+// principal's workspace, which owns the budget or load a burst would spend.
+// "" (IP-throttle only) is unreachable behind RequireAuth.
+func workspaceThrottleKey(r *http.Request) string {
+	p, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		return ""
+	}
+	return p.WorkspaceID
 }

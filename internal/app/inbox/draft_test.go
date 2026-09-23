@@ -348,7 +348,7 @@ func TestDraftReplyEndpointHonorsTheThrottle(t *testing.T) {
 		})
 	}
 	root := chi.NewRouter()
-	root.Mount("/inbox", h.Routes(denyAll))
+	root.Mount("/inbox", h.Routes(inbox.RouteThrottles{DraftReply: denyAll}))
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/inbox/threads/"+threadID.String()+"/draft-reply", http.NoBody)
 	r.Header.Set("Authorization", bearer(t, testWS))
@@ -370,7 +370,7 @@ func TestDraftThrottleAppliesOnlyToTheDraftRoute(t *testing.T) {
 		})
 	}
 	root := chi.NewRouter()
-	root.Mount("/inbox", h.Routes(denyAll))
+	root.Mount("/inbox", h.Routes(inbox.RouteThrottles{DraftReply: denyAll}))
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
 		"/inbox/threads/"+threadID.String(), http.NoBody)
 	r.Header.Set("Authorization", bearer(t, testWS))
@@ -433,7 +433,7 @@ func TestDraftThrottlePrecedesTheNoModelCheck(t *testing.T) {
 		})
 	}
 	root := chi.NewRouter()
-	root.Mount("/inbox", h.Routes(denyAll))
+	root.Mount("/inbox", h.Routes(inbox.RouteThrottles{DraftReply: denyAll}))
 	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
 		"/inbox/threads/"+threadID.String()+"/draft-reply", http.NoBody)
 	r.Header.Set("Authorization", bearer(t, testWS))

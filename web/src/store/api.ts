@@ -1511,6 +1511,24 @@ const injectedRtkApi = api.injectEndpoints({
         },
       }),
     }),
+    searchInboxThreads: build.query<
+      SearchInboxThreadsApiResponse,
+      SearchInboxThreadsApiArg
+    >({
+      query: (queryArg) => ({
+        url: `/inbox/search`,
+        params: {
+          q: queryArg.q,
+          cursor: queryArg.cursor,
+          limit: queryArg.limit,
+          scope: queryArg.scope,
+          tz_offset: queryArg.tzOffset,
+          mailbox_id: queryArg.mailboxId,
+          reply_class: queryArg.replyClass,
+          label: queryArg.label,
+        },
+      }),
+    }),
     getInboxOverview: build.query<
       GetInboxOverviewApiResponse,
       GetInboxOverviewApiArg
@@ -2805,7 +2823,7 @@ export type ListInboxThreadsApiArg = {
   replyClass?: string;
   /** Case-insensitive substring search against the thread's subject or its linked contact's email. LIKE metacharacters (% and _) are matched literally, not as wildcards. */
   q?: string;
-  /** Keyset cursor. Must be set together with before_id, or not at all. */
+  /** Keyset cursor. Must be set together with before_id, or not at all. Use the previous page's last item's last_message_at exactly as returned (it carries sub-second precision); any RFC3339 value, with or without a fractional part, is accepted. */
   beforeLastMessageAt?: string;
   /** Keyset cursor. Must be set together with before_last_message_at, or not at all. */
   beforeId?: string;
@@ -2819,6 +2837,27 @@ export type ListInboxThreadsApiArg = {
   /** The viewer's UTC offset in minutes East of UTC, as JavaScript's `-new Date().getTimezoneOffset()` reports it. Only read when scope is `today` or `this_week`, whose boundaries depend on the viewer's own day rather than the server's. Defaults to 0 (UTC) — never the server's local zone, which carries no information about the viewer. */
   tzOffset?: number;
   /** Restrict to threads carrying one operator-assigned label (see listInboxLabels). Distinct from `reply_class`, which filters on the classifier's own verdict. */
+  label?: string;
+};
+export type SearchInboxThreadsApiResponse =
+  /** status 200 One page of matching threads */ InboxSearchPage;
+export type SearchInboxThreadsApiArg = {
+  /** Web-search syntax: words are ANDed, "quoted phrases" match in order, OR between words matches either, and a leading - excludes a word. Any string is accepted as syntax — there is no query that is a syntax error. Leading/trailing whitespace is trimmed; the trimmed query must be non-empty and at most 256 characters, valid UTF-8, with no NUL. */
+  q: string;
+  /** Opaque cursor from the previous page's next_cursor. Omit for the first page. Keep every other parameter unchanged while paging. */
+  cursor?: string;
+  /** Page size. Defaults to 25, capped at 50 (a larger request is clamped, not rejected). */
+  limit?: number;
+  /** See listInboxThreads. */
+  scope?:
+    "all" | "unread" | "today" | "this_week" | "awaiting_reply" | "snoozed";
+  /** See listInboxThreads. Only read when scope is `today` or `this_week`. */
+  tzOffset?: number;
+  /** Restrict to one mailbox. */
+  mailboxId?: string;
+  /** Restrict to one reply classification. */
+  replyClass?: string;
+  /** Restrict to threads carrying one operator-assigned label. */
   label?: string;
 };
 export type GetInboxOverviewApiResponse =
@@ -4793,10 +4832,38 @@ export type InboxThreadSummary = {
   /** The workspace reply label resolved from last_reply_class for display, or null when the key no longer matches a label (readers degrade to the raw last_reply_class key). */
   reply_label: InboxReplyLabelRef | null;
   unread: boolean;
+  /** RFC3339 with fractional seconds to microsecond precision (e.g. 2026-09-01T12:00:00.250007Z; trailing zeros are dropped). Pass it back VERBATIM as listInboxThreads' before_last_message_at — reformatting it to whole seconds would skip threads that share that second. */
   last_message_at: string;
 };
 export type InboxThreadPage = {
   items: InboxThreadSummary[];
+};
+export type InboxSearchHighlightSegment = {
+  /** Plain text, NEVER HTML — it is message content and may contain anything, including markup. Render it escaped (e.g. as a React text node), wrapping runs where match is true in <mark>. */
+  text: string;
+  /** True for a run matching the query. */
+  match: boolean;
+};
+export type InboxSearchSnippet = {
+  /** Which leg the snippet's message is on. */
+  direction: "inbound" | "outbound";
+  occurred_at: string;
+  /** The message's whole subject, split into highlighted and plain runs. */
+  subject: InboxSearchHighlightSegment[];
+  /** Up to two fragments of the plain-text body around the matches (joined by " … "), split into highlighted and plain runs. `[]` when the body is empty. When the only matches lie far into a very long body, this is the start of the body with no highlighted run. */
+  body: InboxSearchHighlightSegment[];
+};
+export type InboxSearchHit = {
+  thread: InboxThreadSummary;
+  /** Why the thread matched, always non-empty and in this order: `inbound` (text in the contact's replies), `outbound` (text in anything sent on the thread — campaign steps and manual replies), `contact` (the query is a substring of the thread's contact's email, or of the From address of one of its inbound messages). */
+  matched_legs: ("inbound" | "outbound" | "contact")[];
+  /** The newest message whose text matched, highlighted. For a thread matched only by address (`matched_legs` is just `contact`), the thread's newest message on either leg, with no highlighted run. Null only for a thread with no message at all; render the thread without a snippet rather than dropping it. */
+  snippet: InboxSearchSnippet | null;
+};
+export type InboxSearchPage = {
+  items: InboxSearchHit[];
+  /** Pass as `cursor` to fetch the next page; null on the last page. */
+  next_cursor: string | null;
 };
 export type InboxMailboxCount = {
   mailbox_id: string;
@@ -5343,6 +5410,7 @@ export const {
   useUpdateReplyLabelMutation,
   useDeleteReplyLabelMutation,
   useListInboxThreadsQuery,
+  useSearchInboxThreadsQuery,
   useGetInboxOverviewQuery,
   useGetInboxThreadQuery,
   useSendInboxReplyMutation,

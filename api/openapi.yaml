@@ -3067,7 +3067,11 @@ paths:
         - name: before_last_message_at
           in: query
           required: false
-          description: Keyset cursor. Must be set together with before_id, or not at all.
+          description: >-
+            Keyset cursor. Must be set together with before_id, or not at all.
+            Use the previous page's last item's last_message_at exactly as
+            returned (it carries sub-second precision); any RFC3339 value,
+            with or without a fractional part, is accepted.
           schema: { type: string, format: date-time }
         - name: before_id
           in: query
@@ -3127,6 +3131,105 @@ paths:
               schema: { $ref: '#/components/schemas/InboxThreadPage' }
         '400': { description: "Malformed filter (bad UUID/timestamp, a half-set keyset cursor, an unknown scope, or an out-of-range tz_offset)" }
         '401': { description: Unauthorized }
+  /inbox/search:
+    get:
+      operationId: searchInboxThreads
+      tags: [inbox]
+      security: [{ bearerAuth: [] }]
+      description: >-
+        Full-text search over the workspace's threads, covering BOTH legs of
+        each conversation: the contact's replies and everything sent on the
+        thread — campaign steps (the copy, or A/B variant, that send actually
+        carried) and manual replies. Matches subjects and plain-text bodies,
+        with English stemming ("meetings" finds "meeting").
+
+
+        A query of 3 or more characters ALSO matches, case-insensitively as a
+        substring, the thread's contact's email and the From address of its
+        inbound messages — so typing "jo@acme.com" or "acme.com" finds the
+        thread even when neither appears in any message text. Such hits report
+        `contact` in matched_legs.
+
+
+        Results are ordered newest first (last_message_at, then id), like
+        listInboxThreads — not by relevance. Page forward with next_cursor.
+
+
+        Accepts the same `scope`, `tz_offset`, `mailbox_id`, `reply_class` and
+        `label` filters as listInboxThreads, so a search inside a scope returns
+        a subset of that scope. As with the list's `q`, snoozed threads are
+        INCLUDED unless scope is `snoozed` (which restricts to them).
+
+
+        Search work is bounded. A query must contain at least one word to look
+        for: one made only of common words ("the"), punctuation, or exclusions
+        ("-foo", "foo OR -bar") is a 400. A query matching more than 10,000
+        messages, campaign steps, contact emails or inbound From addresses in
+        the workspace (each counted separately) is a 422 — refused
+        rather than answered from an arbitrary subset; add words to narrow it.
+        A search the server cancels for running too long is a 503. The endpoint
+        is rate-limited per IP and per workspace (429 with Retry-After).
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: >-
+            Web-search syntax: words are ANDed, "quoted phrases" match in order,
+            OR between words matches either, and a leading - excludes a word. Any
+            string is accepted as syntax — there is no query that is a syntax
+            error. Leading/trailing whitespace is trimmed; the trimmed query must
+            be non-empty and at most 256 characters, valid UTF-8, with no NUL.
+          schema: { type: string, minLength: 1, maxLength: 256 }
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            Opaque cursor from the previous page's next_cursor. Omit for the first
+            page. Keep every other parameter unchanged while paging.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          description: Page size. Defaults to 25, capped at 50 (a larger request is clamped, not rejected).
+          schema: { type: integer, minimum: 1 }
+        - name: scope
+          in: query
+          required: false
+          description: See listInboxThreads.
+          schema:
+            type: string
+            enum: [all, unread, today, this_week, awaiting_reply, snoozed]
+        - name: tz_offset
+          in: query
+          required: false
+          description: See listInboxThreads. Only read when scope is `today` or `this_week`.
+          schema: { type: integer, minimum: -720, maximum: 840 }
+        - name: mailbox_id
+          in: query
+          required: false
+          description: Restrict to one mailbox.
+          schema: { type: string, format: uuid }
+        - name: reply_class
+          in: query
+          required: false
+          description: Restrict to one reply classification.
+          schema: { type: string }
+        - name: label
+          in: query
+          required: false
+          description: Restrict to threads carrying one operator-assigned label.
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: One page of matching threads
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InboxSearchPage' }
+        '400': { description: "Missing, blank, over-long or malformed q; a q with no word to look for (only common words, punctuation or exclusions); a malformed or foreign cursor; or a malformed filter (as listInboxThreads)" }
+        '401': { description: Unauthorized }
+        '422': { description: "The query matches more than 10,000 messages, campaign steps, contact emails or inbound From addresses; narrow it" }
+        '429': { description: "Rate limited, per IP or per workspace; see Retry-After" }
+        '503': { description: "The search ran past the server's time limit and was cancelled; a more specific query will likely succeed" }
   /inbox/overview:
     get:
       operationId: getInboxOverview
@@ -7318,7 +7421,14 @@ components:
             display, or null when the key no longer matches a label (readers
             degrade to the raw last_reply_class key).
         unread: { type: boolean }
-        last_message_at: { type: string, format: date-time }
+        last_message_at:
+          type: string
+          format: date-time
+          description: >-
+            RFC3339 with fractional seconds to microsecond precision (e.g.
+            2026-09-01T12:00:00.250007Z; trailing zeros are dropped). Pass it back
+            VERBATIM as listInboxThreads' before_last_message_at — reformatting it
+            to whole seconds would skip threads that share that second.
     InboxReplyLabelRef:
       type: object
       required: [key, label, color]
@@ -7346,6 +7456,68 @@ components:
       required: [items]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/InboxThreadSummary' } }
+    InboxSearchPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/InboxSearchHit' } }
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` to fetch the next page; null on the last page.
+    InboxSearchHit:
+      type: object
+      required: [thread, matched_legs, snippet]
+      properties:
+        thread: { $ref: '#/components/schemas/InboxThreadSummary' }
+        matched_legs:
+          type: array
+          description: >-
+            Why the thread matched, always non-empty and in this order:
+            `inbound` (text in the contact's replies), `outbound` (text in
+            anything sent on the thread — campaign steps and manual replies),
+            `contact` (the query is a substring of the thread's contact's email,
+            or of the From address of one of its inbound messages).
+          items: { type: string, enum: [inbound, outbound, contact] }
+        snippet:
+          type: object
+          allOf: [{ $ref: '#/components/schemas/InboxSearchSnippet' }]
+          nullable: true
+          description: >-
+            The newest message whose text matched, highlighted. For a thread
+            matched only by address (`matched_legs` is just `contact`), the
+            thread's newest message on either leg, with no highlighted run. Null
+            only for a thread with no message at all; render the thread without
+            a snippet rather than dropping it.
+    InboxSearchSnippet:
+      type: object
+      required: [direction, occurred_at, subject, body]
+      properties:
+        direction: { type: string, enum: [inbound, outbound], description: "Which leg the snippet's message is on." }
+        occurred_at: { type: string, format: date-time }
+        subject:
+          type: array
+          description: The message's whole subject, split into highlighted and plain runs.
+          items: { $ref: '#/components/schemas/InboxSearchHighlightSegment' }
+        body:
+          type: array
+          description: >-
+            Up to two fragments of the plain-text body around the matches (joined
+            by " … "), split into highlighted and plain runs. `[]` when the body
+            is empty. When the only matches lie far into a very long body, this
+            is the start of the body with no highlighted run.
+          items: { $ref: '#/components/schemas/InboxSearchHighlightSegment' }
+    InboxSearchHighlightSegment:
+      type: object
+      required: [text, match]
+      properties:
+        text:
+          type: string
+          description: >-
+            Plain text, NEVER HTML — it is message content and may contain
+            anything, including markup. Render it escaped (e.g. as a React text
+            node), wrapping runs where match is true in <mark>.
+        match: { type: boolean, description: "True for a run matching the query." }
     InboxComposeDraft:
       type: object
       required: [id, mailbox_id, to_emails, cc_emails, bcc_emails, subject, body_text, updated_at]

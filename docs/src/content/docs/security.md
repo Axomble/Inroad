@@ -425,6 +425,59 @@ limit / abuse control here is tracked in the Deferred list below.
     wildcard that defeats the trigram index. Measured on 200,000 contacts: see
     `perf_integration_test.go`.
 
+## Inbox full-text search
+82. **Inbox search is workspace-pinned on every table and bounded by
+    construction.** `GET /inbox/search` (`internal/app/inbox/search.go`,
+    `queries/inboxsearch.sql`) is the inbox's counterpart to invariants 33–36,
+    and its inputs are more hostile than a contact list: inbound bodies are
+    written by anyone who can email the workspace. The rules:
+    - **Tenancy.** Every table the search reads — `inbox_messages`,
+      `sequence_steps`, `sequence_step_variants`, `sends`, `inbox_threads` and
+      the joined contacts/labels/snoozes — is filtered on the JWT's
+      `workspace_id`, never a request value, and each GIN index leads with
+      `workspace_id` so another tenant's postings are never even read
+      (`TestSearchIsWorkspaceScopedOnBothLegsAgainstPostgres`). The opaque
+      cursor carries a position, never a workspace (as invariant 34).
+    - **Nothing unselective reaches the index.** `q` is trimmed, ≤ 256
+      characters, valid UTF-8 without NUL, and parsed by
+      `websearch_to_tsquery`, which has no syntax errors. A query whose
+      `querytree` is `T` (only exclusions: `-foo`, `foo OR -bar`) or empty
+      (only stop words) is refused with 400 before any index is touched,
+      because it matches nearly everything and can only be answered by scanning
+      the whole index.
+    - **Work is capped, and a capped answer is refused rather than served.** A
+      precheck counts matching messages and matching campaign copy, each
+      through a `LIMIT 10,001`; more than 10,000 in either is a 422 ("add words
+      to narrow it"), never results drawn from an arbitrary subset. The search
+      itself repeats the same `LIMIT`s as a backstop and reads one REPEATABLE
+      READ snapshot with the precheck, so the backstop never truncates. Text is
+      matched once, through the indexes; the thread walk and the snippet reuse
+      those candidate sets and never recompute a tsvector. `ts_headline` runs
+      only on the ≤ 51 returned rows, over capped input (subject 1,000, body
+      20,000 characters), and the indexed document itself is capped at 100,000
+      characters so an enormous inbound body can neither fail its insert nor
+      cost more to search.
+    - **Address matching is index-served and capped the same way.** A query of
+      3+ characters is also matched, lower-cased and LIKE-escaped (so `%`/`_`
+      are literals), as a substring of the linked contact's email (through
+      `idx_contacts_search`, re-checked against `lower(email)` so a name or
+      company is not an address match) and of inbound messages' From address
+      (through the trigram `idx_inbox_messages_from_email_search`, inbound
+      only — an outbound From is the workspace's own mailbox). Both sets are
+      workspace-pinned, counted in the precheck and refused over 10,000 like
+      the text sets. Shorter queries skip address matching rather than scan
+      every contact.
+    - **Time is capped.** The search transaction runs under a transaction-local
+      `statement_timeout` (3 s); a cancelled statement is a 503, not a 500, and
+      the pooled connection's own timeout is untouched.
+    - **Rate is capped.** The route is throttled per IP and per workspace
+      (`INROAD_RATELIMIT_INBOX_SEARCH_{IP,WORKSPACE}`, failing closed on a
+      limiter outage), after the scope check.
+    - **Output cannot carry markup.** Snippets are returned as plain-text
+      segments with a `match` flag, never an HTML string; the highlight markers
+      are private-use code points stripped from the input before highlighting,
+      so a message cannot forge one.
+
 ## Sending-domain authentication (DNS)
 37. **The resolver only ever answers about domains the workspace already sends
     from.** `POST /sending-domains/{domain}/check` takes a caller-controlled path
