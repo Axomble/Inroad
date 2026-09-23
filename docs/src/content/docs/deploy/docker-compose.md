@@ -29,7 +29,7 @@ volume, not in the container's environment).
 The root `docker-compose.yml` includes 7 services:
 
 - `init-secrets`: One-shot service that generates a real random `INROAD_JWT_SECRET` and `INROAD_MASTER_KEY` into a Docker volume on first boot, so a bare `docker compose up` never runs on fixed, publicly-known secrets. Set both explicitly in the environment (or a `.env` file) to override — required for any multi-host deployment, since the generated file lives on a volume local to this host.
-- `postgres`: PostgreSQL 16 database.
+- `postgres`: PostgreSQL 16 database. PostgreSQL **15 or newer is required**; 16 is what every bundled deployment runs and what CI tests against. The schema uses column-list `ON DELETE SET NULL (column)` foreign keys (the conditional-branching migration, `20260923110214_sequence_step_branches`), which PostgreSQL 14 and older reject, so migrations stop there on an older server.
 - `redis`: Redis 7 in-memory queue & cache.
 - `migrate`: Automatic schema migration service; API and Worker wait for it to complete.
 - `api`: Control plane REST API server (`cmd/inroad`).

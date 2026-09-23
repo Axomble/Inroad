@@ -2284,6 +2284,17 @@ write history that never happened.
     `created_at` (when WE ingested it), never the sender-controlled `Date`
     header, and excludes automated labels unless one is named explicitly.
 
+    **Reply evidence is thread-scoped, not sender-verified.** A reply counts
+    because the inbox poller matched it to one of this campaign's sends by its
+    In-Reply-To/References headers and stored it on the enrollment's campaign +
+    contact thread — the same matching MarkReplied uses. Nothing proves the
+    CONTACT wrote it: anyone who knows a real Message-ID of a send can place a
+    message in that thread (the within-workspace spoofing gap listed under
+    Deferred). The blast radius is the same as that gap's and no wider: it can
+    route one enrollment of the workspace down a branch it could already be
+    routed down, and it cannot reach another tenant, suppress anything, or make
+    a stopping label's reply do anything but stop.
+
     **Tenancy.** Every branch read and write is `workspace_id`-pinned, and every
     step reference (source and both exits) is a composite FK on
     `(id, campaign_id)` with `(campaign_id, workspace_id)` pinned to `campaigns`,
@@ -2296,7 +2307,11 @@ write history that never happened.
 
     **A branch never overrides reply-label automation.** A reply whose label
     stops the enrollment still stops it; compliance dispatch (invariants 20, 45)
-    is untouched. A branch only routes enrollments the labels leave active.
+    is untouched. A branch only routes enrollments the labels leave active, and
+    the save path refuses a reply branch that names a stopping label
+    (`reply_label_stops_sequence`), since it could never fire. A paused, draft
+    or done campaign's enrollments are not routed at all: the not-running gate
+    runs BEFORE routing, so a hold never finishes or parks an enrollment.
 
 ## Deferred (documented, not yet built)
 - Datacenter/cloud IP ranges as a refreshed table (AWS/GCP/Azure publish

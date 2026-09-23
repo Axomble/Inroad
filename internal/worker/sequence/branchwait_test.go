@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/inroad/inroad/internal/coreapi"
+	"github.com/inroad/inroad/internal/platform/metrics"
 )
 
 // A pending branch condition schedules the next look at exactly RecheckAt and
@@ -25,6 +26,22 @@ func TestAdvanceConditionPendingSchedulesRecheck(t *testing.T) {
 	}
 	if snd.called() || core.claimCalls != 0 || core.stopped != "" || core.finalized != nil || enq.inCalled {
 		t.Fatal("a pending condition must not claim, send, stop or back off")
+	}
+}
+
+// A condition wait is not a send outcome: it recurs hourly for every waiting
+// enrollment, and counting it as result="deferred" would drown the capacity
+// and limit defers that bucket is for. No inroad_sends_total series moves.
+func TestAdvanceConditionPendingRecordsNoSendMetric(t *testing.T) {
+	mtx := metrics.New()
+	core := &stubCore{job: coreapi.StepSendJob{ConditionPending: true, RecheckAt: time.Now(), Skip: true}}
+	if err := runWithMetrics(t, core, &fakeSender{}, &fakeEnq{}, mtx); err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range []string{"sent", "failed", "deferred", "skipped"} {
+		if n := sendsCount(t, mtx, result); n != 0 {
+			t.Errorf("result=%s = %v, want 0", result, n)
+		}
 	}
 }
 

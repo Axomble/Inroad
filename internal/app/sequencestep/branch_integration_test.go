@@ -47,6 +47,11 @@ func newBranchIT(t *testing.T, label string) (branchIT, func()) {
 	}
 	q := gen.New(pool)
 	ws, campaign, ids := seedThreeSteps(t, ctx, q, label)
+	// HTML bodies, so open/click branches have somewhere to record evidence
+	// (tracking_enabled defaults to true).
+	if _, err := pool.Exec(ctx, `UPDATE sequence_steps SET body_html = '<p>b</p>' WHERE campaign_id = $1`, campaign); err != nil {
+		t.Fatalf("html bodies: %v", err)
+	}
 	svc := NewService(NewPgStore(pool), sqlChecker{pool: pool}, NewPgVariantStore(q), NewPgBranchStore(pool))
 	return branchIT{pool: pool, q: q, svc: svc, ws: ws, campaign: campaign, steps: ids}, pool.Close
 }
@@ -74,7 +79,14 @@ func TestBranchSaveAndReadBack(t *testing.T) {
 	defer done()
 	ctx := context.Background()
 	three := int32(3)
-	label := "positive" // seeded for every workspace by migration 000047
+	// A custom label that does NOT stop the enrollment: the only kind a branch
+	// can route on (the builtin human labels all stop the sequence).
+	label := "soft_yes"
+	if _, err := b.pool.Exec(ctx, `
+		INSERT INTO reply_labels (workspace_id, key, label, color, position, stops_enrollment)
+		VALUES ($1, $2, 'Soft yes', '#123456', 9, false)`, b.ws, label); err != nil {
+		t.Fatalf("custom label: %v", err)
+	}
 	got, err := b.svc.SetBranch(ctx, b.ws, b.campaign, BranchInput{
 		StepID: b.steps[0], Condition: "replied", WithinDays: &three, ReplyLabelKey: &label,
 		YesStepID: &b.steps[2], NoStepID: &b.steps[1],
@@ -103,6 +115,46 @@ func TestBranchSaveAndReadBack(t *testing.T) {
 	}
 	if g, _ := b.svc.Graph(ctx, b.ws, b.campaign); len(g.Branches) != 0 {
 		t.Fatalf("branch survived delete: %+v", g.Branches)
+	}
+}
+
+// Against the real seeded taxonomy: every builtin human label stops the
+// enrollment, so none of them can be named by a reply branch, while the
+// automated ones (which leave the enrollment running) can.
+func TestBranchRefusesSeededStoppingLabels(t *testing.T) {
+	b, done := newBranchIT(t, "Branch seeded labels")
+	defer done()
+	ctx := context.Background()
+	two := int32(2)
+	for _, key := range []string{"positive", "negative", "neutral", "unknown", "unsubscribe"} {
+		k := key
+		_, err := b.svc.SetBranch(ctx, b.ws, b.campaign, BranchInput{
+			StepID: b.steps[0], Condition: "replied", WithinDays: &two, ReplyLabelKey: &k, YesStepID: &b.steps[2],
+		})
+		if seqgraph.CodeOf(err) != seqgraph.CodeLabelStopsSequence {
+			t.Errorf("%s: code %q (%v), want %q", key, seqgraph.CodeOf(err), err, seqgraph.CodeLabelStopsSequence)
+		}
+	}
+	ooo := "out_of_office"
+	if _, err := b.svc.SetBranch(ctx, b.ws, b.campaign, BranchInput{
+		StepID: b.steps[0], Condition: "replied", WithinDays: &two, ReplyLabelKey: &ooo, YesStepID: &b.steps[2],
+	}); err != nil {
+		t.Fatalf("an automated (non-stopping) label is routable: %v", err)
+	}
+}
+
+// Tracking off on the campaign refuses an open branch against the real column.
+func TestBranchOpenRefusedWhenTrackingOff(t *testing.T) {
+	b, done := newBranchIT(t, "Branch tracking off")
+	defer done()
+	ctx := context.Background()
+	if _, err := b.pool.Exec(ctx, `UPDATE campaigns SET tracking_enabled = false WHERE id = $1`, b.campaign); err != nil {
+		t.Fatal(err)
+	}
+	one := int32(1)
+	_, err := b.svc.SetBranch(ctx, b.ws, b.campaign, BranchInput{StepID: b.steps[0], Condition: "opened", WithinDays: &one})
+	if seqgraph.CodeOf(err) != seqgraph.CodeTrackingRequired {
+		t.Fatalf("code %q (%v), want %q", seqgraph.CodeOf(err), err, seqgraph.CodeTrackingRequired)
 	}
 }
 

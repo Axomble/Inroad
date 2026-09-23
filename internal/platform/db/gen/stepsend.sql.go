@@ -226,14 +226,15 @@ func (q *Queries) GetStepEnrollmentBundle(ctx context.Context, arg GetStepEnroll
 
 const latestSentForContact = `-- name: LatestSentForContact :one
 SELECT message_id, references_header FROM sends
-WHERE campaign_id = $1 AND contact_id = $2 AND status = 'sent'
+WHERE campaign_id = $1 AND contact_id = $2 AND workspace_id = $3 AND status = 'sent'
 ORDER BY sent_at DESC NULLS LAST, step_order DESC
 LIMIT 1
 `
 
 type LatestSentForContactParams struct {
-	CampaignID uuid.UUID `json:"campaign_id"`
-	ContactID  uuid.UUID `json:"contact_id"`
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	ContactID   uuid.UUID `json:"contact_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
 type LatestSentForContactRow struct {
@@ -249,8 +250,12 @@ type LatestSentForContactRow struct {
 // path need not visit steps in step_order — 1 → 3 → 2 is a valid path — and
 // threading onto the highest-numbered step would reply to a message that is not
 // the latest one the contact received.
+//
+// Workspace-pinned like every other tenant read, even though (campaign_id,
+// contact_id) already came from a workspace-scoped bundle: the pin costs nothing
+// and keeps this from depending on its caller's discipline.
 func (q *Queries) LatestSentForContact(ctx context.Context, arg LatestSentForContactParams) (LatestSentForContactRow, error) {
-	row := q.db.QueryRow(ctx, latestSentForContact, arg.CampaignID, arg.ContactID)
+	row := q.db.QueryRow(ctx, latestSentForContact, arg.CampaignID, arg.ContactID, arg.WorkspaceID)
 	var i LatestSentForContactRow
 	err := row.Scan(&i.MessageID, &i.ReferencesHeader)
 	return i, err

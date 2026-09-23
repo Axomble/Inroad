@@ -159,6 +159,10 @@ func TestAStepSendJobRoundTripsAndItsCredentialComesFromTheBroker(t *testing.T) 
 		MailboxID: mailbox.String(), SendID: uuid.New().String(), VariantID: uuid.New().String(),
 		CurrentStep: 2, StepOrder: 3, NextDelaySeconds: 259200, LastStep: true,
 		Suppressed: false, CampaignLimited: false, NewLeadLimited: false, HealthPaused: false,
+		// Not a combination the control plane builds (a pending job carries no
+		// send), set here so the round trip covers every field on the type.
+		ConditionPending:  true,
+		RecheckAt:         time.Date(2026, 3, 5, 9, 0, 11, 0, time.UTC),
 		NotDueUntil:       time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC),
 		EffectiveDailyCap: 50, SentToday: 12, MinIntervalSeconds: 180,
 		ToEmail: "ada@example.test",
@@ -205,6 +209,32 @@ func TestAStepSendJobRoundTripsAndItsCredentialComesFromTheBroker(t *testing.T) 
 	// And the control plane saw the ids it was sent.
 	if len(jobs.gotArgs) != 2 || jobs.gotArgs[0] != enrollment.String() || jobs.gotArgs[1] != ws.String() {
 		t.Errorf("control plane saw %v, want [%s %s]", jobs.gotArgs, enrollment, ws)
+	}
+}
+
+// A branch-condition wait is the shape the control plane actually sends: no
+// mailbox, so no credential is brokered, and ConditionPending/RecheckAt (with
+// the Skip that protects older workers) arrive intact. A field dropped here
+// reaches the worker zero-valued, and a zero RecheckAt would re-drive the
+// enrollment immediately instead of waiting out the condition.
+func TestAConditionPendingJobRoundTripsWithoutACredential(t *testing.T) {
+	ws, enrollment := uuid.New(), uuid.New()
+	jobs := &fakeJobs{step: coreapi.StepSendJob{
+		EnrollmentID: enrollment.String(), WorkspaceID: ws.String(),
+		ConditionPending: true, RecheckAt: time.Date(2026, 9, 24, 14, 3, 7, 0, time.UTC), Skip: true,
+	}}
+	opener := smtpSecret("unused")
+	c, _ := serveJobs(t, jobs, opener)
+
+	got, err := c.GetStepSendJob(context.Background(), enrollment.String(), ws.String())
+	if err != nil {
+		t.Fatalf("GetStepSendJob: %v", err)
+	}
+	if !reflect.DeepEqual(got, jobs.step) {
+		t.Errorf("job mismatch\n got: %+v\nwant: %+v", got, jobs.step)
+	}
+	if opener.calls != 0 {
+		t.Errorf("a job with no mailbox asked the broker %d times", opener.calls)
 	}
 }
 

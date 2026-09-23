@@ -12,6 +12,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const campaignTrackingEnabled = `-- name: CampaignTrackingEnabled :one
+SELECT tracking_enabled FROM campaigns WHERE id = $1 AND workspace_id = $2
+`
+
+type CampaignTrackingEnabledParams struct {
+	ID          uuid.UUID `json:"id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// Whether the campaign rewrites links and embeds the open pixel. Save-time
+// validation for open/click branches, which have no evidence to read otherwise.
+func (q *Queries) CampaignTrackingEnabled(ctx context.Context, arg CampaignTrackingEnabledParams) (bool, error) {
+	row := q.db.QueryRow(ctx, campaignTrackingEnabled, arg.ID, arg.WorkspaceID)
+	var tracking_enabled bool
+	err := row.Scan(&tracking_enabled)
+	return tracking_enabled, err
+}
+
 const deleteBranch = `-- name: DeleteBranch :exec
 DELETE FROM sequence_step_branches
 WHERE step_id = $1 AND campaign_id = $2 AND workspace_id = $3
@@ -178,22 +196,25 @@ func (q *Queries) LockCampaignGraph(ctx context.Context, arg LockCampaignGraphPa
 	return id, err
 }
 
-const replyLabelKeyExists = `-- name: ReplyLabelKeyExists :one
-SELECT EXISTS (SELECT 1 FROM reply_labels WHERE workspace_id = $1 AND key = $2)::bool
+const replyLabelStopsEnrollment = `-- name: ReplyLabelStopsEnrollment :one
+SELECT stops_enrollment FROM reply_labels WHERE workspace_id = $1 AND key = $2
 `
 
-type ReplyLabelKeyExistsParams struct {
+type ReplyLabelStopsEnrollmentParams struct {
 	WorkspaceID uuid.UUID `json:"workspace_id"`
 	Key         string    `json:"key"`
 }
 
-// Whether the workspace defines a reply label with this key. Save-time
-// validation only: a branch naming a label that does not exist could never match.
-func (q *Queries) ReplyLabelKeyExists(ctx context.Context, arg ReplyLabelKeyExistsParams) (bool, error) {
-	row := q.db.QueryRow(ctx, replyLabelKeyExists, arg.WorkspaceID, arg.Key)
-	var column_1 bool
-	err := row.Scan(&column_1)
-	return column_1, err
+// Whether the workspace's reply label with this key stops the enrollment.
+// Save-time validation only: no row (pgx.ErrNoRows) means the label does not
+// exist and a branch naming it could never match; true means a reply with that
+// label stops the sequence before any branch can route it, so a branch naming it
+// could never fire either.
+func (q *Queries) ReplyLabelStopsEnrollment(ctx context.Context, arg ReplyLabelStopsEnrollmentParams) (bool, error) {
+	row := q.db.QueryRow(ctx, replyLabelStopsEnrollment, arg.WorkspaceID, arg.Key)
+	var stops_enrollment bool
+	err := row.Scan(&stops_enrollment)
+	return stops_enrollment, err
 }
 
 const stepSendCreatedAt = `-- name: StepSendCreatedAt :one
@@ -206,8 +227,9 @@ type StepSendCreatedAtParams struct {
 }
 
 // When a (deterministically-id'd) step send row was first created. The send
-// path's cycle backstop: a routed step whose row predates the enrollment's last
-// send was visited EARLIER on this path, i.e. the graph now loops. Workspace-pinned.
+// path's cycle backstop compares the routed step's row with the CURRENT step's
+// own row: a routed step created before the step the contact is on was visited
+// EARLIER on this path, i.e. the graph now loops. Workspace-pinned.
 func (q *Queries) StepSendCreatedAt(ctx context.Context, arg StepSendCreatedAtParams) (pgtype.Timestamptz, error) {
 	row := q.db.QueryRow(ctx, stepSendCreatedAt, arg.ID, arg.WorkspaceID)
 	var created_at pgtype.Timestamptz

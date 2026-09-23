@@ -122,30 +122,6 @@ func (f branchFixture) track(t *testing.T, order int, kind string, machine bool)
 	}
 }
 
-// reply stores an inbound reply the way the inbox poller does: a thread on the
-// campaign + contact, and an inbound message classified replyClass.
-func (f branchFixture) reply(t *testing.T, replyClass string) {
-	t.Helper()
-	ctx := context.Background()
-	var mailbox uuid.UUID
-	if err := f.pool.QueryRow(ctx, `SELECT mailbox_id FROM campaigns WHERE id = $1`, f.campaignID).Scan(&mailbox); err != nil {
-		t.Fatalf("mailbox: %v", err)
-	}
-	var thread uuid.UUID
-	if err := f.pool.QueryRow(ctx, `
-		INSERT INTO inbox_threads (workspace_id, mailbox_id, campaign_id, contact_id, root_message_id)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		f.ws, mailbox, f.campaignID, f.contactID, "<root-"+uuid.NewString()+"@x>").Scan(&thread); err != nil {
-		t.Fatalf("thread: %v", err)
-	}
-	if _, err := f.pool.Exec(ctx, `
-		INSERT INTO inbox_messages (thread_id, workspace_id, mailbox_id, direction, message_id, reply_class, occurred_at)
-		VALUES ($1, $2, $3, 'inbound', $4, $5, now())`,
-		thread, f.ws, mailbox, "<reply-"+uuid.NewString()+"@x>", replyClass); err != nil {
-		t.Fatalf("message: %v", err)
-	}
-}
-
 func (f branchFixture) enrollment(t *testing.T) gen.SequenceEnrollment {
 	t.Helper()
 	e, err := f.q.GetEnrollment(context.Background(), gen.GetEnrollmentParams{ID: uuid.MustParse(f.eid), WorkspaceID: f.ws})
@@ -226,58 +202,90 @@ func TestBranchMachineOpenDoesNotCount(t *testing.T) {
 	f.requireSent(t, "S1", "S2")
 }
 
-// Replies span both legs: the step went out as a sends row, the answer is an
-// inbox_messages row. An out-of-office is not a reply; a human one is, and it
-// routes YES without waiting out the window.
-func TestBranchRepliedCountsHumanRepliesOnly(t *testing.T) {
+// A contact suppressed (unsubscribed, bounced) while waiting on a branch is
+// never sent the routed step: routing picks the target, and the send path's
+// suppression gate then stops the enrollment exactly as on a linear sequence.
+func TestBranchRoutedSendHonoursSuppression(t *testing.T) {
 	f, done := seedBranchCampaign(t)
 	defer done()
-	f.branch(t, f.steps[0], "replied", 3, &f.steps[2], &f.steps[1])
+	f.branch(t, f.steps[0], "opened", 2, &f.steps[2], &f.steps[1])
 
 	f.advance(t)
-	f.reply(t, "out_of_office")
+	f.track(t, 1, "open", false) // decides YES -> step 3
+	if err := f.q.AddSuppression(context.Background(), gen.AddSuppressionParams{
+		WorkspaceID: f.ws, Email: f.email, Reason: "unsubscribe",
+	}); err != nil {
+		t.Fatalf("suppress: %v", err)
+	}
+
 	f.due(t)
 	f.advance(t)
 	f.requireSent(t, "S1")
-
-	f.reply(t, "neutral")
-	f.due(t)
-	f.advance(t)
-	f.requireSent(t, "S1", "S3")
+	e := f.enrollment(t)
+	if e.Status != "stopped" || e.StopReason == nil || *e.StopReason != "suppressed" {
+		t.Fatalf("routed send to a suppressed contact: status %s reason %v", e.Status, e.StopReason)
+	}
 }
 
-// A reply that does not stop the enrollment nudges one waiting on a reply
-// condition to now, so the next sweep routes it; an automated reply must not
-// (it is the kind that DEFERS an enrollment, and pulling it forward would undo
-// the deferral).
-func TestBranchReplyNudgesAwaitingEnrollment(t *testing.T) {
+// A campaign that is not running holds its enrollments WITHOUT routing them: a
+// path that would end is not finished, a condition is not parked, nothing is
+// sent — the pause gate runs before routing on the graph path, just as it runs
+// before any send on the linear one. Relaunching resumes routing.
+func TestBranchPausedCampaignNeitherFinishesNorParks(t *testing.T) {
 	f, done := seedBranchCampaign(t)
 	defer done()
 	ctx := context.Background()
-	f.branch(t, f.steps[0], "replied", 3, &f.steps[2], nil)
+	f.branch(t, f.steps[0], "not_opened", 1, nil, &f.steps[1]) // silence -> end
+
+	f.advance(t)
+	f.ageLastSend(t, 25*time.Hour) // the window has closed: this WOULD end the path
+	if _, err := f.pool.Exec(ctx, `UPDATE campaigns SET status = 'paused' WHERE id = $1`, f.campaignID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := f.core.GetStepSendJob(ctx, f.eid, f.ws.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !job.CampaignPaused || job.ConditionPending || job.Skip {
+		t.Fatalf("paused campaign job = paused %v pending %v skip %v, want paused only", job.CampaignPaused, job.ConditionPending, job.Skip)
+	}
+	if e := f.enrollment(t); e.Status != "active" || e.AwaitingConditionStep != nil {
+		t.Fatalf("a paused campaign moved the enrollment: status %s awaiting %v", e.Status, e.AwaitingConditionStep)
+	}
+
+	if _, err := f.pool.Exec(ctx, `UPDATE campaigns SET status = 'running' WHERE id = $1`, f.campaignID); err != nil {
+		t.Fatal(err)
+	}
+	f.advance(t)
+	f.requireSent(t, "S1")
+	if e := f.enrollment(t); e.Status != "completed" {
+		t.Fatalf("after relaunch the ended path completes, got %s", e.Status)
+	}
+}
+
+// The loop backstop's reference point is the CURRENT step's own send row, not
+// enrollment.last_sent_at. A recover-forward re-stamps last_sent_at, so an old
+// visit can look "later" than it; here last_sent_at is pushed into the past
+// (as if long ago) and the loop must still be caught — and, conversely, the
+// legitimate first visit to a step is not mistaken for a revisit.
+func TestBranchLoopBackstopUsesTheCurrentStepsSendRow(t *testing.T) {
+	f, done := seedBranchCampaign(t)
+	defer done()
+	f.branch(t, f.steps[0], "always", 0, &f.steps[1], nil)
+	f.branch(t, f.steps[1], "always", 0, &f.steps[0], nil) // 1 -> 2 -> 1
 
 	f.advance(t)
 	f.due(t)
-	f.advance(t) // parks until the next recheck
-	parked := f.enrollment(t).NextDueAt.Time
-	if !parked.After(time.Now()) {
-		t.Fatalf("precondition: enrollment should be parked, due %v", parked)
-	}
+	f.advance(t)
+	f.requireSent(t, "S1", "S2")
 
-	if err := f.core.RecordReplyClass(ctx, f.eid, f.ws.String(), "out_of_office", "rules", 1); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.enrollment(t).NextDueAt.Time; !got.Equal(parked) {
-		t.Fatalf("an automated reply moved the due time %v -> %v", parked, got)
-	}
-
-	if err := f.core.RecordReplyClass(ctx, f.eid, f.ws.String(), "neutral", "rules", 1); err != nil {
-		t.Fatal(err)
-	}
-	// A minute of slack for the database container's clock against this one;
-	// the parked due time was an hour out.
-	if got := f.enrollment(t).NextDueAt.Time; got.After(time.Now().Add(time.Minute)) {
-		t.Fatalf("a human reply must pull the due time to now, still %v", got)
+	// Make last_sent_at older than step 1's send row: comparing against it
+	// would call step 1 "not visited before" and recover-forward onto it.
+	f.ageLastSend(t, 48*time.Hour)
+	f.advance(t)
+	f.requireSent(t, "S1", "S2")
+	if e := f.enrollment(t); e.Status != "completed" || e.CurrentStep != 2 {
+		t.Fatalf("loop = %s at %d, want completed at 2", e.Status, e.CurrentStep)
 	}
 }
 

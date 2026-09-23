@@ -38,7 +38,7 @@ It is not, by itself, a multi-IP sending fleet.
 ## Architecture Infrastructure
 
 - **VPC Subnets:** Public, Private App, and Private Database subnets across 2 Availability Zones with NAT Gateways.
-- **Managed Database:** Amazon RDS PostgreSQL 16 (Multi-AZ encrypted).
+- **Managed Database:** Amazon RDS PostgreSQL 16 (Multi-AZ encrypted). Keep `engine_version` at 15 or above: PostgreSQL **15 or newer is required**; 16 is what every bundled deployment runs and what CI tests against. The schema uses column-list `ON DELETE SET NULL (column)` foreign keys (the conditional-branching migration, `20260923110214_sequence_step_branches`), which PostgreSQL 14 and older reject, so migrations stop there on an older server.
 - **In-Memory Cache:** Amazon ElastiCache for Redis cluster.
 - **Container Compute:** AWS ECS Fargate Task Definitions & Services for API (`cmd/inroad`) and Worker (`cmd/worker`).
 - **Load Balancing:** AWS Application Load Balancer (ALB) with HTTPS listener and `/healthz` health checks.

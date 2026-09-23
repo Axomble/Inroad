@@ -48,9 +48,21 @@ import (
 //     window measured from S's send (last_sent_at) — so a window that has
 //     already elapsed decides immediately.
 //   - A branch on S whose condition, window or exits change while the contact
-//     waits is evaluated with the NEW definition at the next check (at most
-//     conditionRecheckInterval away). A lengthened window keeps waiting; a
-//     shortened one decides at the next check.
+//     waits is evaluated with the NEW definition at the next check. That check
+//     is at most conditionRecheckInterval away while the condition is OPEN, but
+//     can be later: rechecks are snapped into the campaign's send window (a
+//     Friday-evening recheck lands on Monday morning), an out-of-office deferral
+//     that ends later wins, and once a route is decided the next check is when
+//     its target falls due — which may be days out. A lengthened window keeps
+//     waiting; a shortened one decides at the next check. Until the target is
+//     actually SENT, a decided route is re-derived too, so changing S's exits
+//     in that interval re-routes the contact to the new exit.
+//   - Known edge: the recover-forward window. If S's routed target T was
+//     delivered but the cursor advance to T failed, and S's exit is changed
+//     BEFORE the retry runs, the retry routes to the NEW target U and sends it
+//     too — the contact receives both T and U. The window is one failed
+//     transaction plus an asynq retry (seconds); closing it would mean storing
+//     the route, which the design deliberately does not do.
 //   - A branch removed from S while the contact waits returns S to linear
 //     fall-through, and the successor still waits out its own delay from S's
 //     send (awaiting_condition_step is what keeps this true once the campaign
@@ -266,7 +278,7 @@ func (c client) routeGraph(ctx context.Context, ws uuid.UUID, enrollmentID strin
 		return graphRouteResult{routeDecision: d}, nil
 	}
 	if b.CurrentStep > 0 && g.HasBranches() {
-		revisit, err := c.revisits(ctx, ws, b, d.target)
+		revisit, err := c.revisits(ctx, ws, b, b.CurrentStep, d.target)
 		if err != nil {
 			return graphRouteResult{}, err
 		}
@@ -292,23 +304,43 @@ func (c client) routeGraph(ctx context.Context, ws uuid.UUID, enrollmentID strin
 // revisits reports whether target was already sent EARLIER on this contact's
 // path. Its deterministic send row existing is not enough — that is also the
 // recover-forward case, where target was sent but the cursor advance to it did
-// not commit — so the test is whether the row predates the cursor step's own
-// send: a recover-forward row is created after it, a loop's row long before.
-func (c client) revisits(ctx context.Context, ws uuid.UUID, b gen.GetStepEnrollmentBundleRow, target seqgraph.Step) (bool, error) {
+// not commit — so the test compares it with the CURRENT step's own send row: a
+// recover-forward row for target was created after the current step's, a loop's
+// row before it (the loop visited target first).
+//
+// Both instants are sends.created_at, the same column stamped by the same
+// database clock, so there is no skew to absorb and no tolerance — a tolerance
+// would blind this to the loop that matters most, zero-delay steps seconds
+// apart. (enrollment.last_sent_at would be the wrong reference: a recover-forward
+// re-stamps it, so it can land after a genuinely-earlier visit.)
+func (c client) revisits(ctx context.Context, ws uuid.UUID, b gen.GetStepEnrollmentBundleRow, cursorOrder int32, target seqgraph.Step) (bool, error) {
+	targetAt, found, err := c.stepSendCreatedAt(ctx, ws, b, target.Order)
+	if err != nil || !found {
+		return false, err
+	}
+	cursorAt, found, err := c.stepSendCreatedAt(ctx, ws, b, cursorOrder)
+	if err != nil || !found {
+		// No row for the step the contact is on cannot happen past step 0 (the
+		// cursor only moves after a claim); with nothing to compare against,
+		// the claim remains the delivery guard.
+		return false, err
+	}
+	return targetAt.Before(cursorAt), nil
+}
+
+// stepSendCreatedAt reads when one step's deterministic send row was created;
+// found=false when the row does not exist.
+func (c client) stepSendCreatedAt(ctx context.Context, ws uuid.UUID, b gen.GetStepEnrollmentBundleRow, order int32) (time.Time, bool, error) {
 	created, err := c.q.StepSendCreatedAt(ctx, gen.StepSendCreatedAtParams{
-		ID: deriveStepSendID(b.CampaignID, b.ContactID, int(target.Order)), WorkspaceID: ws,
+		ID: deriveStepSendID(b.CampaignID, b.ContactID, int(order)), WorkspaceID: ws,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return time.Time{}, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("step send lookup: %w", err)
+		return time.Time{}, false, fmt.Errorf("step send lookup: %w", err)
 	}
-	// No tolerance, unlike the due checks: both instants are the DATABASE's
-	// now() (sends.created_at's default and the cursor advance's last_sent_at),
-	// so there is no clock skew to absorb — and a tolerance would blind this to
-	// exactly the loop that matters most, zero-delay steps a few seconds apart.
-	return created.Time.Before(b.LastSentAt.Time), nil
+	return created.Time, true, nil
 }
 
 // firstEvidence reads the earliest qualifying event for one condition.

@@ -40,10 +40,18 @@ WHERE step_id = $1 AND campaign_id = $2 AND workspace_id = $3;
 -- takes on its campaign FK, so a graph edit never stalls delivery.
 SELECT id FROM campaigns WHERE id = $1 AND workspace_id = $2 FOR NO KEY UPDATE;
 
--- name: ReplyLabelKeyExists :one
--- Whether the workspace defines a reply label with this key. Save-time
--- validation only: a branch naming a label that does not exist could never match.
-SELECT EXISTS (SELECT 1 FROM reply_labels WHERE workspace_id = $1 AND key = $2)::bool;
+-- name: ReplyLabelStopsEnrollment :one
+-- Whether the workspace's reply label with this key stops the enrollment.
+-- Save-time validation only: no row (pgx.ErrNoRows) means the label does not
+-- exist and a branch naming it could never match; true means a reply with that
+-- label stops the sequence before any branch can route it, so a branch naming it
+-- could never fire either.
+SELECT stops_enrollment FROM reply_labels WHERE workspace_id = $1 AND key = $2;
+
+-- name: CampaignTrackingEnabled :one
+-- Whether the campaign rewrites links and embeds the open pixel. Save-time
+-- validation for open/click branches, which have no evidence to read otherwise.
+SELECT tracking_enabled FROM campaigns WHERE id = $1 AND workspace_id = $2;
 
 -- name: FirstHumanTrackingEventAt :one
 -- The earliest HUMAN open or click of one send, at or before window_end. It reads
@@ -84,6 +92,7 @@ LIMIT 1;
 
 -- name: StepSendCreatedAt :one
 -- When a (deterministically-id'd) step send row was first created. The send
--- path's cycle backstop: a routed step whose row predates the enrollment's last
--- send was visited EARLIER on this path, i.e. the graph now loops. Workspace-pinned.
+-- path's cycle backstop compares the routed step's row with the CURRENT step's
+-- own row: a routed step created before the step the contact is on was visited
+-- EARLIER on this path, i.e. the graph now loops. Workspace-pinned.
 SELECT created_at FROM sends WHERE id = $1 AND workspace_id = $2;

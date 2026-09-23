@@ -113,7 +113,6 @@ var tenancyExceptions = map[string]string{
 	"oauth_provider.sql:RevokeOauthRefreshFamily":   "revokes a whole rotation family on reuse detection; pinned to family_id, which is narrower than a workspace.",
 	"mailbox.sql:MailboxExists":                     "an existence probe by mailbox id returning only a boolean — it can leak at most whether an unguessable UUID is an active mailbox, never row content.",
 	"send.sql:CountSentToday":                       "the daily-cap gate, keyed on an unguessable mailbox id and returning only a count. Callers reach it having already resolved the mailbox within their workspace.",
-	"stepsend.sql:LatestSentForContact":             "threading headers for the next step, keyed on (campaign_id, contact_id); both were resolved workspace-scoped by the caller that scheduled this step.",
 	"tracking.sql:GetSendTrackingContext":           "the public tracking pixel path has NO authenticated principal to scope by — the send id arrives in an HMAC-signed token. Returns a verdict about that one send, never row data; scoping it would mean trusting a workspace id from an unauthenticated request.",
 	"tracking.sql:CountRecentSendOpensFromSubnet":   "same unauthenticated tracking path as GetSendTrackingContext; returns a count about one send.",
 
@@ -465,7 +464,7 @@ func TestEveryTenancyExceptionHasAWrittenReason(t *testing.T) {
 // this guard has stopped guarding, so the count is the size of the hole in the net.
 // Raising it should be a conscious act in a diff, not a drift.
 func TestTheTenancyAllowlistDoesNotGrowSilently(t *testing.T) {
-	const known = 50
+	const known = 49
 	if got := len(tenancyExceptions); got != known {
 		t.Errorf("tenancyExceptions has %d entries, expected %d. Every entry is a query this "+
 			"guard no longer checks. If you added one deliberately, update `known` in the same "+

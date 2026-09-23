@@ -144,10 +144,16 @@ const (
 	CodeInvalidCondition  = "invalid_condition"
 	CodeInvalidWithinDays = "invalid_within_days"
 	CodeLabelNotAllowed   = "invalid_reply_label"
-	CodeNoExitNotAllowed  = "no_exit_not_allowed"
-	CodeUnknownStep       = "unknown_step"
-	CodeUnknownTarget     = "unknown_target"
-	CodeCycle             = "cycle"
+	// CodeLabelStopsSequence is a reply label whose replies stop the enrollment,
+	// so a branch naming it could never route anyone.
+	CodeLabelStopsSequence = "reply_label_stops_sequence"
+	// CodeTrackingRequired is an open/click condition on a campaign or step that
+	// can never record an open or click.
+	CodeTrackingRequired = "tracking_required"
+	CodeNoExitNotAllowed = "no_exit_not_allowed"
+	CodeUnknownStep      = "unknown_step"
+	CodeUnknownTarget    = "unknown_target"
+	CodeCycle            = "cycle"
 )
 
 // ShapeError is a branch that is malformed on its own, before any graph is
