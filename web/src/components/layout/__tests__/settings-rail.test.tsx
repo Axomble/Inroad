@@ -49,6 +49,7 @@ const ADMIN_ROWS = [
   [/connected apps/i, '/app/settings/oauth-apps'],
   [/^ai$/i, '/app/settings/ai'],
   [/webhooks/i, '/app/settings/webhooks'],
+  [/audit log/i, '/app/settings/audit-log'],
 ] as const
 
 test('a member sees the screens their scopes actually allow, and none of the admin ones', () => {
