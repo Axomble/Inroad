@@ -3,15 +3,12 @@ import { Link } from '@tanstack/react-router'
 import { Loader2, Pencil } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { Select } from '@/components/ui/select'
+import { Combobox, type ComboboxOption } from '@/components/shared/combobox'
+import { useDebouncedInput } from '@/hooks/use-debounced-input'
 import { httpStatus, serverDetail } from '@/lib/rtk-error'
 import { recordErrorMessage } from '@/features/records/error-copy'
-import { listPageSize } from '@/features/records/query-args'
-// Read-only RTK Query hook from another feature's `api.ts`, which is the one
-// cross-feature import CLAUDE.md allows (hooks only, never UI): the company list
-// is CRM's endpoint, and there is nowhere neutral for it to live.
-import { useCrmListCompaniesQuery } from '@/features/crm/api'
 import { useSetContactCompanyMutation, type ContactCompany } from './api'
+import { companySearchTerm, minCompanySearchLength, useCompanySearch } from './use-company-search'
 
 /**
  * Which company this contact belongs to, and the control that changes it.
@@ -69,6 +66,16 @@ export function CompanyLinkForm({
   return <CompanyPicker contactId={contactId} company={company} onDone={() => setEditing(false)} />
 }
 
+function companyOption(company: { id: string; name: string; domain?: string }): ComboboxOption {
+  return { id: company.id, label: company.name, detail: company.domain || undefined }
+}
+
+/**
+ * Searches the server rather than filtering a loaded page: a workspace's
+ * companies do not fit in one response, and a `<select>` over the first page made
+ * every company past it unreachable. The current link is held as the selection
+ * itself, so it stays visible without being re-injected into the result list.
+ */
 function CompanyPicker({
   contactId,
   company,
@@ -78,11 +85,15 @@ function CompanyPicker({
   company: ContactCompany | null
   onDone: () => void
 }) {
-  const companiesQuery = useCrmListCompaniesQuery({ limit: listPageSize })
+  const [committedQuery, setCommittedQuery] = useState('')
+  const [typedQuery, setTypedQuery] = useDebouncedInput(committedQuery, setCommittedQuery)
+  const term = companySearchTerm(committedQuery)
+  const search = useCompanySearch(term)
   const [setCompany, state] = useSetContactCompanyMutation()
-  const [selected, setSelected] = useState(company?.id ?? '')
+  const [selected, setSelected] = useState<ComboboxOption | null>(company ? companyOption(company) : null)
   const [error, setError] = useState<string | null>(null)
-  const selectId = useId()
+  const inputId = useId()
+  const typedTooShort = typedQuery.trim() !== '' && companySearchTerm(typedQuery) === undefined
 
   const save = async () => {
     setError(null)
@@ -96,7 +107,7 @@ function CompanyPicker({
     // every test passes. This shape never creates one.
     const result = await setCompany({
       id: contactId,
-      contactCompanyLink: { company_id: selected || null },
+      contactCompanyLink: { company_id: selected?.id ?? null },
     })
     if ('error' in result) {
       setError(linkErrorMessage(result.error))
@@ -107,28 +118,38 @@ function CompanyPicker({
 
   return (
     <div className="grid gap-2">
-      <Label htmlFor={selectId}>Company</Label>
-      <Select
-        id={selectId}
-        value={selected}
-        disabled={companiesQuery.isLoading || state.isLoading}
-        onChange={(event) => setSelected(event.target.value)}
-      >
-        <option value="">No company</option>
-        {/* The currently-linked company may sit past the page cap, so it is always
-            offered — otherwise opening this form would silently propose unlinking. */}
-        {company && !(companiesQuery.data?.items ?? []).some(({ id }) => id === company.id) ? (
-          <option value={company.id}>{company.name}</option>
-        ) : null}
-        {(companiesQuery.data?.items ?? []).map((option) => (
-          <option key={option.id} value={option.id}>{option.name}</option>
-        ))}
-      </Select>
-      {companiesQuery.isError ? (
-        <p role="alert" className="text-xs text-danger">
-          The company list could not be loaded, so there is nothing to choose from yet.
-        </p>
-      ) : null}
+      <Label htmlFor={inputId}>Company</Label>
+      <Combobox
+        inputId={inputId}
+        query={typedQuery}
+        onQueryChange={setTypedQuery}
+        options={search.items.map(companyOption)}
+        selected={selected}
+        onSelect={setSelected}
+        disabled={state.isLoading}
+        list={{
+          loading: search.loading,
+          // Fixed copy rather than the status mapper: what matters to the reader
+          // is what this blocks, and "the server had a problem" alone says
+          // nothing about why the list is empty.
+          error: search.error ? 'The company list could not be loaded, so there is nothing to choose from yet.' : undefined,
+          onRetry: search.retry,
+        }}
+        paging={{
+          hasMore: search.hasMore,
+          loading: search.loadingMore,
+          error: search.loadMoreError ? 'More companies could not be loaded. Try again.' : undefined,
+          onLoadMore: search.loadMore,
+        }}
+        labels={{
+          placeholder: 'Search companies by name or domain',
+          list: 'Companies',
+          empty: term ? `No company matches “${term}”.` : 'There are no companies in this workspace yet.',
+          none: 'No company',
+          clear: 'Clear the selected company',
+          hint: typedTooShort ? `Type at least ${minCompanySearchLength} characters to search.` : undefined,
+        }}
+      />
       {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}
       <div className="flex items-center gap-2">
         <Button type="button" variant="primary" size="sm" onClick={() => void save()} disabled={state.isLoading}>

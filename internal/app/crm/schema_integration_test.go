@@ -318,7 +318,7 @@ func TestCompanyAndNotePagingWalksEveryRow(t *testing.T) {
 		}
 		target = Target{Type: TargetCompany, ID: company.ID}
 	}
-	names := walkCompanies(ctx, t, service, ws)
+	names := walkCompanies(ctx, t, service, ws, CompanyFilter{})
 	want := []string{"Alpha", "Bravo", "Charlie", "Delta", "Echo"}
 	if len(names) != len(want) {
 		t.Fatalf("walked %v, want %v", names, want)
@@ -357,12 +357,12 @@ func TestCompanyAndNotePagingWalksEveryRow(t *testing.T) {
 	}
 }
 
-func walkCompanies(ctx context.Context, t *testing.T, service *Service, ws uuid.UUID) []string {
+func walkCompanies(ctx context.Context, t *testing.T, service *Service, ws uuid.UUID, filter CompanyFilter) []string {
 	t.Helper()
 	var names []string
 	cursor := ""
 	for pages := 0; pages < 10; pages++ {
-		page, err := service.ListCompanies(ctx, ws, PageRequest{Limit: 2, Cursor: cursor})
+		page, err := service.ListCompanies(ctx, ws, filter, PageRequest{Limit: 2, Cursor: cursor})
 		if err != nil {
 			t.Fatalf("companies page: %v", err)
 		}

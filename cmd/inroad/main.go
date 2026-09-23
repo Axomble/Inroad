@@ -599,18 +599,18 @@ func run() error {
 		}
 	}()
 	toolRegistry := agenttool.New(agenttool.Deps{
-		Campaigns:       campaignSvc,
-		Contacts:        contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
-		ContactWrites:   contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
-		ContactImports:  contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
-		Mailboxes:       mailboxTools{service: mailboxSvc},
-		Deliverability:  deliverabilityToolAdapter{deliverability: deliverabilitySvc, pulse: pulseSvc},
-		Lists:           listSvc,
-		ListWrites:      listSvc,
-		Warmup:          warmupTools{service: warmupSvc},
-		CRM:             crmTools{service: crmSvc},
-		CRMErrors:       crmErrors{},
-		CRMWriteLimiter: redisLimiter,
+		Campaigns:      campaignSvc,
+		Contacts:       contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		ContactWrites:  contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		ContactImports: contactTools{service: contactSvc, store: contactStore, lists: listSvc, pool: pool},
+		Mailboxes:      mailboxTools{service: mailboxSvc},
+		Deliverability: deliverabilityToolAdapter{deliverability: deliverabilitySvc, pulse: pulseSvc},
+		Lists:          listSvc,
+		ListWrites:     listSvc,
+		Warmup:         warmupTools{service: warmupSvc},
+		CRM:            crmTools{service: crmSvc},
+		CRMErrors:      crmErrors{},
+		WriteLimiter:   redisLimiter,
 	})
 	mcpResourceURL := strings.TrimRight(cfg.PublicURL, "/") + "/v1/mcp"
 	mcpHandler := mcpserver.New(toolRegistry, func(ctx context.Context, r *http.Request) (agenttool.Principal, []string, time.Time, string, bool, error) {

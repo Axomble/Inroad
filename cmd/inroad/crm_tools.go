@@ -28,7 +28,15 @@ func crmDealView(row crm.Deal) agenttool.CRMDeal {
 }
 
 func (a crmTools) ListCompanies(ctx context.Context, workspaceID uuid.UUID) (agenttool.CRMList[agenttool.CRMCompany], error) {
-	page, err := a.service.ListCompanies(ctx, workspaceID, crm.PageRequest{Limit: crmAgentPageLimit})
+	return a.companies(ctx, workspaceID, crm.CompanyFilter{})
+}
+
+func (a crmTools) SearchCompanies(ctx context.Context, workspaceID uuid.UUID, query string) (agenttool.CRMList[agenttool.CRMCompany], error) {
+	return a.companies(ctx, workspaceID, crm.CompanyFilter{Query: query})
+}
+
+func (a crmTools) companies(ctx context.Context, workspaceID uuid.UUID, filter crm.CompanyFilter) (agenttool.CRMList[agenttool.CRMCompany], error) {
+	page, err := a.service.ListCompanies(ctx, workspaceID, filter, crm.PageRequest{Limit: crmAgentPageLimit})
 	if err != nil {
 		return agenttool.CRMList[agenttool.CRMCompany]{}, err
 	}

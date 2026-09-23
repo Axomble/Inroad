@@ -14,6 +14,25 @@ GROUP BY c.id
 ORDER BY lower(c.name), c.id
 LIMIT sqlc.arg(page_limit);
 
+-- SearchCompanies is ListCompanies narrowed by a substring of the name or
+-- domain. It is spelled out rather than folded into ListCompanies behind a
+-- `$q = '' OR ...` guard for the same reason as ListCompanyDeals: the guard
+-- survives into a generic plan and stops the trigram predicate becoming an
+-- index condition. The LIKE expression must stay byte-identical to
+-- idx_companies_search (migration 20260923105443_company_search) or the index is
+-- never used. The query arrives lower-cased and LIKE-escaped from the store.
+-- name: SearchCompanies :many
+SELECT c.*, count(d.id)::bigint AS deal_count, lower(c.name) AS name_key
+FROM companies c
+LEFT JOIN deals d ON d.workspace_id = c.workspace_id AND d.company_id = c.id
+WHERE c.workspace_id = sqlc.arg(workspace_id)
+  AND lower(c.name || ' ' || COALESCE(c.domain::text, '')) LIKE '%' || sqlc.arg(pattern)::text || '%'
+  AND (sqlc.arg(seek)::bool = false
+       OR (lower(c.name), c.id) > (sqlc.arg(cursor_name)::text, sqlc.arg(cursor_id)::uuid))
+GROUP BY c.id
+ORDER BY lower(c.name), c.id
+LIMIT sqlc.arg(page_limit);
+
 -- name: GetCompany :one
 SELECT c.*, count(d.id)::bigint AS deal_count
 FROM companies c

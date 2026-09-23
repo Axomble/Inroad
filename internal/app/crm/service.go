@@ -101,8 +101,12 @@ func NewService(store Store, opts ...ServiceOption) *Service {
 	return s
 }
 
-func (s *Service) ListCompanies(ctx context.Context, workspaceID uuid.UUID, page PageRequest) (Page[Company], error) {
-	return s.store.ListCompanies(ctx, workspaceID, normalizePage(page))
+func (s *Service) ListCompanies(ctx context.Context, workspaceID uuid.UUID, filter CompanyFilter, page PageRequest) (Page[Company], error) {
+	filter, err := normalizeCompanyFilter(filter)
+	if err != nil {
+		return Page[Company]{}, err
+	}
+	return s.store.ListCompanies(ctx, workspaceID, filter, normalizePage(page))
 }
 
 func (s *Service) GetCompany(ctx context.Context, workspaceID, id uuid.UUID) (Company, error) {

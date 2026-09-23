@@ -28,6 +28,9 @@ type fakeStore struct {
 	stageDeal map[uuid.UUID]int64
 	err       error
 	primary   struct{ contact, email uuid.UUID }
+	// companyFilter is what the last company listing was asked for, so a test
+	// can assert the normalised query reached the store.
+	companyFilter CompanyFilter
 	// companyRelations records what the company sub-resources were asked for, so
 	// a test can assert the company id and page reached the store rather than
 	// only that a status code came back.
@@ -46,7 +49,8 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (f *fakeStore) ListCompanies(_ context.Context, _ uuid.UUID, page PageRequest) (Page[Company], error) {
+func (f *fakeStore) ListCompanies(_ context.Context, _ uuid.UUID, filter CompanyFilter, page PageRequest) (Page[Company], error) {
+	f.companyFilter = filter
 	if page.Cursor != "" {
 		if _, err := decodeCursor(cursorCompanies, page.Cursor, 2); err != nil {
 			return Page[Company]{}, err
