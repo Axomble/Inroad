@@ -21,6 +21,9 @@ import { StepCard, type StepWithId } from './step-card'
 import { VariantsDialog } from './variants-dialog'
 import { StepForm } from './step-form'
 import { stepErrorMessage } from './step-error'
+// Type-only, and from the small actions module rather than the lazy canvas, so
+// the eager chunk stays free of React Flow.
+import { currentFocus, type SequencePanel } from './sequence-canvas-actions'
 
 // Drag-reorder only mounts for DRAFT campaigns, so keep `@dnd-kit` out of the
 // eager campaigns chunk: the sortable list is code-split and pulled in behind a
@@ -45,8 +48,8 @@ function hasId(step: SequenceStep): step is StepWithId {
  * The campaign's sequence editor, shown as a flow canvas (default) or an ordered
  * list of step cards, both with add / edit / delete / reorder. The editor owns
  * what both views share — the query, the delete confirmation, the variants
- * dialog, the reorder banner — so switching views loses none of it. Structural edits (add, delete, reorder) are
- * draft-only; content edit is available in any status (live-reference). Owns its
+ * dialog, the reorder banner, the canvas's side panel — so switching views
+ * loses none of it. Structural edits (add, delete, reorder) are draft-only; content edit is available in any status (live-reference). Owns its
  * own loading / empty / error states so the parent mounts it unconditionally.
  */
 export function SequenceEditor({ campaignId, status }: { campaignId: string; status: string | undefined }) {
@@ -63,6 +66,7 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
   const [pendingDelete, setPendingDelete] = useState<StepWithId | null>(null)
   const [reorderError, setReorderError] = useState<string | null>(null)
   const [view, setView] = useState<SequenceView>('canvas')
+  const [canvasPanel, setCanvasPanel] = useState<SequencePanel | null>(null)
 
   // Server truth, sorted by step_order and narrowed to steps with ids.
   const serverSteps = useMemo(() => {
@@ -71,6 +75,25 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
   }, [data])
 
   const stopEditing = () => setEditingId(null)
+  const canvasShown = view === 'canvas' && serverSteps.length > 0
+
+  // One add form at a time: on the canvas, "Add step" opens the canvas's own
+  // panel (after the last step), never the list's inline form beside it.
+  function startAdding() {
+    const last = serverSteps.at(-1)
+    if (canvasShown && last) {
+      setCanvasPanel({ kind: 'add', afterId: last.id, returnFocus: currentFocus() })
+      return
+    }
+    setAdding((open) => !open)
+  }
+
+  function switchView(next: SequenceView) {
+    setView(next)
+    setAdding(false)
+    setCanvasPanel(null)
+    setEditingId(null)
+  }
 
   // Clear any stale mutation error before opening a fresh confirm dialog so the
   // banner reflects only this delete attempt.
@@ -90,9 +113,9 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
   return (
     <div className="border-b border-border bg-surface/40">
       <SectionBar label="Sequence" count={serverSteps.length || undefined}>
-        <ViewToggle view={view} onChange={setView} />
+        <ViewToggle view={view} onChange={switchView} />
         {isDraft ? (
-          <Button variant="secondary" size="xs" onClick={() => setAdding((v) => !v)}>
+          <Button variant="secondary" size="xs" onClick={startAdding}>
             <Plus className="size-3.5" />
             Add step
           </Button>
@@ -150,6 +173,8 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
             campaignId={campaignId}
             steps={serverSteps}
             canModifyStructure={isDraft}
+            panel={canvasPanel}
+            onPanelChange={setCanvasPanel}
             onDelete={requestDelete}
             onVariants={setVariantsFor}
             onReorderError={setReorderError}

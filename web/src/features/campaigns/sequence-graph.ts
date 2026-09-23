@@ -2,14 +2,23 @@
 // canvas's gestures reduce to. Pure: no React, no React Flow rendering — the
 // canvas lays out and draws whatever this returns.
 //
-// Today a sequence is linear (Start → step 1 → … → step N → Stop). Branching
-// adds a `condition` node kind whose two exits carry `sourceHandle: 'yes' |
-// 'no'`; the only change here is emitting those nodes and edges from the
-// branching data. Stop nodes already come from `openEnds`, so every branch
-// that leads nowhere gets its own Stop without this file knowing about it.
+// Today a sequence is linear (Start → step 1 → … → step N → Stop). The two
+// halves of this file are not equally ready for branching:
+//
+// - The GRAPH half (`buildSequenceGraph`) and everything downstream of it —
+//   layout, handle geometry, rendering, a Stop after every unwired exit via
+//   `openEnds` — handles a node with several named exits already. A condition
+//   node is a registry entry plus emitting its nodes and `sourceHandle: 'yes' |
+//   'no'` edges here from the branching data.
+// - The ORDER half (`placeAfter`, `moveStep`, `orderForConnection`, and the
+//   gestures in `sequence-canvas.tsx` built on them) treats the sequence as one
+//   list, because the only structural endpoint is a full-list reorder. With
+//   branching, "connect A to B" means "B is A's next step on that exit", not a
+//   move, and inserting / moving become per-branch operations. That half gets
+//   redesigned against the branching API; it does not generalise.
 import type { Edge, Node } from '@xyflow/react'
 import type { FlowEdgeType } from '@/components/shared/flow/flow-edge'
-import { openEnds, type FlowHandleId } from '@/components/shared/flow/node-registry'
+import { openEnds, type FlowHandleId, type FlowOutput } from '@/components/shared/flow/node-registry'
 import type { StepWithId } from './step-card'
 import { waitLabel } from './step-delay'
 
@@ -21,7 +30,6 @@ export type StepFlowNode = Node<
     step: StepWithId
     /** 1-based. */
     position: number
-    stepCount: number
     /** Step 1's subject: a blank follow-up sends as "Re: <this>". */
     threadSubject: string | undefined
     canModifyStructure: boolean
@@ -46,7 +54,7 @@ export function buildSequenceGraph(
   {
     canModifyStructure,
     outputsOf,
-  }: { canModifyStructure: boolean; outputsOf: (type: string | undefined) => readonly FlowHandleId[] },
+  }: { canModifyStructure: boolean; outputsOf: (type: string | undefined) => readonly FlowOutput[] },
 ): SequenceGraph {
   const threadSubject = steps[0]?.subject
   const nodes: SequenceFlowNode[] = [
@@ -56,7 +64,7 @@ export function buildSequenceGraph(
         id: step.id,
         type: 'step',
         position: ORIGIN,
-        data: { step, position: index + 1, stepCount: steps.length, threadSubject, canModifyStructure },
+        data: { step, position: index + 1, threadSubject, canModifyStructure },
       }),
     ),
   ]
@@ -154,6 +162,30 @@ export function isMeaningfulConnection(
   const { source, target } = connection
   if (source === target || !stepIds.has(target)) return false
   return source === START_NODE_ID || stepIds.has(source)
+}
+
+/**
+ * Step 1 opens the email thread, so it must carry a subject — the same rule
+ * `StepForm` enforces when a step is added at the start. A blank-subject
+ * follow-up ("Re: <step 1>") must never be moved into first place.
+ */
+export function leadsWithSubject(order: readonly string[], subjectOf: (id: string) => string | undefined): boolean {
+  const first = order[0]
+  return first === undefined || (subjectOf(first)?.trim() ?? '') !== ''
+}
+
+/**
+ * `steps` rearranged into `order`. Only when both name exactly the same steps —
+ * an order from before a step was added or deleted says nothing reliable about
+ * the list as it is now, so the list is returned unchanged.
+ */
+export function applyOrder<S extends { id: string }>(steps: readonly S[], order: readonly string[]): readonly S[] {
+  const byId = new Map(steps.map((step) => [step.id, step]))
+  if (order.length !== steps.length || order.some((id) => !byId.has(id))) return steps
+  return order.flatMap((id) => {
+    const step = byId.get(id)
+    return step ? [step] : []
+  })
 }
 
 /** True when the order actually differs — a no-op gesture shouldn't hit the API. */

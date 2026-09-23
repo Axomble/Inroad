@@ -1,12 +1,10 @@
 import { createContext, useContext } from 'react'
 import type { FlowHandleId } from './node-registry'
 
-/** The edge a user asked to put a new node on: the new node goes after `source`. */
+/** Where a user asked to put a new node: after `source`, on its `sourceHandle` exit. */
 export type FlowInsertTarget = {
-  edgeId: string
   source: string
   sourceHandle: FlowHandleId
-  target: string
 }
 
 /**

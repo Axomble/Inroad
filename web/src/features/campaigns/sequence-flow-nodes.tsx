@@ -3,20 +3,19 @@ import { ArrowDown, ArrowUp, CirclePlay, FlaskConical, Mail, Square, Trash2 } fr
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { FlowNodeFrame } from '@/components/shared/flow/flow-node-frame'
-import { NO_OUTPUTS, SINGLE_OUTPUT } from '@/components/shared/flow/node-registry'
 import { cn } from '@/lib/utils'
 import { useListStepVariantsQuery } from './api'
 import type { StartFlowNode, StepFlowNode, StopFlowNode } from './sequence-graph'
-import { useSequenceCanvasActions } from './sequence-canvas-actions'
+import { focusKey, useFocusRequest, useSequenceCanvasActions } from './sequence-canvas-actions'
 
 const DRAFT_ONLY_HINT = 'Structural changes are draft-only'
 
 const terminalClass =
   'flex h-full w-full items-center justify-center gap-2 rounded-full border border-border-strong bg-surface font-mono text-[10.5px] uppercase tracking-[0.14em] text-muted-foreground'
 
-export function StartNode({ data, isConnectable }: NodeProps<StartFlowNode>) {
+export function StartNode({ type, data, isConnectable }: NodeProps<StartFlowNode>) {
   return (
-    <FlowNodeFrame hasInput={false} outputs={SINGLE_OUTPUT} connectable={isConnectable && data.stepCount > 0}>
+    <FlowNodeFrame type={type} connectable={isConnectable && data.stepCount > 0}>
       <div className={terminalClass}>
         <CirclePlay className="size-3.5 text-accent-ink" aria-hidden="true" />
         Start
@@ -25,9 +24,9 @@ export function StartNode({ data, isConnectable }: NodeProps<StartFlowNode>) {
   )
 }
 
-export function StopNode(_props: NodeProps<StopFlowNode>) {
+export function StopNode({ type }: NodeProps<StopFlowNode>) {
   return (
-    <FlowNodeFrame outputs={NO_OUTPUTS}>
+    <FlowNodeFrame type={type}>
       <div className={cn(terminalClass, 'text-faint')}>
         <Square className="size-3 fill-current" aria-hidden="true" />
         Stop
@@ -41,16 +40,17 @@ export function StopNode(_props: NodeProps<StopFlowNode>) {
  * editor; the toolbar underneath carries the rest. Everything is a real button
  * with a name, so the whole canvas is operable by Tab and Enter.
  */
-export function StepNode({ data, isConnectable }: NodeProps<StepFlowNode>) {
-  const { step, position, stepCount, threadSubject, canModifyStructure } = data
+export function StepNode({ type, data, isConnectable }: NodeProps<StepFlowNode>) {
+  const { step, position, threadSubject, canModifyStructure } = data
   const actions = useSequenceCanvasActions()
+  const editRef = useFocusRequest<HTMLButtonElement>(focusKey(step.id, 'edit'))
   const isEditing = actions.editingStepId === step.id
   const sameThread = !step.subject && position > 1
   const subjectLine = sameThread ? `Re: ${threadSubject || 'the previous email'}` : step.subject || 'No subject yet'
   const bodyPreview = step.body_text?.trim().replace(/\s+/g, ' ') ?? ''
 
   return (
-    <FlowNodeFrame outputs={SINGLE_OUTPUT} connectable={isConnectable}>
+    <FlowNodeFrame type={type} connectable={isConnectable}>
       <div
         className={cn(
           'flex h-full w-full flex-col overflow-hidden rounded-lg border bg-surface shadow-sm',
@@ -58,6 +58,7 @@ export function StepNode({ data, isConnectable }: NodeProps<StepFlowNode>) {
         )}
       >
         <button
+          ref={editRef}
           type="button"
           aria-label={`Edit step ${position}: ${subjectLine}`}
           aria-current={isEditing ? 'true' : undefined}
@@ -98,28 +99,10 @@ export function StepNode({ data, isConnectable }: NodeProps<StepFlowNode>) {
             <FlaskConical className="size-3.5" />
           </Button>
           {canModifyStructure && (
-            <>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="size-7"
-                aria-label={`Move step ${position} up`}
-                disabled={position === 1 || actions.isReordering}
-                onClick={() => actions.moveStep(step.id, -1)}
-              >
-                <ArrowUp className="size-3.5" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                className="size-7"
-                aria-label={`Move step ${position} down`}
-                disabled={position === stepCount || actions.isReordering}
-                onClick={() => actions.moveStep(step.id, 1)}
-              >
-                <ArrowDown className="size-3.5" />
-              </Button>
-            </>
+            <TooltipProvider>
+              <MoveButton stepId={step.id} position={position} delta={-1} />
+              <MoveButton stepId={step.id} position={position} delta={1} />
+            </TooltipProvider>
           )}
           <span className="ml-auto" />
           {canModifyStructure ? (
@@ -155,6 +138,42 @@ export function StepNode({ data, isConnectable }: NodeProps<StepFlowNode>) {
         </div>
       </div>
     </FlowNodeFrame>
+  )
+}
+
+/**
+ * Up / down. A move the client already knows is invalid (off either end, or one
+ * that would put a blank-subject follow-up first) is disabled; when there is a
+ * reason worth saying, it is in the accessible name and a tooltip.
+ */
+function MoveButton({ stepId, position, delta }: { stepId: string; position: number; delta: -1 | 1 }) {
+  const actions = useSequenceCanvasActions()
+  const block = actions.moveBlock(stepId, delta)
+  const disabled = block !== null || actions.isReordering
+  const ref = useFocusRequest<HTMLButtonElement>(focusKey(stepId, delta < 0 ? 'up' : 'down'), disabled)
+  const direction = delta < 0 ? 'up' : 'down'
+  const explained = block?.reason ?? null
+  const button = (
+    <Button
+      ref={ref}
+      variant="ghost"
+      size="icon-sm"
+      className="size-7"
+      aria-label={`Move step ${position} ${direction}${explained ? ` (disabled — ${explained})` : ''}`}
+      disabled={disabled}
+      onClick={() => actions.moveStep(stepId, delta)}
+    >
+      {delta < 0 ? <ArrowUp className="size-3.5" /> : <ArrowDown className="size-3.5" />}
+    </Button>
+  )
+  if (!explained) return button
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex">{button}</span>
+      </TooltipTrigger>
+      <TooltipContent>{explained}</TooltipContent>
+    </Tooltip>
   )
 }
 

@@ -2,10 +2,14 @@ import { defineFlowNodeTypes, NO_OUTPUTS, SINGLE_OUTPUT } from '@/components/sha
 import { StartNode, StepNode, StopNode } from './sequence-flow-nodes'
 
 /**
- * The sequence canvas's node kinds. Branching adds one entry here —
- * `condition: { component: ConditionNode, size, outputs: ['yes', 'no'] }` —
- * and `buildSequenceGraph` starts emitting it; layout, handles and the Stop
- * after each unwired branch all follow from this entry.
+ * The sequence canvas's node kinds.
+ *
+ * For branching, the render/layout side is ready: an entry like
+ * `condition: { component: ConditionNode, size, outputs: [{ id: 'yes', label:
+ * 'Yes' }, { id: 'no', label: 'No' }] }` gets its handles drawn and routed, its
+ * labels shown, its branches laid out side by side and a Stop after each
+ * unwired exit. What this entry does NOT buy is the editing side — insert,
+ * move, and drag-to-connect are linear-only today (see `sequence-graph.ts`).
  *
  * Module scope, built once: React Flow re-mounts every node when `nodeTypes`
  * changes identity.

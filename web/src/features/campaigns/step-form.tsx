@@ -93,7 +93,7 @@ export function StepForm({
   const {
     register,
     handleSubmit,
-    formState: { errors },
+    formState: { errors, isSubmitting },
   } = useForm<Values>({
     resolver: zodResolver(isFirstStep ? firstStepSchema : followUpSchema),
     defaultValues: {
@@ -251,7 +251,9 @@ export function StepForm({
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" size="sm" disabled={isSaving}>
+        {/* `isSubmitting` covers the validation tick before the mutation
+            starts, so a quick double click can't create the step twice. */}
+        <Button type="submit" variant="primary" size="sm" disabled={isSaving || isSubmitting}>
           {isSaving && <Loader2 className="animate-spin" />}
           {isEdit ? 'Save step' : 'Add step'}
         </Button>

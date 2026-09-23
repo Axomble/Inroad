@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test'
 
 /**
  * The sequence flow canvas in a real browser.
@@ -20,13 +20,18 @@ const json = (body: unknown) => ({ status: 200, contentType: 'application/json',
 
 type Step = { id: string; step_order: number; delay_seconds: number; subject: string; body_text: string; body_html: string }
 
-async function mockApi(page: Page): Promise<{ reorders: string[][]; creates: unknown[] }> {
+const TWO_STEPS: Step[] = [
+  { id: 'step-1', step_order: 1, delay_seconds: 0, subject: 'A quick idea', body_text: 'hello', body_html: '' },
+  { id: 'step-2', step_order: 2, delay_seconds: 3 * 86400, subject: 'Following up', body_text: 'bumping this', body_html: '' },
+]
+
+async function mockApi(
+  page: Page,
+  initialSteps: Step[] = TWO_STEPS,
+): Promise<{ reorders: string[][]; creates: unknown[] }> {
   const reorders: string[][] = []
   const creates: unknown[] = []
-  let steps: Step[] = [
-    { id: 'step-1', step_order: 1, delay_seconds: 0, subject: 'A quick idea', body_text: 'hello', body_html: '' },
-    { id: 'step-2', step_order: 2, delay_seconds: 3 * 86400, subject: '', body_text: 'bumping this', body_html: '' },
-  ]
+  let steps: Step[] = initialSteps
   const membership = { workspace_id: 'workspace-e2e', workspace_name: 'Atlas Labs', role: 'owner' }
 
   await page.route('**/api/v1/**', async (route: Route) => {
@@ -136,9 +141,68 @@ test('the steps tab opens on the flow, and its node and edge controls take real 
   // Created at the end, then placed after (the now-first) step-2.
   await expect.poll(() => reorders.at(-1)).toEqual(['step-2', 'step-3', 'step-1'])
   await expect(canvas.getByRole('button', { name: 'Edit step 2: Middle touch' })).toBeVisible()
+  // Focus moved to the new step, not back to a "+" that no longer exists.
+  await expect(canvas.getByRole('button', { name: 'Edit step 2: Middle touch' })).toBeFocused()
 
   // The list is still one click away.
   await page.getByRole('button', { name: 'List' }).click()
   await expect(canvas).toHaveCount(0)
   await expect(page.getByText('3 days after previous')).toBeVisible()
+})
+
+/** True when `inner`'s box sits entirely inside `outer`'s. */
+async function isInside(inner: Locator, outer: Locator): Promise<boolean> {
+  const [a, b] = await Promise.all([inner.boundingBox(), outer.boundingBox()])
+  if (!a || !b) return false
+  return a.x >= b.x && a.y >= b.y && a.x + a.width <= b.x + b.width && a.y + a.height <= b.y + b.height
+}
+
+test('a long sequence stays readable and the canvas follows keyboard focus to offscreen steps', async ({ page }) => {
+  const twelve: Step[] = Array.from({ length: 12 }, (_, index) => ({
+    id: `step-${index + 1}`,
+    step_order: index + 1,
+    delay_seconds: 86400,
+    subject: `Touch ${index + 1}`,
+    body_text: 'hello',
+    body_html: '',
+  }))
+  await mockApi(page, twelve)
+  await signIn(page)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/steps`)
+
+  const canvas = page.getByRole('region', { name: 'Sequence flow' })
+  const first = canvas.getByRole('button', { name: 'Edit step 1: Touch 1' })
+  const last = canvas.getByRole('button', { name: 'Edit step 12: Touch 12' })
+  await expect(first).toBeVisible()
+  // Shown from the top at a readable zoom, not shrunk to fit all twelve.
+  await expect.poll(() => isInside(first, canvas)).toBe(true)
+  expect(await isInside(last, canvas)).toBe(false)
+
+  // Keyboard focus on the last step pans the canvas to it.
+  await last.focus()
+  await expect.poll(() => isInside(last, canvas)).toBe(true)
+})
+
+test('dragging from a step’s exit onto another step makes it next', async ({ page }) => {
+  const three: Step[] = [
+    ...TWO_STEPS,
+    { id: 'step-3', step_order: 3, delay_seconds: 86400, subject: 'Last call', body_text: 'closing', body_html: '' },
+  ]
+  const { reorders } = await mockApi(page, three)
+  await signIn(page)
+  await page.goto(`/app/campaigns/${CAMPAIGN_ID}/steps`)
+  const canvas = page.getByRole('region', { name: 'Sequence flow' })
+  await expect(canvas.getByText('Last call')).toBeVisible()
+
+  const from = canvas.locator('.react-flow__node[data-id="step-1"] .react-flow__handle.source')
+  const to = canvas.locator('.react-flow__node[data-id="step-3"] .react-flow__handle.target')
+  const [a, b] = await Promise.all([from.boundingBox(), to.boundingBox()])
+  if (!a || !b) throw new Error('handles not rendered')
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 12 })
+  await page.mouse.up()
+
+  await expect.poll(() => reorders.at(-1)).toEqual(['step-1', 'step-3', 'step-2'])
+  await expect(canvas.getByRole('button', { name: 'Edit step 2: Last call' })).toBeVisible()
 })

@@ -3,6 +3,7 @@ import {
   START_NODE_ID,
   buildSequenceGraph,
   isMeaningfulConnection,
+  leadsWithSubject,
   moveStep,
   orderChanged,
   orderForConnection,
@@ -49,12 +50,11 @@ describe('buildSequenceGraph', () => {
     expect(locked.edges.every((e) => e.data?.insertLabel === undefined)).toBe(true)
   })
 
-  test('a step node knows its position, the count, and the thread subject for blank follow-ups', () => {
+  test('a step node knows its position and the thread subject for blank follow-ups', () => {
     const { nodes } = buildSequenceGraph(steps, { canModifyStructure: false, outputsOf })
     const second = nodes.find((n) => n.id === 's-2')
     expect(second?.type === 'step' && second.data).toMatchObject({
       position: 2,
-      stepCount: 2,
       threadSubject: 'Intro',
       canModifyStructure: false,
     })
@@ -101,6 +101,20 @@ describe('step order', () => {
     expect(isMeaningfulConnection({ source: 'a', target: 'a' }, ids)).toBe(false)
     expect(isMeaningfulConnection({ source: 'a', target: 'stop:c:out' }, ids)).toBe(false)
     expect(isMeaningfulConnection({ source: 'stop:c:out', target: 'a' }, ids)).toBe(false)
+  })
+
+  test('leadsWithSubject refuses an order that opens on a blank subject', () => {
+    const subjects = new Map([
+      ['a', 'Intro'],
+      ['b', ''],
+      ['c', '   '],
+    ])
+    const subjectOf = (id: string) => subjects.get(id)
+    expect(leadsWithSubject(['a', 'b'], subjectOf)).toBe(true)
+    expect(leadsWithSubject(['b', 'a'], subjectOf)).toBe(false)
+    // Whitespace is blank too — it would send as "Re:" of nothing.
+    expect(leadsWithSubject(['c', 'a'], subjectOf)).toBe(false)
+    expect(leadsWithSubject([], subjectOf)).toBe(true)
   })
 
   test('orderChanged', () => {

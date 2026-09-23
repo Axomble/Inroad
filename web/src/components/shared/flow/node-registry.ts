@@ -8,11 +8,18 @@ import { Position, type Edge, type Node, type NodeHandle, type NodeTypes } from 
  */
 export type FlowHandleId = string | null
 
-/** The single-exit handle list, shared so a registry entry and its node agree. */
-export const SINGLE_OUTPUT: readonly FlowHandleId[] = [null]
+/**
+ * One way out of a node. The label travels with the id, so an exit can't be
+ * drawn with a name that belongs to another; it is rendered as text beside the
+ * handle, so branches are never told apart by position or colour alone.
+ */
+export type FlowOutput = { id: FlowHandleId; label?: string }
+
+/** The single-exit output list, shared so every single-exit kind agrees. */
+export const SINGLE_OUTPUT: readonly FlowOutput[] = [{ id: null }]
 
 /** No way out: the end of a path. */
-export const NO_OUTPUTS: readonly FlowHandleId[] = []
+export const NO_OUTPUTS: readonly FlowOutput[] = []
 
 export type FlowNodeSize = { width: number; height: number }
 
@@ -25,29 +32,30 @@ export type FlowNodeTypeDef = {
   component: NodeTypes[string]
   size: FlowNodeSize
   /**
-   * The node's exits, in left-to-right order. Drives both where the node
-   * renders its source handles and which exits `openEnds` reports as unwired.
+   * The node's exits, in left-to-right order. Drives where `FlowNodeFrame`
+   * draws the source handles, where React Flow thinks they are, and which
+   * exits `openEnds` reports as unwired.
    */
-  outputs: readonly FlowHandleId[]
+  outputs: readonly FlowOutput[]
   /** `false` for an entry point (Start, Trigger): nothing leads into it. Defaults to `true`. */
   hasInput?: boolean
 }
 
-export type FlowNodeRegistry<K extends string> = {
+export type FlowNodeRegistry = {
   /** Stable map for React Flow's `nodeTypes` prop — build the registry once, at module scope. */
   nodeTypes: NodeTypes
   sizeOf: (type: string | undefined) => FlowNodeSize
-  outputsOf: (type: string | undefined) => readonly FlowHandleId[]
+  outputsOf: (type: string | undefined) => readonly FlowOutput[]
+  hasInputOf: (type: string | undefined) => boolean
   handlesOf: (type: string | undefined) => NodeHandle[]
-  types: readonly K[]
 }
 
 /**
- * Declares a canvas's node kinds in one place. Adding a kind of node is adding
- * an entry here; the layout, the open-end detection and React Flow's renderer
- * all read from the same definition, so they cannot drift apart.
+ * Declares a canvas's node kinds in one place. The layout, the handle geometry
+ * React Flow routes edges by, the handles `FlowNodeFrame` draws, and the
+ * open-end detection all read the same definition, so they cannot drift apart.
  */
-export function defineFlowNodeTypes<K extends string>(defs: Record<K, FlowNodeTypeDef>): FlowNodeRegistry<K> {
+export function defineFlowNodeTypes<K extends string>(defs: Record<K, FlowNodeTypeDef>): FlowNodeRegistry {
   const entries = Object.entries(defs) as [K, FlowNodeTypeDef][]
   const lookup = (type: string | undefined): FlowNodeTypeDef => {
     const found = entries.find(([key]) => key === type)
@@ -61,8 +69,8 @@ export function defineFlowNodeTypes<K extends string>(defs: Record<K, FlowNodeTy
     nodeTypes: Object.fromEntries(entries.map(([key, def]) => [key, def.component])),
     sizeOf: (type) => lookup(type).size,
     outputsOf: (type) => lookup(type).outputs,
+    hasInputOf: (type) => lookup(type).hasInput ?? true,
     handlesOf: (type) => handleGeometry(lookup(type)),
-    types: entries.map(([key]) => key),
   }
 }
 
@@ -77,8 +85,8 @@ const HANDLE_SIZE = 9
  */
 function handleGeometry({ size, outputs, hasInput = true }: FlowNodeTypeDef): NodeHandle[] {
   const half = HANDLE_SIZE / 2
-  const handles: NodeHandle[] = outputs.map((id, index) => ({
-    id,
+  const handles: NodeHandle[] = outputs.map((output, index) => ({
+    id: output.id,
     type: 'source',
     position: Position.Bottom,
     x: outputOffset(index, outputs.length) * size.width - half,
@@ -115,13 +123,13 @@ export type OpenEnd = { nodeId: string; handle: FlowHandleId }
 export function openEnds(
   nodes: readonly Node[],
   edges: readonly Edge[],
-  outputsOf: (type: string | undefined) => readonly FlowHandleId[],
+  outputsOf: (type: string | undefined) => readonly FlowOutput[],
 ): OpenEnd[] {
   const wired = new Set(edges.map((edge) => handleKey(edge.source, edge.sourceHandle ?? null)))
   return nodes.flatMap((node) =>
     outputsOf(node.type)
-      .filter((handle) => !wired.has(handleKey(node.id, handle)))
-      .map((handle) => ({ nodeId: node.id, handle })),
+      .filter((output) => !wired.has(handleKey(node.id, output.id)))
+      .map((output) => ({ nodeId: node.id, handle: output.id })),
   )
 }
 

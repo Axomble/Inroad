@@ -4,8 +4,7 @@ import type { Edge, Node } from '@xyflow/react'
 import type { FlowNodeRegistry, FlowNodeSize } from './node-registry'
 
 /** The part of a registry layout needs; `handlesOf` is optional so a test can lay out bare boxes. */
-export type FlowNodeShapes = Pick<FlowNodeRegistry<string>, 'sizeOf'> &
-  Partial<Pick<FlowNodeRegistry<string>, 'handlesOf'>>
+export type FlowNodeShapes = Pick<FlowNodeRegistry, 'sizeOf'> & Partial<Pick<FlowNodeRegistry, 'handlesOf'>>
 
 export type FlowLayoutOptions = {
   /** Top-to-bottom reads like a sequence; left-to-right is there for wide flows. */
@@ -101,4 +100,15 @@ export function useFlowLayout<N extends Node>(
     () => layoutFlow(nodes, edges, shapes, { direction, nodeSpacing, rankSpacing }),
     [nodes, edges, shapes, direction, nodeSpacing, rankSpacing],
   )
+}
+
+/**
+ * The laid-out graph's height in flow units — what a canvas that grows with its
+ * content (up to a cap) sizes itself by.
+ */
+export function flowContentHeight(nodes: readonly Node[]): number {
+  if (nodes.length === 0) return 0
+  const top = Math.min(...nodes.map((node) => node.position.y))
+  const bottom = Math.max(...nodes.map((node) => node.position.y + (node.height ?? 0)))
+  return bottom - top
 }

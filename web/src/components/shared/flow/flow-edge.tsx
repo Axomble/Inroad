@@ -19,7 +19,6 @@ export type FlowEdgeType = Edge<FlowEdgeData, 'flow'>
 export function FlowEdge({
   id,
   source,
-  target,
   sourceHandleId,
   sourceX,
   sourceY,
@@ -60,7 +59,7 @@ export function FlowEdge({
             {canInsert && (
               <AddNodeButton
                 label={insertLabel}
-                onClick={() => onInsert({ edgeId: id, source, target, sourceHandle: sourceHandleId ?? null })}
+                onClick={() => onInsert({ source, sourceHandle: sourceHandleId ?? null })}
               />
             )}
           </div>
