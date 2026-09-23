@@ -32,6 +32,10 @@ export type FakeSequenceServer = {
   graphFails: boolean
   /** When set, GET /steps waits on it — "the refetch hasn't come back yet". */
   listGate: Promise<void> | null
+  /** When set, GET /graph waits on it. */
+  graphGate: Promise<void> | null
+  /** When set, a branch write waits on it before answering — "the PUT is in flight". */
+  branchGate: Promise<void> | null
 }
 
 export function jsonResponse(data: unknown, status = 200): Response {
@@ -86,6 +90,8 @@ export function installFakeSequenceServer(steps: FakeStep[]): FakeSequenceServer
     branchFails: null,
     graphFails: false,
     listGate: null,
+    graphGate: null,
+    branchGate: null,
   }
 
   vi.stubGlobal(
@@ -100,10 +106,12 @@ export function installFakeSequenceServer(steps: FakeStep[]): FakeSequenceServer
 
       if (url.endsWith('/reply-labels')) return jsonResponse(labelList(server))
       if (url.endsWith('/graph')) {
+        if (server.graphGate) await server.graphGate
         return server.graphFails ? jsonResponse({ error: 'boom' }, 500) : jsonResponse(graphOf(server))
       }
       const branchPath = /\/steps\/([^/]+)\/branch$/.exec(url)
       if (branchPath?.[1]) {
+        if (server.branchGate) await server.branchGate
         if (server.branchFails) return server.branchFails
         const stepId = branchPath[1]
         if (method === 'DELETE') {
@@ -118,7 +126,8 @@ export function installFakeSequenceServer(steps: FakeStep[]): FakeSequenceServer
           reply_label_key: request.reply_label_key ?? null,
           yes_step_id: request.yes_step_id ?? null,
           no_step_id: request.no_step_id ?? null,
-          updated_at: '2026-09-23T00:00:00Z',
+          // A new version per write, as the server stamps one.
+          updated_at: new Date(Date.now() + server.requests.length).toISOString(),
         }
         server.branches.set(stepId, saved)
         return jsonResponse(saved)
@@ -175,4 +184,13 @@ export function bodiesTo(server: FakeSequenceServer, suffix: string, method?: st
   return server.requests
     .filter((request) => request.url.endsWith(suffix) && (method === undefined || request.method === method))
     .map((request) => request.body)
+}
+
+/** A promise and the function that settles it, for holding a response back. */
+export function gate(): { promise: Promise<void>; release: () => void } {
+  let release = () => {}
+  const promise = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
 }

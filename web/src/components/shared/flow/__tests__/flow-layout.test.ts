@@ -1,5 +1,5 @@
 import { renderHook } from '@testing-library/react'
-import type { Node } from '@xyflow/react'
+import type { Node, XYPosition } from '@xyflow/react'
 import type { FlowEdgeType } from '../flow-edge'
 import { describe, expect, test } from 'vitest'
 import { layoutFlow, useFlowLayout } from '../flow-layout'
@@ -23,6 +23,47 @@ const edge = (source: string, target: string, sourceHandle?: string): FlowEdgeTy
   target,
   sourceHandle,
 })
+
+type Laid = ReturnType<typeof layoutFlow<Node>>
+
+/** An edge as drawn: from its source's exit, through any route, to its target's entry. */
+function drawn(laid: Laid, drawnEdge: FlowEdgeType): XYPosition[] {
+  const byId = new Map(laid.nodes.map((n) => [n.id, n]))
+  const source = byId.get(drawnEdge.source)
+  const target = byId.get(drawnEdge.target)
+  if (!source || !target) return []
+  const exit = drawnEdge.sourceHandle === 'yes' ? 1 / 3 : drawnEdge.sourceHandle === 'no' ? 2 / 3 : 1 / 2
+  const from = { x: source.position.x + (source.width ?? 0) * exit, y: source.position.y + (source.height ?? 0) }
+  const to = { x: target.position.x + (target.width ?? 0) / 2, y: target.position.y }
+  return [from, ...(drawnEdge.data?.route ?? []), to]
+}
+
+/** Where an exit heads first below its node: its first bend, or its target. */
+function firstStepX(laid: Laid, exitEdge: FlowEdgeType): number {
+  return drawn(laid, exitEdge)[1]?.x ?? Number.NaN
+}
+
+function segmentsCross([p1, p2]: [XYPosition, XYPosition], [p3, p4]: [XYPosition, XYPosition]): boolean {
+  const side = (a: XYPosition, b: XYPosition, c: XYPosition) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+  return side(p3, p4, p1) * side(p3, p4, p2) < 0 && side(p1, p2, p3) * side(p1, p2, p4) < 0
+}
+
+/** Every pair of drawn edges that properly cross (touching at a shared node doesn't count). */
+function crossings(laid: Laid): string[] {
+  const lines = laid.edges.map((e) => ({ id: e.id, points: drawn(laid, e) }))
+  const found: string[] = []
+  lines.forEach((a, i) => {
+    for (const b of lines.slice(i + 1)) {
+      const hit = a.points.slice(1).some((end, k) =>
+        b.points.slice(1).some((otherEnd, m) =>
+          segmentsCross([a.points[k] ?? end, end], [b.points[m] ?? otherEnd, otherEnd]),
+        ),
+      )
+      if (hit) found.push(`${a.id} × ${b.id}`)
+    }
+  })
+  return found
+}
 
 describe('layoutFlow', () => {
   test('stacks a chain top to bottom, centred on one axis, at each node’s declared size', () => {
@@ -59,49 +100,84 @@ describe('layoutFlow', () => {
     expect((byId.get('no')?.position.x ?? 0) + 200).toBeLessThanOrEqual(byId.get('yes')?.position.x ?? 0)
   })
 
-  test('an edge that skips a rank is routed round the node in between; adjacent ones are not', () => {
-    // a's rank is fixed by s → a, c's by the longer s → b1 → b2 → c, so a → c
-    // has to cross b2's rank.
+  test('an edge that skips a rank is routed round the nodes in between; adjacent ones are not', () => {
+    // The long s → b1 → b2 → c path fixes the ranks, so one of the edges on the
+    // short s → a → c path has to span more than one (dagre picks which).
     const nodes = ['s', 'a', 'b1', 'b2', 'c'].map((id) => node(id, 'action'))
-    const { nodes: laid, edges } = layoutFlow(
+    const laid = layoutFlow(
       nodes,
       [edge('s', 'a'), edge('s', 'b1'), edge('b1', 'b2'), edge('b2', 'c'), edge('a', 'c')],
       { sizeOf },
     )
-    const byId = new Map(edges.map((e) => [e.id, e]))
-    expect(byId.get('b1:->b2')?.data?.route).toBeUndefined()
-    const route = byId.get('a:->c')?.data?.route ?? []
-    expect(route.length).toBeGreaterThan(0)
-    // The bend clears b2's box instead of running through it.
-    const b2 = laid.find((n) => n.id === 'b2')
-    const left = b2?.position.x ?? 0
-    const top = b2?.position.y ?? 0
-    const beside = route.filter((point) => point.y >= top && point.y <= top + 80)
-    expect(beside.length).toBeGreaterThan(0)
-    for (const point of beside) expect(point.x < left || point.x > left + 200).toBe(true)
+    const routed = laid.edges.filter((e) => e.data?.route)
+    expect(routed.map((e) => e.id)).toHaveLength(1)
+    expect(laid.edges.find((e) => e.id === 'b1:->b2')?.data?.route).toBeUndefined()
+    // No bend lands inside any node's box.
+    for (const point of routed.flatMap((e) => e.data?.route ?? [])) {
+      for (const n of laid.nodes) {
+        const inside =
+          point.x > n.position.x &&
+          point.x < n.position.x + (n.width ?? 0) &&
+          point.y > n.position.y &&
+          point.y < n.position.y + (n.height ?? 0)
+        expect(inside, `bend ${point.x},${point.y} inside ${n.id}`).toBe(false)
+      }
+    }
+    expect(crossings(laid)).toEqual([])
   })
 
   test('a multi-exit node keeps its exits in edge order even when one skips a rank', () => {
     // Yes jumps past b to c; No goes straight to b. Uncrossed means the yes
-    // path stays left of the no path on the way down.
+    // path stays left of b the whole way, and b sits right of the fork.
     const nodes = [node('if', 'condition'), node('b', 'action'), node('c', 'action')]
-    const { nodes: laid, edges } = layoutFlow(
-      nodes,
-      [edge('if', 'c', 'yes'), edge('if', 'b', 'no'), edge('b', 'c')],
-      { sizeOf },
-    )
-    const [yesRelay] = edges.find((e) => e.id === 'if:yes->c')?.data?.route ?? []
-    const [noRelay] = edges.find((e) => e.id === 'if:no->b')?.data?.route ?? []
-    expect(yesRelay && noRelay).toBeTruthy()
-    expect(yesRelay?.y).toBe(noRelay?.y)
-    expect(yesRelay?.x ?? 0).toBeLessThan(noRelay?.x ?? 0)
-    // …and stays left below the relays too: passing b, the yes path is on b's
-    // left, not looping round its right and crossing the no path to get there.
-    const b = laid.find((n) => n.id === 'b')
-    const yesRoute = edges.find((e) => e.id === 'if:yes->c')?.data?.route ?? []
+    const laid = layoutFlow(nodes, [edge('if', 'c', 'yes'), edge('if', 'b', 'no'), edge('b', 'c')], { sizeOf })
+    const b = laid.nodes.find((n) => n.id === 'b')
+    const yesRoute = laid.edges.find((e) => e.id === 'if:yes->c')?.data?.route ?? []
     const passingB = yesRoute.filter((point) => point.y >= (b?.position.y ?? 0) && point.y <= (b?.position.y ?? 0) + 80)
     expect(passingB.length).toBeGreaterThan(0)
     for (const point of passingB) expect(point.x).toBeLessThan(b?.position.x ?? 0)
+    expect(crossings(laid)).toEqual([])
+  })
+
+  test('two conditions, a converging path and a backward jump: no Yes/No inversion, no crossings', () => {
+    // 1 → IF(yes 4, no 2); 2 → 3 → IF(yes 5, no 4)  — both conditions converge on 4
+    // 4 → ALWAYS → end;    5 → 6 → ALWAYS(back to 4) — a jump backwards in order
+    const nodes = [
+      node('s1', 'action'),
+      node('c1', 'condition'),
+      node('s2', 'action'),
+      node('s3', 'action'),
+      node('c3', 'condition'),
+      node('s4', 'action'),
+      node('a4', 'trigger'),
+      node('end', 'trigger'),
+      node('s5', 'action'),
+      node('s6', 'action'),
+      node('a6', 'trigger'),
+    ]
+    const edges = [
+      edge('s1', 'c1'),
+      edge('c1', 's4', 'yes'),
+      edge('c1', 's2', 'no'),
+      edge('s2', 's3'),
+      edge('s3', 'c3'),
+      edge('c3', 's5', 'yes'),
+      edge('c3', 's4', 'no'),
+      edge('s4', 'a4'),
+      edge('a4', 'end', 'yes'),
+      edge('s5', 's6'),
+      edge('s6', 'a6'),
+      edge('a6', 's4', 'yes'),
+    ]
+    const laid = layoutFlow(nodes, edges, { sizeOf })
+    for (const condition of ['c1', 'c3']) {
+      const [yes, no] = ['yes', 'no'].map((handle) => {
+        const exit = laid.edges.find((e) => e.source === condition && e.sourceHandle === handle)
+        return exit ? firstStepX(laid, exit) : Number.NaN
+      })
+      expect(yes, `${condition}: yes leaves left of no`).toBeLessThan(no ?? Number.NaN)
+    }
+    expect(crossings(laid)).toEqual([])
   })
 
   test('two edges between the same pair are both kept', () => {

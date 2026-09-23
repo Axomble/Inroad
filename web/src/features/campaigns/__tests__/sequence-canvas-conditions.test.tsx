@@ -5,7 +5,7 @@ import { renderWithProviders } from '@/test/render-with-providers'
 import { installReactFlowDom } from '@/test/react-flow-dom'
 import type { StepBranch } from '../api'
 import { SequenceEditor } from '../sequence-editor'
-import { bodiesTo, installFakeSequenceServer, jsonResponse, type FakeSequenceServer } from './fake-sequence-server'
+import { bodiesTo, gate, installFakeSequenceServer, jsonResponse, type FakeSequenceServer } from './fake-sequence-server'
 
 // Conditions on the flow canvas, through the real React Flow + dagre pipeline
 // against a stateful fake of the sequence endpoints (branch writes included).
@@ -304,4 +304,171 @@ test('the list view says when there are conditions it can’t show', async () =>
   await screen.findByRole('button', { name: /^Edit the condition after step 1/ })
   fireEvent.click(screen.getByRole('button', { name: 'List' }))
   expect(screen.getByRole('note')).toHaveTextContent(/This sequence has conditions/)
+})
+
+// --- Review: concurrent writes, stale drafts, degraded routing --------------
+
+const graphReads = () => server.requests.filter((r) => r.method === 'GET' && r.url.endsWith('/graph')).length
+
+test('two quick exit drags before the refetch lands both persist (the second builds on the first)', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  await renderCanvas()
+  await screen.findByRole('button', { name: /^Edit the condition after step 1/ })
+  // From here on the refetch each write triggers never answers: only the
+  // writes' own responses can inform the canvas.
+  const held = gate()
+  server.graphGate = held.promise
+
+  await act(async () => canvasProps.current?.onConnect?.(drag('cond:s-1', 's-3', 'yes')))
+  await waitFor(() => expect(branchWrites('PUT')).toHaveLength(1))
+  // The first answer is in; the second drag is allowed and builds on it.
+  await waitFor(() => expect(canvasProps.current?.isValidConnection?.(drag('cond:s-1', 's-2', 'no'))).toBe(true))
+  await act(async () => canvasProps.current?.onConnect?.(drag('cond:s-1', 's-2', 'no')))
+  await waitFor(() => expect(branchWrites('PUT')).toHaveLength(2))
+
+  expect(branchWrites('PUT')[1]).toMatchObject({ yes_step_id: 's-3', no_step_id: 's-2' })
+  expect(server.branches.get('s-1')).toMatchObject({ yes_step_id: 's-3', no_step_id: 's-2' })
+  held.release()
+})
+
+test('an exit drag is refused while a branch write is still in flight', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  await renderCanvas()
+  await screen.findByRole('button', { name: /^Edit the condition after step 1/ })
+  const held = gate()
+  server.branchGate = held.promise
+
+  await act(async () => {
+    void canvasProps.current?.onConnect?.(drag('cond:s-1', 's-3', 'yes'))
+  })
+  await waitFor(() => expect(canvasProps.current?.isValidConnection?.(drag('cond:s-1', 's-2', 'no'))).toBe(false))
+  await act(async () => held.release())
+  await waitFor(() => expect(canvasProps.current?.isValidConnection?.(drag('cond:s-1', 's-2', 'no'))).toBe(true))
+})
+
+test('dropping an exit where it already goes sends nothing', async () => {
+  server.branches.set('s-1', branch('s-1', { yes_step_id: 's-3' }))
+  await renderCanvas()
+  await screen.findByRole('button', { name: /^Edit the condition after step 1/ })
+  expect(canvasProps.current?.isValidConnection?.(drag('cond:s-1', 's-3', 'yes'))).toBe(false)
+  await act(async () => canvasProps.current?.onConnect?.(drag('cond:s-1', 's-3', 'yes')))
+  expect(branchWrites('PUT')).toEqual([])
+})
+
+test('an untouched editor follows a change made elsewhere (here: a drag while it is open)', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  const canvas = await renderCanvas()
+  fireEvent.click(await within(canvas).findByRole('button', { name: /^Edit the condition after step 1/ }))
+  const panel = await screen.findByRole('complementary', { name: 'Condition after step 1' })
+  expect(within(panel).getByLabelText('Yes — go to')).toHaveValue('')
+
+  await act(async () => canvasProps.current?.onConnect?.(drag('cond:s-1', 's-3', 'yes')))
+  await waitFor(() => expect(within(panel).getByLabelText('Yes — go to')).toHaveValue('s-3'))
+  expect(within(panel).queryByText(/changed elsewhere/)).not.toBeInTheDocument()
+
+  // Saving now keeps the dragged exit instead of reverting it.
+  fireEvent.click(within(panel).getByRole('button', { name: 'Save condition' }))
+  await waitFor(() => expect(branchWrites('PUT').at(-1)).toMatchObject({ yes_step_id: 's-3' }))
+})
+
+test('an edited draft is kept when the condition changes elsewhere, and says so', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  const canvas = await renderCanvas()
+  fireEvent.click(await within(canvas).findByRole('button', { name: /^Edit the condition after step 1/ }))
+  const panel = await screen.findByRole('complementary', { name: 'Condition after step 1' })
+  fireEvent.change(within(panel).getByLabelText('Within (days)'), { target: { value: '7' } })
+
+  await act(async () => canvasProps.current?.onConnect?.(drag('cond:s-1', 's-3', 'yes')))
+  expect(await within(panel).findByText(/changed elsewhere since you started editing/)).toBeInTheDocument()
+  // The user's edit is still there, the other change isn't silently merged in.
+  expect(within(panel).getByLabelText('Within (days)')).toHaveValue(7)
+  expect(within(panel).getByLabelText('Yes — go to')).toHaveValue('')
+
+  fireEvent.click(within(panel).getByRole('button', { name: 'Load the latest' }))
+  expect(within(panel).getByLabelText('Yes — go to')).toHaveValue('s-3')
+  expect(within(panel).getByLabelText('Within (days)')).toHaveValue(3)
+  expect(within(panel).queryByText(/changed elsewhere/)).not.toBeInTheDocument()
+})
+
+test('opening the condition editor refetches the routing first', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  const canvas = await renderCanvas()
+  await within(canvas).findByRole('button', { name: /^Edit the condition after step 1/ })
+  const before = graphReads()
+  // Another tab changed it meanwhile.
+  server.branches.set('s-1', branch('s-1', { yes_step_id: 's-2', updated_at: '2026-09-24T00:00:00Z' }))
+  fireEvent.click(within(canvas).getByRole('button', { name: /^Edit the condition after step 1/ }))
+  const panel = await screen.findByRole('complementary', { name: 'Condition after step 1' })
+  await waitFor(() => expect(graphReads()).toBeGreaterThan(before))
+  // The untouched form picks up the other tab's change once it lands.
+  await waitFor(() => expect(within(panel).getByLabelText('Yes — go to')).toHaveValue('s-2'))
+})
+
+test('a failed refetch keeps an open editor, holding the save instead of losing the draft', async () => {
+  server.branches.set('s-1', branch('s-1', {}))
+  const canvas = await renderCanvas()
+  await within(canvas).findByRole('button', { name: /^Edit the condition after step 1/ })
+  server.graphFails = true
+  fireEvent.click(within(canvas).getByRole('button', { name: /^Edit the condition after step 1/ }))
+  const panel = await screen.findByRole('complementary', { name: 'Condition after step 1' })
+  fireEvent.change(within(panel).getByLabelText('Within (days)'), { target: { value: '9' } })
+
+  expect(await within(panel).findByText(/saving is held/)).toBeInTheDocument()
+  expect(within(panel).getByRole('button', { name: 'Save condition' })).toBeDisabled()
+  expect(within(panel).getByRole('button', { name: 'Remove condition' })).toBeDisabled()
+  expect(within(panel).getByLabelText('Within (days)')).toHaveValue(9)
+  expect(branchWrites('PUT')).toEqual([])
+})
+
+test('with the routing unavailable, dragging steps is held and the banner shows in both views', async () => {
+  server.graphFails = true
+  await renderCanvas()
+  expect(await screen.findByRole('alert')).toHaveTextContent(/Couldn’t load this sequence’s conditions/)
+  expect(canvasProps.current?.isValidConnection?.(drag('s-1', 's-3', null))).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: 'List' }))
+  expect(screen.getByRole('alert')).toHaveTextContent(/Couldn’t load this sequence’s conditions/)
+})
+
+test('a drag the rules refuse opens the editor on it with the reason, instead of sending it', async () => {
+  server.campaign.tracking_enabled = false
+  server.branches.set('s-1', branch('s-1', {}))
+  await renderCanvas()
+  await screen.findByRole('button', { name: /^Edit the condition after step 1/ })
+  await waitFor(() => expect(canvasProps.current?.isValidConnection?.(drag('cond:s-1', 's-3', 'yes'))).toBe(true))
+
+  await act(async () => canvasProps.current?.onConnect?.(drag('cond:s-1', 's-3', 'yes')))
+  const panel = await screen.findByRole('complementary', { name: 'Condition after step 1' })
+  expect(within(panel).getByLabelText('Yes — go to')).toHaveValue('s-3')
+  expect(within(panel).getByText(/Tracking is off for this campaign/)).toBeInTheDocument()
+  expect(within(panel).getByRole('button', { name: 'Save condition' })).toBeDisabled()
+  expect(branchWrites('PUT')).toEqual([])
+})
+
+test('an HTML body is judged exactly as the server does: whitespace still counts', async () => {
+  server.steps = [
+    { id: 's-1', step_order: 1, delay_seconds: 0, subject: 'Intro', body_html: ' ' },
+    { id: 's-2', step_order: 2, delay_seconds: 0, subject: 'Bump' },
+  ]
+  const canvas = await renderCanvas()
+  const panel = await openNewCondition(canvas, 1)
+  // "Opened" is the default; tracking is on and the body isn't empty.
+  await waitFor(() => expect(within(panel).getByRole('button', { name: 'Add condition' })).toBeEnabled())
+  expect(within(panel).queryByText(/no HTML body/)).not.toBeInTheDocument()
+})
+
+test('loop marks clear once the steps or routing they described change', async () => {
+  server.branchFails = jsonResponse({ error: 'loop', code: 'cycle', step_ids: ['s-1', 's-2', 's-3'] }, 422)
+  const canvas = await renderCanvas()
+  const panel = await openNewCondition(canvas, 3)
+  fireEvent.change(within(panel).getByLabelText('If they…'), { target: { value: 'always' } })
+  fireEvent.change(within(panel).getByLabelText('Then go to'), { target: { value: 's-1' } })
+  fireEvent.click(within(panel).getByRole('button', { name: 'Add condition' }))
+  await waitFor(() => expect(within(canvas).getAllByText('In a loop')).toHaveLength(3))
+
+  // Something else changes the routing; the old marks no longer describe it.
+  server.branchFails = null
+  server.branches.set('s-2', branch('s-2', {}))
+  fireEvent.keyDown(panel, { key: 'Escape' })
+  fireEvent.click(within(canvas).getByRole('button', { name: 'Add a condition after step 1' }))
+  await waitFor(() => expect(within(canvas).queryByText('In a loop')).not.toBeInTheDocument())
 })

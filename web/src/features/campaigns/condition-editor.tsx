@@ -4,13 +4,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
-// Read-only cross-feature hook (the documented exception): which reply labels
-// exist, and which of them stop the sequence, belongs to the reply-labels
-// feature. Hooks only — no reply-labels UI or state is imported.
-import { useListReplyLabelsQuery } from '@/features/reply-labels/api'
 import {
   useDeleteStepBranchMutation,
-  useGetCampaignQuery,
   useListStepVariantsQuery,
   useSetStepBranchMutation,
   type StepBranch,
@@ -25,10 +20,10 @@ import {
   validateDraft,
   type ConditionDraft,
   type DraftField,
-  type RouteableLabel,
 } from './branch-draft'
 import { branchErrorMessage } from './branch-error'
 import { cycleStepIds } from './branch-loop'
+import { useBranchRules } from './branch-rules'
 import type { StepWithId } from './step-card'
 
 export type ConditionEditorProps = {
@@ -40,6 +35,12 @@ export type ConditionEditorProps = {
   steps: readonly StepWithId[]
   /** The router already on this step, or null when adding one. */
   branch: StepBranch | null
+  /** Start from this draft instead of `branch` — a drag the rules refused, shown with its problem. */
+  initialDraft?: ConditionDraft
+  /** The routing failed to reload: nothing can be saved against it safely. */
+  routingUnavailable: boolean
+  /** Reports each successful write (null = removed) so the canvas shows it before the refetch lands. */
+  onWritten: (branch: StepBranch | null) => void
   onSaved: () => void
   onDeleted: () => void
   onCancel: () => void
@@ -62,35 +63,57 @@ export function ConditionEditor({
   position,
   steps,
   branch,
+  initialDraft,
+  routingUnavailable,
+  onWritten,
   onSaved,
   onDeleted,
   onCancel,
   onLoop,
 }: ConditionEditorProps) {
-  const [draft, setDraft] = useState<ConditionDraft>(() => draftFromBranch(branch))
+  const [draft, setDraft] = useState<ConditionDraft>(() => initialDraft ?? draftFromBranch(branch))
+  // The saved branch the draft was last seeded from, by version. When it moves
+  // on — an exit dragged on the canvas, or a refetch bringing another tab's
+  // change — the form follows if untouched; if the user has edits, they're
+  // kept and flagged instead, so "Save" never silently undoes a change the
+  // user didn't see. Adjusted during render (React's own pattern for derived
+  // state), not in an effect.
+  const [seededVersion, setSeededVersion] = useState(branch?.updated_at ?? null)
+  const [baseline, setBaseline] = useState<ConditionDraft>(() => draftFromBranch(branch))
+  const [changedElsewhere, setChangedElsewhere] = useState(false)
+  const version = branch?.updated_at ?? null
+  if (version !== seededVersion) {
+    setSeededVersion(version)
+    const latest = draftFromBranch(branch)
+    if (sameDraft(draft, baseline)) {
+      setDraft(latest)
+    } else {
+      setChangedElsewhere(true)
+    }
+    setBaseline(latest)
+  }
+
+  function loadLatest() {
+    const latest = draftFromBranch(branch)
+    setDraft(latest)
+    setBaseline(latest)
+    setChangedElsewhere(false)
+  }
+
   const [save, saveState] = useSetStepBranchMutation()
   const [remove, removeState] = useDeleteStepBranchMutation()
   const busy = saveState.isLoading || removeState.isLoading
   const failure = saveState.error ?? removeState.error
 
-  const { data: campaign } = useGetCampaignQuery({ id: campaignId })
+  const rules = useBranchRules(campaignId)
   const { data: variants } = useListStepVariantsQuery({ id: campaignId, stepId: step.id })
-  const labelsQuery = useListReplyLabelsQuery()
-  const labels = useMemo<RouteableLabel[] | undefined>(
-    () =>
-      labelsQuery.data?.labels.map((label) => ({
-        key: label.key,
-        label: label.label,
-        stopsEnrollment: label.stops_enrollment,
-      })),
-    [labelsQuery.data],
-  )
+  const labels = rules.replyLabels
 
   const stepIds = useMemo(() => new Set(steps.map((candidate) => candidate.id)), [steps])
   const problems = validateDraft(draft, {
     stepId: step.id,
     stepIds,
-    trackingEnabled: campaign?.tracking_enabled,
+    trackingEnabled: rules.trackingEnabled,
     htmlEverywhere:
       variants === undefined ? undefined : hasHtml(step.body_html) && variants.every((variant) => hasHtml(variant.body_html)),
     replyLabels: labels,
@@ -122,23 +145,26 @@ export function ConditionEditor({
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault()
-    if (problems.length > 0 || busy) return
+    if (problems.length > 0 || busy || routingUnavailable) return
     onLoop(null)
     const result = await save({ id: campaignId, stepId: step.id, stepBranchRequest: toBranchRequest(draft) })
     if ('error' in result) {
       onLoop(cycleStepIds(result.error))
       return
     }
+    onWritten(result.data)
     onSaved()
   }
 
   async function onRemove() {
+    if (routingUnavailable) return
     onLoop(null)
     const result = await remove({ id: campaignId, stepId: step.id })
     if ('error' in result) {
       onLoop(cycleStepIds(result.error))
       return
     }
+    onWritten(null)
     onDeleted()
   }
 
@@ -208,7 +234,7 @@ export function ConditionEditor({
           label="With the reply label"
           hintId={ids.labelHint}
           problem={problemFor('replyLabel')}
-          hint={replyLabelHint(stoppingCount, labelsQuery.isError)}
+          hint={replyLabelHint(stoppingCount, rules.labelsFailed)}
         >
           <Select
             id={ids.label}
@@ -260,6 +286,22 @@ export function ConditionEditor({
         You can also drag from the condition’s {always ? 'exit' : 'Yes or No handle'} onto a step.
       </p>
 
+      {changedElsewhere && (
+        <div role="status" className="flex flex-wrap items-center gap-2 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
+          <span className="min-w-0 flex-1">
+            This condition was changed elsewhere since you started editing. Saving will replace that change.
+          </span>
+          <Button type="button" variant="ghost" size="xs" onClick={loadLatest}>
+            Load the latest
+          </Button>
+        </div>
+      )}
+      {routingUnavailable && (
+        <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+          Couldn’t reload this sequence’s conditions, so saving is held — it could replace a change you can’t see.
+          Retry from the banner above; your edits stay here.
+        </p>
+      )}
       {failure && (
         <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
           {branchErrorMessage(failure)}
@@ -268,7 +310,14 @@ export function ConditionEditor({
 
       <div className="flex items-center gap-2">
         {branch && (
-          <Button type="button" variant="ghost" size="sm" className="text-danger" disabled={busy} onClick={() => void onRemove()}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="text-danger"
+            disabled={busy || routingUnavailable}
+            onClick={() => void onRemove()}
+          >
             {removeState.isLoading && <Loader2 className="animate-spin" />}
             Remove condition
           </Button>
@@ -277,7 +326,7 @@ export function ConditionEditor({
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" size="sm" disabled={busy || problems.length > 0}>
+        <Button type="submit" variant="primary" size="sm" disabled={busy || routingUnavailable || problems.length > 0}>
           {saveState.isLoading && <Loader2 className="animate-spin" />}
           {branch ? 'Save condition' : 'Add condition'}
         </Button>
@@ -286,8 +335,22 @@ export function ConditionEditor({
   )
 }
 
+/**
+ * Exactly the server's test (`checkTrackable`: `BodyHtml == ""`), untrimmed —
+ * a whitespace-only body passes there, so it passes here too.
+ */
+function sameDraft(a: ConditionDraft, b: ConditionDraft): boolean {
+  return (
+    a.condition === b.condition &&
+    a.withinDays === b.withinDays &&
+    a.replyLabelKey === b.replyLabelKey &&
+    a.yesStepId === b.yesStepId &&
+    a.noStepId === b.noStepId
+  )
+}
+
 function hasHtml(body: string | undefined): boolean {
-  return (body ?? '').trim() !== ''
+  return (body ?? '') !== ''
 }
 
 function replyLabelHint(stoppingCount: number, failed: boolean): string {
@@ -318,7 +381,8 @@ function Field({
     <div className="flex flex-col gap-1.5">
       <Label htmlFor={id}>{label}</Label>
       {children}
-      <span id={hintId} className={problem ? 'text-xs text-danger' : 'text-xs text-muted-foreground'}>
+      {/* Polite: a problem appears as the user types, and should be heard without interrupting them. */}
+      <span id={hintId} aria-live="polite" className={problem ? 'text-xs text-danger' : 'text-xs text-muted-foreground'}>
         {problem ?? hint}
       </span>
     </div>
