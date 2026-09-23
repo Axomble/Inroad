@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { expect, test, vi, type Mock } from 'vitest'
-import { caretToEnd, editorFor, pressKey, typeInto } from '@/test/rich-text'
+import { caretToEnd, editorFor, pressKey, replaceText, typeInto } from '@/test/rich-text'
 import { BodyEditor, type EmailBody } from '../body-editor'
 import type { ClassifyVariable, MergeVariable } from '../merge-tags'
 
@@ -263,4 +263,25 @@ test('once the raw HTML holds nothing the editor would drop, switching needs no 
 
   fireEvent.click(screen.getByRole('button', { name: 'Switch to the editor' }))
   expect(await screen.findByRole('textbox', { name: 'Body' })).toHaveTextContent('Hi {{first_name}}')
+})
+
+// --- Plain stays plain, HTML stays HTML ------------------------------------
+
+/** The demo seed's body_html: an HTML part with no formatting in it. */
+const SEED_HTML = '<p>Hi {{first_name}},<br>quick one.</p><p>Thanks</p>'
+
+test('a body loaded with an unformatted HTML part keeps it through an edit — tracking rides on it', () => {
+  const { textbox, onChange } = renderEditor({ initialHtml: SEED_HTML, initialText: 'Hi {{first_name}},\nquick one.\n\nThanks' })
+  caretToEnd(textbox)
+  typeInto(textbox, '!')
+  expect(lastChange(onChange)).toEqual({
+    html: '<p>Hi {{first_name}},<br>quick one.</p><p>Thanks!</p>',
+    text: 'Hi {{first_name}},\nquick one.\n\nThanks!',
+  })
+})
+
+test('emptying a body that had an HTML part leaves no HTML part, so the empty body is still caught as empty', () => {
+  const { textbox, onChange } = renderEditor({ initialHtml: SEED_HTML })
+  replaceText(textbox, '')
+  expect(lastChange(onChange)).toEqual({ html: '', text: '' })
 })

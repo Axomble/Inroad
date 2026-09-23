@@ -375,3 +375,26 @@ test('agent-authored HTML opens raw with the notice, and the raw HTML is still h
   await waitFor(() => expect(putRequests()).toHaveLength(1))
   expect(putRequests()[0]?.body).toMatchObject({ body_html: `${AGENT_HTML}<p>{{company}}</p>`, body_text: 'Hi {{first_name}}' })
 })
+
+// --- Plain stays plain, HTML stays HTML ------------------------------------
+
+test.each([
+  // The seed's shape: an HTML part with no formatting. It must survive an
+  // edit, or the step silently stops carrying the open pixel.
+  ['a step that had an HTML part keeps one', '<p>Hi {{first_name}}</p>', 'Hi {{first_name}}', '<p>Hello {{company}}</p>'],
+  ['a plain step edited without formatting stays plain', '', 'Hi {{first_name}}', ''],
+])('%s', async (_name, storedHtml, storedText, expectedHtml) => {
+  renderWithProviders(
+    <StepForm
+      campaignId="c-1"
+      step={makeStep({ body_html: storedHtml, body_text: storedText })}
+      isFirstStep
+      onDone={vi.fn()}
+      onCancel={vi.fn()}
+    />,
+  )
+  replaceText(await screen.findByRole('textbox', { name: 'Body' }), 'Hello {{company}}')
+  await submitStep()
+  await waitFor(() => expect(putRequests()).toHaveLength(1))
+  expect(putRequests()[0]?.body).toMatchObject({ body_text: 'Hello {{company}}', body_html: expectedHtml })
+})
