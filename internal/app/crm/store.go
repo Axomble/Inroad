@@ -12,11 +12,14 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
 type Store interface {
-	ListCompanies(context.Context, uuid.UUID, PageRequest) (Page[Company], error)
+	// ListCompanies receives an already-normalised filter (see
+	// normalizeCompanyFilter): a non-empty Query is lower-cased and trimmed.
+	ListCompanies(context.Context, uuid.UUID, CompanyFilter, PageRequest) (Page[Company], error)
 	GetCompany(context.Context, uuid.UUID, uuid.UUID) (Company, error)
 	CreateCompany(context.Context, uuid.UUID, CompanyInput) (Company, error)
 	UpdateCompany(context.Context, uuid.UUID, uuid.UUID, CompanyInput) (Company, error)
@@ -66,18 +69,17 @@ type PgStore struct {
 
 func NewPgStore(pool *pgxpool.Pool) *PgStore { return &PgStore{pool: pool, q: gen.New(pool)} }
 
-func (s *PgStore) ListCompanies(ctx context.Context, workspaceID uuid.UUID, page PageRequest) (Page[Company], error) {
+func (s *PgStore) ListCompanies(ctx context.Context, workspaceID uuid.UUID, filter CompanyFilter, page PageRequest) (Page[Company], error) {
+	if filter.Query != "" {
+		return s.searchCompanies(ctx, workspaceID, filter.Query, page)
+	}
 	params := gen.ListCompaniesParams{WorkspaceID: workspaceID, PageLimit: page.Limit}
 	if page.Cursor != "" {
-		keys, err := decodeCursor(cursorCompanies, page.Cursor, 2)
+		id, name, err := decodeCompanyCursor(cursorCompanies, page.Cursor)
 		if err != nil {
 			return Page[Company]{}, err
 		}
-		id, err := uuid.Parse(keys[0])
-		if err != nil {
-			return Page[Company]{}, validation("cursor is malformed")
-		}
-		params.Seek, params.CursorID, params.CursorName = true, id, keys[1]
+		params.Seek, params.CursorID, params.CursorName = true, id, name
 	}
 	rows, err := s.q.ListCompanies(ctx, params)
 	if err != nil {
@@ -91,6 +93,53 @@ func (s *PgStore) ListCompanies(ctx context.Context, workspaceID uuid.UUID, page
 		out.NextCursor = encodeCursor(cursorCompanies, last.ID.String(), last.NameKey)
 	}
 	return out, nil
+}
+
+// searchCompanies is the filtered listing. Its cursor carries the query as a
+// third key so a page token is only ever honoured for the search that minted it.
+func (s *PgStore) searchCompanies(ctx context.Context, workspaceID uuid.UUID, query string, page PageRequest) (Page[Company], error) {
+	params := gen.SearchCompaniesParams{WorkspaceID: workspaceID, Pattern: db.EscapeLike(query), PageLimit: page.Limit}
+	if page.Cursor != "" {
+		id, name, err := decodeCompanyCursor(cursorCompanySearch, page.Cursor, query)
+		if err != nil {
+			return Page[Company]{}, err
+		}
+		params.Seek, params.CursorID, params.CursorName = true, id, name
+	}
+	rows, err := s.q.SearchCompanies(ctx, params)
+	if err != nil {
+		return Page[Company]{}, err
+	}
+	out := Page[Company]{Items: make([]Company, len(rows))}
+	for i, row := range rows {
+		// The projections are identical by construction (both SELECT c.* plus
+		// the same two aggregates), so one converter serves both listings.
+		out.Items[i] = companyFromList(gen.ListCompaniesRow(row))
+	}
+	if last, ok := lastOfFullPage(rows, page.Limit); ok {
+		out.NextCursor = encodeCursor(cursorCompanySearch, last.ID.String(), last.NameKey, query)
+	}
+	return out, nil
+}
+
+// decodeCompanyCursor unpacks a company-listing cursor into its (id, name key)
+// position. bound are keys the cursor must repeat exactly — the search query —
+// and a mismatch is the same "not this listing" refusal as a foreign kind.
+func decodeCompanyCursor(kind cursorKind, raw string, bound ...string) (uuid.UUID, string, error) {
+	keys, err := decodeCursor(kind, raw, 2+len(bound))
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	for i, want := range bound {
+		if keys[2+i] != want {
+			return uuid.Nil, "", validation("cursor does not belong to this listing")
+		}
+	}
+	id, err := uuid.Parse(keys[0])
+	if err != nil {
+		return uuid.Nil, "", validation("cursor is malformed")
+	}
+	return id, keys[1], nil
 }
 
 // lastOfFullPage returns the row a next-page cursor should be built from: only

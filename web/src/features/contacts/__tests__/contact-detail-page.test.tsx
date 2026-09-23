@@ -467,9 +467,8 @@ test('linking a company updates the record from the response, without refetching
   await waitFor(() => expect(detailGets).toBe(1))
 
   fireEvent.click(within(details).getByRole('button', { name: /change the company/i }))
-  const select = await within(details).findByLabelText('Company')
-  await waitFor(() => expect(within(details).getByRole('option', { name: 'Globex' })).toBeInTheDocument())
-  fireEvent.change(select, { target: { value: 'co-2' } })
+  await within(details).findByRole('combobox', { name: 'Company' })
+  fireEvent.click(await within(details).findByRole('option', { name: /Globex/ }))
   fireEvent.click(within(details).getByRole('button', { name: 'Save' }))
 
   // The new company is on screen, linked to its record...

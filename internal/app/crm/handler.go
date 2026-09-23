@@ -141,7 +141,8 @@ func (h *Handler) listCompanies(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	h.list(w, r, func(ws uuid.UUID) (any, error) { return h.svc.ListCompanies(r.Context(), ws, page) })
+	filter := CompanyFilter{Query: r.URL.Query().Get("q")}
+	h.list(w, r, func(ws uuid.UUID) (any, error) { return h.svc.ListCompanies(r.Context(), ws, filter, page) })
 }
 func (h *Handler) getCompany(w http.ResponseWriter, r *http.Request) {
 	h.get(w, r, func(ws, id uuid.UUID) (any, error) { return h.svc.GetCompany(r.Context(), ws, id) })

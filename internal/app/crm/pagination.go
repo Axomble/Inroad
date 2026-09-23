@@ -20,9 +20,15 @@ type cursorKind string
 
 const (
 	cursorCompanies cursorKind = "companies"
-	cursorDeals     cursorKind = "deals"
-	cursorNotes     cursorKind = "notes"
-	cursorTasks     cursorKind = "tasks"
+	// A search result is a different listing from the unfiltered one, and a
+	// search for "ac" is a different listing from a search for "acme": the
+	// cursor carries the query it was minted for, so replaying it under a
+	// changed query is refused instead of resuming mid-way through the wrong
+	// result set.
+	cursorCompanySearch cursorKind = "company_search"
+	cursorDeals         cursorKind = "deals"
+	cursorNotes         cursorKind = "notes"
+	cursorTasks         cursorKind = "tasks"
 	// The company sub-resources get their own kinds even though the deal
 	// ordering is identical to cursorDeals: a cursor names a position in ONE
 	// listing, and replaying a whole-workspace deal cursor against a single

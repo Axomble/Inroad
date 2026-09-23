@@ -1,0 +1,22 @@
+-- Index-backed company search, for the pickers that link a record to a company
+-- (the contact page's company field, the agent's company lookup).
+--
+-- Until now GET /crm/companies could only page through the workspace in name
+-- order, so a picker showing one page could not reach a company past it. A
+-- substring filter needs a trigram index to be a lookup rather than a scan.
+--
+-- An expression index rather than contacts' generated search_text column
+-- (000034): a generated column would appear in every `companies.*` projection
+-- and so in every sqlc model built from one, for a value nothing reads back.
+-- The expression below is repeated VERBATIM by SearchCompanies in
+-- queries/crm.sql — Postgres only uses an expression index for a predicate over
+-- the identical expression, so the two must change together.
+--
+-- domain is included so "acme.com" finds Acme. It is nullable CITEXT, hence the
+-- COALESCE and the cast; citext -> text is binary-coercible and lower() and ||
+-- on text are immutable, so the expression is indexable.
+--
+-- workspace_id leads the SAME index (btree_gin, enabled in 000034) so a search
+-- never touches another tenant's rows to discard them.
+CREATE INDEX idx_companies_search ON companies
+    USING gin (workspace_id, (lower(name || ' ' || COALESCE(domain::text, ''))) gin_trgm_ops);

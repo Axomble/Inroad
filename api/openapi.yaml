@@ -2606,10 +2606,20 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/PageLimit' }
         - { $ref: '#/components/parameters/PageCursor' }
+        - name: q
+          in: query
+          required: false
+          description: >-
+            Case-insensitive substring match against the company's name or domain,
+            trimmed; minimum 2 characters. LIKE metacharacters (% and _) are matched
+            literally. Results keep the name ordering and page by cursor; a cursor
+            is bound to the q it was issued for and is refused (422) under any other.
+          schema: { type: string, minLength: 2 }
       responses:
         '200':
           description: Workspace companies
           content: { application/json: { schema: { $ref: '#/components/schemas/CRMCompanyList' } } }
+        '422': { description: Search query too short or too long, or cursor issued for a different query }
     post:
       operationId: crmCreateCompany
       tags: [crm]

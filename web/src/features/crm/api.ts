@@ -221,6 +221,9 @@ const crmApi = api
 
 export const {
   useCrmListCompaniesQuery,
+  // The lazy form lets a picker append the next page on demand. It reads the
+  // same endpoint, so it shares these tags; the codegen emits no infiniteQuery.
+  useLazyCrmListCompaniesQuery,
   useCrmGetCompanyQuery,
   useCrmCreateCompanyMutation,
   useCrmListCompanyContactsQuery,

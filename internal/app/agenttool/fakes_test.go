@@ -129,6 +129,27 @@ type fakeContactWrites struct {
 	gotWS   uuid.UUID
 	gotIn   ContactInput
 	gotList uuid.UUID
+
+	// SetCompany: linkErr is returned as-is; otherwise the link echoes the
+	// requested company with linkName. setCalled distinguishes "never reached
+	// the writer" from "reached it with a nil company".
+	linkErr    error
+	linkName   string
+	setCalled  bool
+	gotContact uuid.UUID
+	gotCompany *uuid.UUID
+}
+
+func (f *fakeContactWrites) SetCompany(_ context.Context, ws, contactID uuid.UUID, companyID *uuid.UUID) (ContactCompanyLink, error) {
+	f.setCalled, f.gotWS, f.gotContact, f.gotCompany = true, ws, contactID, companyID
+	if f.linkErr != nil {
+		return ContactCompanyLink{}, f.linkErr
+	}
+	out := ContactCompanyLink{ContactID: contactID, CompanyID: companyID}
+	if companyID != nil {
+		out.CompanyName = f.linkName
+	}
+	return out, nil
 }
 
 type fakeContactImports struct {

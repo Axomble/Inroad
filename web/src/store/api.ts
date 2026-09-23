@@ -1125,6 +1125,7 @@ const injectedRtkApi = api.injectEndpoints({
         params: {
           limit: queryArg.limit,
           cursor: queryArg.cursor,
+          q: queryArg.q,
         },
       }),
     }),
@@ -2556,6 +2557,8 @@ export type CrmListCompaniesApiArg = {
   limit?: number;
   /** Opaque keyset cursor taken from the previous page's next_cursor. Round-trip it untouched; never construct one. */
   cursor?: string;
+  /** Case-insensitive substring match against the company's name or domain, trimmed; minimum 2 characters. LIKE metacharacters (% and _) are matched literally. Results keep the name ordering and page by cursor; a cursor is bound to the q it was issued for and is refused (422) under any other. */
+  q?: string;
 };
 export type CrmCreateCompanyApiResponse =
   /** status 201 Created company */ CrmCompany;

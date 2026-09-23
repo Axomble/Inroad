@@ -16,10 +16,21 @@ type fakeCRM struct {
 	created   CRMDealInput
 	truncated bool
 	writeErr  error
+	searchErr error
+	gotWS     uuid.UUID
+	gotQuery  string
+	searched  bool
 }
 
 func (f *fakeCRM) ListCompanies(context.Context, uuid.UUID) (CRMList[CRMCompany], error) {
 	return NewCRMList([]CRMCompany{{ID: uuid.New(), Name: "Acme"}}, f.truncated), nil
+}
+func (f *fakeCRM) SearchCompanies(_ context.Context, ws uuid.UUID, query string) (CRMList[CRMCompany], error) {
+	f.gotWS, f.gotQuery, f.searched = ws, query, true
+	if f.searchErr != nil {
+		return CRMList[CRMCompany]{}, f.searchErr
+	}
+	return NewCRMList([]CRMCompany{{ID: uuid.New(), Name: "Acme Robotics"}}, f.truncated), nil
 }
 func (f *fakeCRM) GetCompany(context.Context, uuid.UUID, uuid.UUID) (CRMCompany, error) {
 	return CRMCompany{Name: "Acme"}, nil

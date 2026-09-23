@@ -3,6 +3,7 @@ package agenttool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/mail"
 	"strings"
@@ -51,6 +52,23 @@ type ContactReader interface {
 // ContactInput is a new contact's fields.
 type ContactInput struct{ Email, FirstName, LastName, Company string }
 
+// The two not-founds a company link distinguishes. They need opposite
+// recoveries from the model — re-find the contact versus search for the
+// company — so they are separate sentinels rather than one pgx.ErrNoRows, and
+// the composition root maps the contact domain's own errors onto them.
+var (
+	ErrContactNotInWorkspace = errors.New("agenttool: contact not in workspace")
+	ErrCompanyNotInWorkspace = errors.New("agenttool: company not in workspace")
+)
+
+// ContactCompanyLink is a contact's company after a link or unlink. A nil
+// CompanyID means the contact is now unlinked.
+type ContactCompanyLink struct {
+	ContactID   uuid.UUID
+	CompanyID   *uuid.UUID
+	CompanyName string
+}
+
 // ContactWriter is the write half. Implementations must resolve every id
 // inside ws — the tools never pass a workspace the model chose.
 type ContactWriter interface {
@@ -60,6 +78,11 @@ type ContactWriter interface {
 	// AddToList is idempotent. An unknown list or contact must return
 	// pgx.ErrNoRows.
 	AddToList(ctx context.Context, ws, listID, contactID uuid.UUID) error
+	// SetCompany links the contact to companyID, or unlinks it when companyID
+	// is nil — the same write the contact page's company field makes. An
+	// unknown contact must return ErrContactNotInWorkspace and an unknown
+	// company ErrCompanyNotInWorkspace; a cross-workspace id is unknown.
+	SetCompany(ctx context.Context, ws, contactID uuid.UUID, companyID *uuid.UUID) (ContactCompanyLink, error)
 }
 
 type ContactImportResult struct {
@@ -179,24 +202,34 @@ type contactWriteArgs struct {
 	Company   string `json:"company"`
 	ContactID string `json:"contact_id"`
 	ListID    string `json:"list_id"`
+	CompanyID string `json:"company_id"`
 }
 
+const (
+	methodLinkCompany   = "link_company"
+	methodUnlinkCompany = "unlink_company"
+)
+
 func contactWriteTool(w ContactWriter) Tool {
-	methods := []string{methodCreate, methodAddToList}
+	methods := []string{methodCreate, methodAddToList, methodLinkCompany, methodUnlinkCompany}
 	return Tool{
 		Name: "inroad_contact_write",
-		Description: "Create a contact in this workspace, or add an existing contact to a contact list. " +
+		Description: "Create a contact in this workspace, add an existing contact to a contact list, or link a contact to a CRM company. " +
 			"Use method=create with the person's email (names and company optional); an email that already exists is reported back rather than duplicated. " +
+			"The create `company` field is free text kept for mail merge and links nothing. " +
 			"Use method=add_to_list with contact_id and list_id — adding a contact that is already a member is a no-op. " +
+			"Use method=link_company with contact_id and company_id to record which CRM company the contact works for; find the company_id with inroad_company_read method=search. " +
+			"method=unlink_company with contact_id removes that link. " +
 			"This writes data but sends nothing; enrolling a list in a campaign is a separate, approved action.",
 		InputSchema: mustSchema(
-			methodField("create adds a contact; add_to_list puts an existing contact on a list.", methods),
+			methodField("create adds a contact; add_to_list puts an existing contact on a list; link_company and unlink_company set or clear the contact's CRM company.", methods),
 			strField("email", "The contact's email address. Required for create.", false),
 			strField("first_name", "The contact's first name. Optional.", false),
 			strField("last_name", "The contact's last name. Optional.", false),
-			strField("company", "The contact's company name. Optional.", false),
-			strField("contact_id", "The contact's id, from inroad_contact_read. Required for add_to_list.", false),
+			strField("company", "Free-text company name stored on a new contact. Optional; does not link a CRM company.", false),
+			strField("contact_id", "The contact's id, from inroad_contact_read. Required for add_to_list, link_company and unlink_company.", false),
 			strField("list_id", "The target list's id, from inroad_list_read. Required for add_to_list.", false),
+			strField("company_id", "The CRM company's id, from inroad_company_read method=search. Required for link_company.", false),
 		),
 		Risk: RiskWrite,
 		Execute: func(ctx context.Context, p Principal, args json.RawMessage) (Result, error) {
@@ -209,6 +242,10 @@ func contactWriteTool(w ContactWriter) Tool {
 				return contactCreate(ctx, w, p.WorkspaceID, a)
 			case methodAddToList:
 				return contactAddToList(ctx, w, p.WorkspaceID, a)
+			case methodLinkCompany:
+				return contactSetCompany(ctx, w, p.WorkspaceID, a, true)
+			case methodUnlinkCompany:
+				return contactSetCompany(ctx, w, p.WorkspaceID, a, false)
 			default:
 				return unknownMethod(a.Method, methods), nil
 			}
@@ -256,6 +293,41 @@ func contactAddToList(ctx context.Context, w ContactWriter, ws uuid.UUID, a cont
 		return Result{}, fmt.Errorf("add contact to list: %w", err)
 	}
 	return Ok(map[string]any{"contact_id": contactID.String(), "list_id": listID.String(), "added": true}), nil
+}
+
+// contactSetCompany links (link=true) or unlinks the contact. Both not-founds
+// come back to the model as recoverable failures naming the id to re-check;
+// anything else is an infrastructure fault that aborts the run.
+func contactSetCompany(ctx context.Context, w ContactWriter, ws uuid.UUID, a contactWriteArgs, link bool) (Result, error) {
+	contactID, bad := parseID("contact_id", a.ContactID)
+	if bad != nil {
+		return *bad, nil
+	}
+	var companyID *uuid.UUID
+	if link {
+		id, bad := parseID("company_id", a.CompanyID)
+		if bad != nil {
+			return *bad, nil
+		}
+		companyID = &id
+	}
+	linked, err := w.SetCompany(ctx, ws, contactID, companyID)
+	switch {
+	case errors.Is(err, ErrContactNotInWorkspace):
+		return Fail(fmt.Sprintf(
+			"no contact %s in this workspace; find the contact with inroad_contact_read method=search before retrying", a.ContactID)), nil
+	case errors.Is(err, ErrCompanyNotInWorkspace):
+		return Fail(fmt.Sprintf(
+			"no company %s in this workspace; find it with inroad_company_read method=search, or create it with inroad_company_write, before retrying", a.CompanyID)), nil
+	case err != nil:
+		return Result{}, fmt.Errorf("set contact company: %w", err)
+	}
+	out := map[string]any{"contact_id": linked.ContactID.String(), "linked": linked.CompanyID != nil}
+	if linked.CompanyID != nil {
+		out["company_id"] = linked.CompanyID.String()
+		out["company_name"] = linked.CompanyName
+	}
+	return Ok(out), nil
 }
 
 const maxAgentImportRows = 1000

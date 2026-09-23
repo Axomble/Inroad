@@ -26,6 +26,15 @@ type PageRequest struct {
 	Cursor string
 }
 
+// CompanyFilter narrows the company listing. Query is a case-insensitive
+// substring of the company's name or domain; empty lists the whole workspace.
+// It is its own type rather than a PageRequest field because only this one
+// listing can honour it — a field every other listing silently ignored would
+// read as a filter that works.
+type CompanyFilter struct {
+	Query string
+}
+
 // Page is a listing's wire shape. NextCursor is empty on the last page, which
 // is the only "no more rows" signal a client needs — a full page with no
 // cursor is the end, never a silent truncation.

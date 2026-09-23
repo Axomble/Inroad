@@ -1631,6 +1631,88 @@ func (q *Queries) PipelineIsDefault(ctx context.Context, arg PipelineIsDefaultPa
 	return is_default, err
 }
 
+const searchCompanies = `-- name: SearchCompanies :many
+SELECT c.id, c.workspace_id, c.name, c.domain, c.owner_user_id, c.annual_revenue_micros, c.currency, c.created_at, c.updated_at, count(d.id)::bigint AS deal_count, lower(c.name) AS name_key
+FROM companies c
+LEFT JOIN deals d ON d.workspace_id = c.workspace_id AND d.company_id = c.id
+WHERE c.workspace_id = $1
+  AND lower(c.name || ' ' || COALESCE(c.domain::text, '')) LIKE '%' || $2::text || '%'
+  AND ($3::bool = false
+       OR (lower(c.name), c.id) > ($4::text, $5::uuid))
+GROUP BY c.id
+ORDER BY lower(c.name), c.id
+LIMIT $6
+`
+
+type SearchCompaniesParams struct {
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Pattern     string    `json:"pattern"`
+	Seek        bool      `json:"seek"`
+	CursorName  string    `json:"cursor_name"`
+	CursorID    uuid.UUID `json:"cursor_id"`
+	PageLimit   int32     `json:"page_limit"`
+}
+
+type SearchCompaniesRow struct {
+	ID                  uuid.UUID          `json:"id"`
+	WorkspaceID         uuid.UUID          `json:"workspace_id"`
+	Name                string             `json:"name"`
+	Domain              *string            `json:"domain"`
+	OwnerUserID         pgtype.UUID        `json:"owner_user_id"`
+	AnnualRevenueMicros *int64             `json:"annual_revenue_micros"`
+	Currency            string             `json:"currency"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	DealCount           int64              `json:"deal_count"`
+	NameKey             string             `json:"name_key"`
+}
+
+// SearchCompanies is ListCompanies narrowed by a substring of the name or
+// domain. It is spelled out rather than folded into ListCompanies behind a
+// `$q = ” OR ...` guard for the same reason as ListCompanyDeals: the guard
+// survives into a generic plan and stops the trigram predicate becoming an
+// index condition. The LIKE expression must stay byte-identical to
+// idx_companies_search (migration 20260923105443_company_search) or the index is
+// never used. The query arrives lower-cased and LIKE-escaped from the store.
+func (q *Queries) SearchCompanies(ctx context.Context, arg SearchCompaniesParams) ([]SearchCompaniesRow, error) {
+	rows, err := q.db.Query(ctx, searchCompanies,
+		arg.WorkspaceID,
+		arg.Pattern,
+		arg.Seek,
+		arg.CursorName,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchCompaniesRow
+	for rows.Next() {
+		var i SearchCompaniesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Name,
+			&i.Domain,
+			&i.OwnerUserID,
+			&i.AnnualRevenueMicros,
+			&i.Currency,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DealCount,
+			&i.NameKey,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const seedPipelineStages = `-- name: SeedPipelineStages :exec
 SELECT seed_pipeline_stages($1::uuid, $2::uuid)
 `

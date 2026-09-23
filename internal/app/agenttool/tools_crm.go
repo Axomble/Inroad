@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -153,6 +154,10 @@ func NewCRMList[T any](items []T, truncated bool) CRMList[T] {
 
 type CRMService interface {
 	ListCompanies(context.Context, uuid.UUID) (CRMList[CRMCompany], error)
+	// SearchCompanies is one page of companies whose name or domain contains
+	// query, case-insensitively. It is how the model resolves a company name to
+	// the id a link or a deal needs, without paging the whole workspace.
+	SearchCompanies(ctx context.Context, workspaceID uuid.UUID, query string) (CRMList[CRMCompany], error)
 	GetCompany(context.Context, uuid.UUID, uuid.UUID) (CRMCompany, error)
 	ListPipelines(context.Context, uuid.UUID) ([]CRMPipeline, error)
 	ListDeals(context.Context, uuid.UUID) (CRMList[CRMDeal], error)
@@ -190,7 +195,7 @@ func crmTools(deps Deps) []Tool {
 	}
 	errs := deps.CRMErrors
 	tools := []Tool{
-		crmCompanyReadTool(deps.CRM),
+		crmCompanyReadTool(deps.CRM, errs),
 		crmCompanyWriteTool(deps.CRM, errs),
 		crmDealReadTool(deps.CRM),
 		crmDealWriteTool(deps.CRM, errs),
@@ -236,24 +241,43 @@ func crmActor(p Principal) CRMActor {
 	return CRMActor{UserID: p.UserID, AgentClientID: p.AgentClientID, ThreadID: p.ThreadID, RunID: p.RunID}
 }
 
-func crmCompanyReadTool(svc CRMService) Tool {
-	methods := []string{"list", "get"}
-	return Tool{Name: "inroad_company_read", Description: "List CRM companies or get one company by id.",
-		InputSchema: mustSchema(methodField("Company read operation.", methods), strField("company_id", "Company id required for get.", false)), Risk: RiskRead,
+// minCompanyQuery mirrors the CRM domain's search floor, so a too-short query
+// is refused here with guidance rather than surfacing as a validation error.
+const minCompanyQuery = 2
+
+func crmCompanyReadTool(svc CRMService, errs ErrorClassifier) Tool {
+	methods := []string{methodList, methodSearch, "get"}
+	return Tool{Name: "inroad_company_read",
+		Description: "List CRM companies, search them by name or domain, or get one company by id. " +
+			"Use method=search with a name or domain fragment to find a company's id before linking a contact or a deal to it.",
+		InputSchema: mustSchema(methodField("Company read operation.", methods),
+			strField("query", fmt.Sprintf("Name or domain fragment to match; at least %d characters. Required for search.", minCompanyQuery), false),
+			strField("company_id", "Company id required for get.", false)), Risk: RiskRead,
 		Execute: func(ctx context.Context, p Principal, raw json.RawMessage) (Result, error) {
 			var args struct {
 				baseArgs
 				Method    string `json:"method"`
+				Query     string `json:"query"`
 				CompanyID string `json:"company_id"`
 			}
 			if bad := decodeArgs(raw, &args); bad != nil {
 				return *bad, nil
 			}
 			switch args.Method {
-			case "list":
+			case methodList:
 				items, err := svc.ListCompanies(ctx, p.WorkspaceID)
 				if err != nil {
 					return Result{}, fmt.Errorf("list CRM companies: %w", err)
+				}
+				return Ok(items), nil
+			case methodSearch:
+				query := strings.TrimSpace(args.Query)
+				if utf8.RuneCountInString(query) < minCompanyQuery {
+					return Fail(fmt.Sprintf("method=search needs a query of at least %d characters; use method=list to browse", minCompanyQuery)), nil
+				}
+				items, err := svc.SearchCompanies(ctx, p.WorkspaceID, query)
+				if err != nil {
+					return recoverableCRMError(errs, err)
 				}
 				return Ok(items), nil
 			case "get":

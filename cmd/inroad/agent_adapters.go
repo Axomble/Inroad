@@ -291,6 +291,27 @@ func (a contactTools) AddToList(ctx context.Context, ws, listID, contactID uuid.
 	return a.store.AddToList(ctx, listID, contactID)
 }
 
+// SetCompany goes through contact.Service.SetCompany — the write behind
+// PUT /contacts/{id}/company — so the agent gets the same company ownership
+// pre-check and workspace-pinned UPDATE the contact page does, and the domain's
+// two 404s are mapped onto the tool's two recoverable sentinels.
+func (a contactTools) SetCompany(ctx context.Context, ws, contactID uuid.UUID, companyID *uuid.UUID) (agenttool.ContactCompanyLink, error) {
+	record, err := a.service.SetCompany(ctx, ws, contactID, companyID)
+	switch {
+	case errors.Is(err, contact.ErrCompanyNotFound):
+		return agenttool.ContactCompanyLink{}, fmt.Errorf("%w: %w", agenttool.ErrCompanyNotInWorkspace, err)
+	case errors.Is(err, contact.ErrNotFound):
+		return agenttool.ContactCompanyLink{}, fmt.Errorf("%w: %w", agenttool.ErrContactNotInWorkspace, err)
+	case err != nil:
+		return agenttool.ContactCompanyLink{}, err
+	}
+	out := agenttool.ContactCompanyLink{ContactID: record.ID}
+	if record.Company != nil {
+		out.CompanyID, out.CompanyName = &record.Company.ID, record.Company.Name
+	}
+	return out, nil
+}
+
 func (a contactTools) Import(ctx context.Context, ws, listID uuid.UUID, contacts []agenttool.ContactInput) (agenttool.ContactImportResult, error) {
 	var payload bytes.Buffer
 	w := csv.NewWriter(&payload)
