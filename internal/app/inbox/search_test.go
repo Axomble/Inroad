@@ -4,16 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/inroad/inroad/internal/app/auth"
 	"github.com/inroad/inroad/internal/app/inbox"
 	"github.com/inroad/inroad/internal/platform/cursor"
+	"github.com/inroad/inroad/internal/platform/throttle"
 )
 
 // fakeSearchStore serves canned hits per workspace, newest first, and applies
@@ -214,6 +219,27 @@ func TestSearchReportsBothLegsInFixedOrderAndNullSnippet(t *testing.T) {
 	}
 }
 
+// An address match is reported as the "contact" leg, after the text legs.
+func TestSearchReportsAnAddressMatchAsTheContactLeg(t *testing.T) {
+	for name, tc := range map[string]struct {
+		hit  inbox.SearchHit
+		want []string
+	}{
+		"address only": {inbox.SearchHit{MatchedAddress: true}, []string{"contact"}},
+		"all three":    {inbox.SearchHit{MatchedInbound: true, MatchedOutbound: true, MatchedAddress: true}, []string{"inbound", "outbound", "contact"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.hit.Thread = inbox.Thread{ID: uuid.New(), WorkspaceID: testWS, LastMessageAt: time.Now()}
+			store := &fakeSearchStore{hits: map[uuid.UUID][]inbox.SearchHit{testWS: {tc.hit}}}
+			w := serve(t, inbox.NewHandler(searchService(store)), http.MethodGet, "/inbox/search?q=jo@acme.test", "")
+			page := decodeSearchPage(t, w.Body.Bytes())
+			if len(page.Items) != 1 || strings.Join(page.Items[0].MatchedLegs, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("items = %+v, want matched_legs %v", page.Items, tc.want)
+			}
+		})
+	}
+}
+
 // The workspace comes from the JWT, never the request: another workspace's
 // hits are invisible even when present in the same store.
 func TestSearchIsScopedToTheCallersWorkspace(t *testing.T) {
@@ -251,6 +277,89 @@ func TestSearchScopesAndSnoozeRule(t *testing.T) {
 	}
 	if store.last.Query != "" {
 		t.Errorf("search filter carried a substring query %q", store.last.Query)
+	}
+}
+
+// Each bounded-work refusal the store can raise has its own status, so the UI
+// can tell "fix your query" (400), "narrow your query" (422) and "the server
+// gave up" (503) apart without parsing the body — and none of them is a 500.
+func TestSearchStoreRefusalsMapToDistinctStatuses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want int
+	}{
+		"not selective": {inbox.ErrSearchNotSelective, http.StatusBadRequest},
+		"too broad":     {inbox.ErrSearchTooBroad, http.StatusUnprocessableEntity},
+		"timed out":     {fmt.Errorf("%w (%w)", inbox.ErrSearchTimeout, errors.New("57014")), http.StatusServiceUnavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := inbox.NewHandler(searchService(&fakeSearchStore{err: tc.err}))
+			w := serve(t, h, http.MethodGet, "/inbox/search?q=x", "")
+			if w.Code != tc.want {
+				t.Fatalf("want %d, got %d: %s", tc.want, w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "57014") {
+				t.Errorf("body %q leaks the wrapped database error", w.Body.String())
+			}
+		})
+	}
+}
+
+// countingLimiter allows `limit` requests per key, then refuses. It records
+// every key it was asked about.
+type countingLimiter struct {
+	seen map[string]int
+}
+
+func (l *countingLimiter) Allow(_ context.Context, key string, limit int, _ time.Duration) (bool, error) {
+	l.seen[key]++
+	return l.seen[key] <= limit, nil
+}
+
+// The search route sits behind its throttle, keyed per WORKSPACE: a workspace
+// over its cap is refused with 429 before the store is reached, while another
+// workspace on the same IP is unaffected.
+func TestSearchIsThrottledPerWorkspace(t *testing.T) {
+	store := &fakeSearchStore{}
+	h := inbox.NewHandler(searchService(store))
+	limiter := &countingLimiter{seen: map[string]int{}}
+	searchThrottle := throttle.Config{
+		Limiter: limiter, Window: time.Minute, IPLimit: 100, AcctLimit: 2,
+		AcctKey: func(r *http.Request) string {
+			p, ok := auth.UserFromContext(r.Context())
+			if !ok {
+				return ""
+			}
+			return p.WorkspaceID
+		},
+	}.Middleware("inbox-search")
+	root := chi.NewRouter()
+	root.Mount("/inbox", h.Routes(inbox.RouteThrottles{Search: searchThrottle}))
+	get := func(ws uuid.UUID) int {
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/inbox/search?q=pricing", http.NoBody)
+		r.Header.Set("Authorization", bearer(t, ws))
+		w := httptest.NewRecorder()
+		auth.RequireAuth(auth.NewJWTVerifier(testSecret))(root).ServeHTTP(w, r)
+		return w.Code
+	}
+
+	for i := 0; i < 2; i++ {
+		if code := get(testWS); code != http.StatusOK {
+			t.Fatalf("request %d: want 200 under the cap, got %d", i+1, code)
+		}
+	}
+	store.last = inbox.SearchFilter{}
+	if code := get(testWS); code != http.StatusTooManyRequests {
+		t.Fatalf("third request: want 429, got %d", code)
+	}
+	if store.last.Text != "" {
+		t.Fatal("a throttled search still reached the store")
+	}
+	if code := get(uuid.New()); code != http.StatusOK {
+		t.Fatalf("another workspace: want 200, got %d", code)
+	}
+	if limiter.seen["inbox-search:acct:"+testWS.String()] != 3 {
+		t.Errorf("limiter keys = %v, want the caller's workspace counted", limiter.seen)
 	}
 }
 

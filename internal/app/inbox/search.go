@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/inroad/inroad/internal/platform/db"
 	"github.com/inroad/inroad/internal/platform/db/gen"
 )
 
@@ -28,6 +32,39 @@ const (
 	MaxSearchPageLimit     = int32(50)
 )
 
+// MaxSearchCandidates caps how many matching rows ONE search may consider, per
+// candidate set (matching stored messages; matching campaign step/variant
+// copy; contacts whose email contains the query; inbound messages whose From
+// address does). A query matching more is refused with ErrSearchTooBroad rather than
+// answered from an arbitrary subset: a capped set cannot say which matches it
+// dropped, so "some of the results" would silently miss newer threads.
+// Refusing keeps every page it does return exactly correct, and the operator's
+// fix — add a word — is obvious. 10,000 matches the contact search's count cap.
+const MaxSearchCandidates = 10_000
+
+// DefaultSearchTimeout is the statement_timeout one search transaction runs
+// under. A search the candidate cap admits finishes in milliseconds; this is
+// the backstop for the one it does not foresee (a pathological phrase recheck,
+// a cold cache), so a single request can never hold a connection and a CPU for
+// longer.
+const DefaultSearchTimeout = 3 * time.Second
+
+// ErrSearchNotSelective rejects a query with nothing positive to look for:
+// only stop words or punctuation ("the", "!!!"), or only exclusions ("-foo",
+// "foo OR -bar"). The first can match nothing; the second matches nearly every
+// message and can only be answered by scanning the whole index. It wraps
+// ErrValidation, so it is a 400.
+var ErrSearchNotSelective = fmt.Errorf("%w: q must contain at least one word to look for (only common words or exclusions were given)", ErrValidation)
+
+// ErrSearchTooBroad rejects a query matching more than MaxSearchCandidates rows.
+// A 422: the request is well-formed, and the answer is to narrow it.
+var ErrSearchTooBroad = fmt.Errorf("inbox: search matches more than %d messages, campaign steps or contacts; add words to narrow it", MaxSearchCandidates)
+
+// ErrSearchTimeout is a search that ran past DefaultSearchTimeout and was
+// cancelled by Postgres. A 503: the query was valid, the server declined to
+// finish it, and a narrower one will likely succeed.
+var ErrSearchTimeout = errors.New("inbox: search took too long; try a more specific query")
+
 // errSearchNotConfigured is returned by SearchThreads on a Service built
 // without WithSearchStore. It is a wiring bug, not a caller error, so it maps
 // to a 500 rather than to any 4xx.
@@ -40,8 +77,8 @@ var errSearchNotConfigured = errors.New("inbox: search store not configured")
 // both from the text BEFORE highlighting, so a message containing one cannot
 // forge a highlight.
 const (
-	highlightStart = ""
-	highlightStop  = ""
+	highlightStart = "\xee\x80\x80" // U+E000
+	highlightStop  = "\xee\x80\x81" // U+E001
 )
 
 // SearchFilter narrows SearchThreads. Text is the operator's query in web
@@ -56,17 +93,37 @@ type SearchFilter struct {
 }
 
 // SearchHit is one thread a search matched. MatchedInbound/MatchedOutbound say
-// which leg(s) the match was found on: inbound is the contact's replies,
-// outbound is everything we sent — campaign steps and manual replies alike.
-// At least one is always true.
+// which leg's TEXT matched: inbound is the contact's replies, outbound is
+// everything we sent — campaign steps and manual replies alike.
+// MatchedAddress says the query matched an ADDRESS instead: the linked
+// contact's email, or the From address of one of the thread's inbound
+// messages (see addressPattern). At least one of the three is always true.
 type SearchHit struct {
 	Thread          Thread
 	MatchedInbound  bool
 	MatchedOutbound bool
-	// Snippet is the newest matching message, highlighted. nil only if it
-	// could not be re-derived for a thread the search did match — which the
-	// query's shape makes unreachable, but a row is never dropped over it.
+	MatchedAddress  bool
+	// Snippet is the newest text-matching message, highlighted — or, for a
+	// thread found only by address, its newest message, unhighlighted. nil
+	// only for a thread with no message on either leg.
 	Snippet *SearchSnippet
+}
+
+// MinAddressQueryLength is the shortest query that is also matched against
+// addresses. Below three characters a trigram index has nothing to narrow
+// on, so a substring match would read every contact in the workspace; such a
+// query is matched as text only.
+const MinAddressQueryLength = 3
+
+// addressPattern is the query as the address predicates take it: lower-cased
+// (the indexes are over lower()) and LIKE-escaped, so a typed "%" or "_" is a
+// literal rather than a wildcard. nil turns address matching off.
+func addressPattern(text string) *string {
+	if utf8.RuneCountInString(text) < MinAddressQueryLength {
+		return nil
+	}
+	pattern := db.EscapeLike(strings.ToLower(text))
+	return &pattern
 }
 
 // SearchSnippet is the matching message a hit is shown with.
@@ -163,9 +220,9 @@ func (s *Service) SearchThreads(ctx context.Context, workspaceID uuid.UUID, filt
 // everything": that is what the thread list is for, and a search endpoint that
 // quietly degraded into a list would hide a client that forgot to send q.
 //
-// A query that is non-empty but has no searchable words ("the", "!!!") is NOT
-// an error — it simply matches nothing, which is the honest answer and what a
-// mail client's search box shows.
+// Whether the query has anything to LOOK FOR (a positive term, rather than
+// only stop words or exclusions) depends on how Postgres parses it, so that is
+// decided by the store — see ErrSearchNotSelective.
 //
 // NUL and invalid UTF-8 are rejected here because Postgres rejects them in a
 // text parameter; letting them through would turn a malformed request into a
@@ -235,19 +292,65 @@ func stripMarkers(s string) string {
 
 var _ SearchStore = (*PgStore)(nil)
 
-// SearchThreads runs SearchInboxThreads. The limit is clamped to one past the
-// page cap (the Service's has-more probe) so no caller can make a single
-// search render an unbounded number of snippets.
-func (s *PgStore) SearchThreads(ctx context.Context, workspaceID uuid.UUID, filter SearchFilter) ([]SearchHit, error) {
+// sqlStateQueryCanceled is Postgres' query_canceled, raised when a statement
+// runs past statement_timeout.
+const sqlStateQueryCanceled = "57014"
+
+// SearchThreads runs one search inside a single read-only REPEATABLE READ
+// transaction bounded by a statement_timeout:
+//
+//  1. InboxSearchPrecheck refuses a query with nothing positive to look for
+//     (ErrSearchNotSelective) or with more than MaxSearchCandidates matching
+//     rows (ErrSearchTooBroad), before any thread is walked.
+//  2. SearchInboxThreads answers it.
+//
+// REPEATABLE READ makes both statements read one snapshot, so a burst of new
+// mail between them cannot push the candidate sets past the cap the precheck
+// just approved (the search's own LIMIT would otherwise truncate them).
+//
+// The limit is clamped to one past the page cap (the Service's has-more probe)
+// so no caller can make a single search render an unbounded number of
+// snippets.
+func (s *PgStore) SearchThreads(ctx context.Context, workspaceID uuid.UUID, filter SearchFilter) (hits []SearchHit, err error) {
 	limit := filter.Limit
 	if limit <= 0 || limit > MaxSearchPageLimit+1 {
 		limit = MaxSearchPageLimit + 1
 	}
-	rows, err := s.q.SearchInboxThreads(ctx, gen.SearchInboxThreadsParams{
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("search inbox threads: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // read-only: nothing to keep
+	defer func() { err = mapSearchError(ctx, err) }()
+	qtx := s.q.WithTx(tx)
+
+	if err := qtx.SetInboxSearchStatementTimeout(ctx, strconv.FormatInt(s.searchTimeoutOrDefault().Milliseconds(), 10)+"ms"); err != nil {
+		return nil, fmt.Errorf("search inbox threads: statement timeout: %w", err)
+	}
+	address := addressPattern(filter.Text)
+	pre, err := qtx.InboxSearchPrecheck(ctx, gen.InboxSearchPrecheckParams{
+		WorkspaceID: workspaceID, Query: filter.Text, CandidateCap: MaxSearchCandidates + 1,
+		AddressPattern: address,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("search inbox threads: precheck: %w", err)
+	}
+	if pre.Tree == "T" || pre.Tree == "" {
+		return nil, ErrSearchNotSelective
+	}
+	for _, candidates := range []int64{pre.MessageCandidates, pre.StepCandidates, pre.ContactCandidates, pre.SenderCandidates} {
+		if candidates > MaxSearchCandidates {
+			return nil, ErrSearchTooBroad
+		}
+	}
+
+	rows, err := qtx.SearchInboxThreads(ctx, gen.SearchInboxThreadsParams{
 		HighlightStart: highlightStart,
 		HighlightStop:  highlightStop,
 		Query:          filter.Text,
 		WorkspaceID:    workspaceID,
+		CandidateCap:   MaxSearchCandidates + 1,
+		AddressPattern: address,
 		MailboxID:      pgUUID(filter.MailboxID),
 		ReplyClass:     filter.ReplyClass,
 		// The list's "before" keyset is the search's "after" cursor: both name
@@ -265,11 +368,40 @@ func (s *PgStore) SearchThreads(ctx context.Context, workspaceID uuid.UUID, filt
 	if err != nil {
 		return nil, fmt.Errorf("search inbox threads: %w", err)
 	}
-	hits := make([]SearchHit, len(rows))
+	hits = make([]SearchHit, len(rows))
 	for i, row := range rows {
 		hits[i] = searchHitFromRow(row)
 	}
 	return hits, nil
+}
+
+// searchTimeoutOrDefault is the statement_timeout a search runs under: the
+// store's own override (set only by tests, see export_test.go) or
+// DefaultSearchTimeout.
+func (s *PgStore) searchTimeoutOrDefault() time.Duration {
+	if s.searchTimeout > 0 {
+		return s.searchTimeout
+	}
+	return DefaultSearchTimeout
+}
+
+// mapSearchError turns Postgres cancelling a statement for running past
+// statement_timeout into ErrSearchTimeout. A cancellation caused by the
+// caller's own context (the client went away) is NOT a timeout of ours and is
+// passed through as the context's error, so it is never reported as the
+// server declining the query.
+func mapSearchError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("search inbox threads: %w", ctxErr)
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == sqlStateQueryCanceled {
+		return fmt.Errorf("%w (%w)", ErrSearchTimeout, err)
+	}
+	return err
 }
 
 // searchHitFromRow maps one SearchInboxThreads row to the domain type, through
@@ -286,6 +418,7 @@ func searchHitFromRow(row gen.SearchInboxThreadsRow) SearchHit {
 		}),
 		MatchedInbound:  row.MatchedInbound,
 		MatchedOutbound: row.MatchedOutbound,
+		MatchedAddress:  row.MatchedAddress,
 	}
 	// '' is the query's "no snippet re-derived" signal — see SearchInboxThreads.
 	if row.SnippetDirection != "" {

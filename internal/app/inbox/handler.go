@@ -93,6 +93,15 @@ func writeErr(w http.ResponseWriter, err error) {
 		// Only the sentinel's own text: the wrapped cause can carry provider
 		// detail that does not belong in a response body.
 		httpx.Error(w, http.StatusBadGateway, ErrDraftUpstream.Error())
+	// A search the candidate cap refuses is well-formed and simply too broad:
+	// 422, with a message telling the operator to narrow it. One Postgres
+	// cancelled for running past its statement_timeout is 503 — the query was
+	// valid and the server declined to finish it, which is neither the
+	// caller's syntax error nor an unexplained 500.
+	case errors.Is(err, ErrSearchTooBroad):
+		httpx.Error(w, http.StatusUnprocessableEntity, ErrSearchTooBroad.Error())
+	case errors.Is(err, ErrSearchTimeout):
+		httpx.Error(w, http.StatusServiceUnavailable, ErrSearchTimeout.Error())
 	case errors.Is(err, ErrValidation):
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 	default:
@@ -176,7 +185,13 @@ func toThreadSummaryResponse(t Thread) threadSummaryResponse {
 		ReplyLabel:       toReplyLabelRefResponse(t.ReplyLabel),
 		Labels:           toLabelResponses(t.Labels),
 		Unread:           t.Unread,
-		LastMessageAt:    t.LastMessageAt.UTC().Format(time.RFC3339),
+		// Full precision, not whole seconds: this value IS the list's keyset
+		// cursor (a client passes it back verbatim as before_last_message_at).
+		// Truncated to the second it compared BELOW the row it named, so every
+		// thread later in that same second fell between pages and was never
+		// shown. Postgres stores microseconds; RFC3339Nano carries them, and it
+		// is still RFC3339 (time.Parse(time.RFC3339, ...) reads the fraction).
+		LastMessageAt: t.LastMessageAt.UTC().Format(time.RFC3339Nano),
 	}
 }
 

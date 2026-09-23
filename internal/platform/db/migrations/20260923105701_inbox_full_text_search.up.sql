@@ -66,12 +66,24 @@
 -- immutable functions. No SET clause and no plpgsql: either would stop the
 -- planner inlining it, and inlining is what lets a query's call match the
 -- index's.
+--
+-- Every name in both bodies is schema-qualified to pg_catalog — the functions,
+-- the text configuration, and the concatenation (textcat is the function
+-- behind ||, spelled out so no operator is resolved through search_path). An
+-- index expression is re-evaluated under whatever search_path the writing
+-- session has; qualification means no object created in some other schema can
+-- ever be picked up in their place. Qualification does not affect inlining
+-- (the integration suite's EXPLAIN test pins that the indexes are still used).
 CREATE FUNCTION inbox_search_document(p_subject TEXT, p_body TEXT) RETURNS tsvector
 LANGUAGE sql
 IMMUTABLE
 PARALLEL SAFE
 AS $$
-    SELECT to_tsvector('english'::regconfig, left(p_subject, 1000) || ' ' || left(p_body, 100000))
+    SELECT pg_catalog.to_tsvector(
+        'pg_catalog.english'::pg_catalog.regconfig,
+        pg_catalog.textcat(
+            pg_catalog.textcat(pg_catalog.left(p_subject, 1000), ' '),
+            pg_catalog.left(p_body, 100000)))
 $$;
 
 -- The operator's query, parsed with websearch_to_tsquery: quoted phrases, OR
@@ -85,7 +97,7 @@ LANGUAGE sql
 IMMUTABLE
 PARALLEL SAFE
 AS $$
-    SELECT websearch_to_tsquery('english'::regconfig, p_query)
+    SELECT pg_catalog.websearch_to_tsquery('pg_catalog.english'::pg_catalog.regconfig, p_query)
 $$;
 
 -- workspace_id leads each index (btree_gin, installed by 000034), so a search

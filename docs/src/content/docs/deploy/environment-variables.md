@@ -185,6 +185,8 @@ second key is the **workspace** rather than an email:
 | :--- | :--- | :--- |
 | `INROAD_RATELIMIT_DRAFT_REPLY_IP` | `POST /inbox/threads/{id}/draft-reply`, per IP | `20` |
 | `INROAD_RATELIMIT_DRAFT_REPLY_WORKSPACE` | the same endpoint, per workspace | `60` |
+| `INROAD_RATELIMIT_INBOX_SEARCH_IP` | `GET /inbox/search`, per IP | `60` |
+| `INROAD_RATELIMIT_INBOX_SEARCH_WORKSPACE` | the same endpoint, per workspace | `300` |
 | `INROAD_RATELIMIT_REALTIME_TICKET_IP` | `POST /realtime/ticket`, per IP | `60` |
 | `INROAD_RATELIMIT_REALTIME_TICKET_WORKSPACE` | the same endpoint, per workspace | `600` |
 
@@ -193,7 +195,9 @@ the workspace owns that budget. Realtime ticket minting is capped because the
 endpoint issues a **credential** — but generously, because one tab mints one
 ticket per connect and a reconnect storm after a deploy is legitimate traffic. In
 both pairs the per-IP number is the more tolerant one, since a whole office can
-share a single NAT address.
+share a single NAT address. Inbox search is capped to bound database CPU: each
+call does real text-matching work over mail that external senders wrote, and is
+separately capped in size and time inside the server.
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |

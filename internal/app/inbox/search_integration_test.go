@@ -4,8 +4,10 @@ package inbox_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/inroad/inroad/internal/app/inbox"
 	"github.com/inroad/inroad/internal/platform/db"
@@ -379,8 +382,9 @@ func TestSearchRespectsScopeFiltersAgainstPostgres(t *testing.T) {
 }
 
 // Arbitrary operator input must never become a 500: websearch_to_tsquery
-// accepts any string, so quotes, tsquery operators, SQL punctuation and
-// stop-word-only queries all come back as ordinary (possibly empty) results.
+// accepts any string, so quotes, tsquery operators and SQL punctuation all come
+// back as ordinary (possibly empty) results — and a query with nothing
+// positive to look for is refused as ErrSearchNotSelective, never run.
 func TestSearchToleratesOddInputAgainstPostgres(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, ctx)
@@ -388,18 +392,28 @@ func TestSearchToleratesOddInputAgainstPostgres(t *testing.T) {
 
 	for _, text := range []string{
 		`"net thirty`,             // unbalanced quote
-		`net & thirty | !x <-> (`, // raw tsquery operators
-		`':* \ ' ''`,              // prefix/escape syntax
+		`net & thirty | !x <-> (`, // raw tsquery operators, read as words
 		`'; DROP TABLE inbox_messages; --`,
-		`the`,     // stop words only: an empty tsquery
-		`!!! ???`, // no lexemes at all
-		`-`,
-		`OR`,
 		strings.Repeat("word ", 51), // at the length cap
 		"naïve café 日本語 emoji😀",
+		`contract -brien`, // an exclusion alongside a positive term is fine
 	} {
 		if _, err := f.store.SearchThreads(ctx, f.ws, inbox.SearchFilter{Text: text}); err != nil {
 			t.Errorf("SearchThreads(%q) errored: %v", text, err)
+		}
+	}
+	for _, text := range []string{
+		`the`,     // stop words only: an empty tsquery
+		`!!! ???`, // no lexemes at all
+		`':* \ ' ''`,
+		`-`,
+		`OR`,
+		`-contract`,          // pure negation: would match nearly everything
+		`-contract -brien`,   // still nothing positive
+		`contract OR -brien`, // an OR with a negation needs no positive match
+	} {
+		if _, err := f.store.SearchThreads(ctx, f.ws, inbox.SearchFilter{Text: text}); !errors.Is(err, inbox.ErrSearchNotSelective) {
+			t.Errorf("SearchThreads(%q) err = %v, want ErrSearchNotSelective", text, err)
 		}
 	}
 	// And the syntax works as advertised: a quoted phrase matches in order,
@@ -413,8 +427,94 @@ func TestSearchToleratesOddInputAgainstPostgres(t *testing.T) {
 	if hits := search(t, ctx, f, `contract -brien`); len(hits) != 0 {
 		t.Errorf("exclusion hits = %+v, want none", hits)
 	}
-	if hits := search(t, ctx, f, `the`); len(hits) != 0 {
-		t.Errorf("stop-word hits = %+v, want none", hits)
+}
+
+// seedMatchingMessages inserts n inbound messages containing token into one
+// thread of f's workspace, in a single statement (committed: the store runs
+// its own transaction and must see them).
+func seedMatchingMessages(t *testing.T, ctx context.Context, f *fixture, token string, n int) {
+	t.Helper()
+	th := plainThread(t, ctx, f, "Bulk", "bulk seed", time.Now().UTC())
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO inbox_messages (thread_id, workspace_id, mailbox_id, direction, subject, body_text, occurred_at)
+		 SELECT $1, $2, $3, 'inbound', 'bulk', $4 || ' number ' || g, now() - make_interval(secs => g)
+		 FROM generate_series(1, $5::int) g`,
+		th.ID, f.ws, f.mailbox, token, n,
+	); err != nil {
+		t.Fatalf("seed %d matching messages: %v", n, err)
+	}
+}
+
+// The candidate cap is a refusal, not a truncation: at exactly
+// MaxSearchCandidates matching messages the search answers; one more and it is
+// ErrSearchTooBroad, with no partial page. A more specific query over the same
+// data still answers.
+func TestSearchRefusesAQueryOverTheCandidateCapAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	token := "capword" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	seedMatchingMessages(t, ctx, f, token, inbox.MaxSearchCandidates-1)
+	rare := plainThread(t, ctx, f, "Rare", token+" and a rare quokka", time.Now().UTC())
+
+	// Exactly at the cap (cap-1 seeded + the rare thread's one message).
+	hits, err := f.store.SearchThreads(ctx, f.ws, inbox.SearchFilter{Text: token})
+	if err != nil {
+		t.Fatalf("at the cap: err = %v, want an answer", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("at the cap: %d hits, want both threads", len(hits))
+	}
+
+	plainThread(t, ctx, f, "One more", token+" pushes it over", time.Now().UTC())
+	if hits, err := f.store.SearchThreads(ctx, f.ws, inbox.SearchFilter{Text: token}); !errors.Is(err, inbox.ErrSearchTooBroad) || hits != nil {
+		t.Fatalf("over the cap: hits=%d err=%v, want no page and ErrSearchTooBroad", len(hits), err)
+	}
+	if hits := search(t, ctx, f, token+" quokka"); len(hits) != 1 || hits[0].Thread.ID != rare.ID {
+		t.Fatalf("narrowed query: hits = %+v, want the rare thread", hits)
+	}
+}
+
+// A search that runs past its statement_timeout is ErrSearchTimeout (a 503),
+// and the timeout is transaction-local: the pooled connection comes back with
+// its normal setting, so no later query inherits the search's budget.
+func TestSearchTimeoutIsTypedAndTransactionLocalAgainstPostgres(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, ctx)
+	token := "slowword" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	seedMatchingMessages(t, ctx, f, token, 5000)
+
+	// One connection, so the SHOW below is guaranteed to run on the connection
+	// the timed-out search used.
+	cfg, err := pgxpool.ParseConfig(dbtest.DSN(t))
+	if err != nil {
+		t.Fatalf("parse dsn: %v", err)
+	}
+	cfg.MaxConns, cfg.MinConns = 1, 0
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	var before string
+	if err := pool.QueryRow(ctx, `SHOW statement_timeout`).Scan(&before); err != nil {
+		t.Fatalf("show before: %v", err)
+	}
+
+	slow := inbox.NewPgStoreWithSearchTimeout(pool, time.Millisecond)
+	if _, err := slow.SearchThreads(ctx, f.ws, inbox.SearchFilter{Text: token}); !errors.Is(err, inbox.ErrSearchTimeout) {
+		t.Fatalf("err = %v, want ErrSearchTimeout", err)
+	}
+
+	var after string
+	if err := pool.QueryRow(ctx, `SHOW statement_timeout`).Scan(&after); err != nil {
+		t.Fatalf("show after: %v", err)
+	}
+	if after != before {
+		t.Fatalf("statement_timeout leaked onto the pooled connection: %q, want %q", after, before)
+	}
+	// And the default-budget store answers the same search.
+	if _, err := inbox.NewPgStore(pool).SearchThreads(ctx, f.ws, inbox.SearchFilter{Text: token}); err != nil {
+		t.Fatalf("default timeout: %v", err)
 	}
 }
 
@@ -461,18 +561,17 @@ func TestAHugeMessageBodyStillInsertsAgainstPostgres(t *testing.T) {
 	}
 }
 
-// generatedSearchSQL is the exact statement sqlc generated for
-// SearchInboxThreads, read from the generated file so this test cannot drift
-// from it.
-func generatedSearchSQL(t *testing.T) string {
+// generatedSQL is the exact statement sqlc generated under constant name,
+// read from the generated file so this test cannot drift from it.
+func generatedSQL(t *testing.T, constant string) string {
 	t.Helper()
 	src, err := os.ReadFile("../../platform/db/gen/inboxsearch.sql.go")
 	if err != nil {
 		t.Fatalf("read generated query: %v", err)
 	}
-	m := regexp.MustCompile("(?s)const searchInboxThreads = `(.*?)`").FindSubmatch(src)
+	m := regexp.MustCompile("(?s)const " + constant + " = `(.*?)`").FindSubmatch(src)
 	if m == nil {
-		t.Fatal("searchInboxThreads constant not found in the generated file")
+		t.Fatalf("%s constant not found in the generated file", constant)
 	}
 	return string(m[1])
 }
@@ -506,6 +605,10 @@ func TestSearchQueryUsesTheFullTextIndexesAgainstPostgres(t *testing.T) {
 		  FROM generate_series(1, 2000) g`, []any{f.ws, campaignID}},
 		{`INSERT INTO sequence_step_variants (workspace_id, step_id, label, subject, body_text)
 		  SELECT workspace_id, id, 'B', subject, body_text FROM sequence_steps WHERE campaign_id = $1`, []any{campaignID}},
+		{`INSERT INTO contacts (workspace_id, email)
+		  SELECT $1, md5(g::text) || '@volume.test' FROM generate_series(1, 5000) g`, []any{f.ws}},
+		{`UPDATE inbox_messages SET from_email = md5(id::text) || '@sender.test' WHERE thread_id = $1`, []any{th.ID}},
+		{`ANALYZE contacts`, nil},
 		{`ANALYZE inbox_messages`, nil},
 		{`ANALYZE sequence_steps`, nil},
 		{`ANALYZE sequence_step_variants`, nil},
@@ -514,23 +617,52 @@ func TestSearchQueryUsesTheFullTextIndexesAgainstPostgres(t *testing.T) {
 			t.Fatalf("seed volume (%.40s…): %v", stmt.sql, err)
 		}
 	}
-	// Argument order is SearchInboxThreadsParams' field order, which is the
-	// order the generated function binds them in.
-	rows, err := tx.Query(ctx, "EXPLAIN "+generatedSearchSQL(t),
-		"\uE000", "\uE001", "pricing", f.ws, nil, nil, nil, nil, false, nil, false, false, false, nil, int32(26))
-	if err != nil {
-		t.Fatalf("explain: %v", err)
-	}
-	lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		t.Fatalf("collect plan: %v", err)
-	}
-	plan := strings.Join(lines, "\n")
-	for _, index := range []string{"idx_inbox_messages_search", "idx_sequence_steps_search", "idx_sequence_step_variants_search"} {
-		if !strings.Contains(plan, index) {
-			t.Errorf("plan does not use %s:\n%s", index, plan)
+	// The address predicates are exercised too, so their trigram indexes are
+	// asserted alongside the full-text ones.
+	pattern := "pricing"
+	for _, stmt := range []struct {
+		constant string
+		params   any
+	}{
+		{"inboxSearchPrecheck", gen.InboxSearchPrecheckParams{
+			WorkspaceID: f.ws, Query: "pricing", CandidateCap: inbox.MaxSearchCandidates + 1, AddressPattern: &pattern,
+		}},
+		{"searchInboxThreads", gen.SearchInboxThreadsParams{
+			HighlightStart: "\uE000", HighlightStop: "\uE001", Query: "pricing", WorkspaceID: f.ws,
+			CandidateCap: inbox.MaxSearchCandidates + 1, AddressPattern: &pattern, PageLimit: 26,
+		}},
+	} {
+		rows, err := tx.Query(ctx, "EXPLAIN "+generatedSQL(t, stmt.constant), paramArgs(stmt.params)...)
+		if err != nil {
+			t.Fatalf("explain %s: %v", stmt.constant, err)
+		}
+		lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatalf("collect %s plan: %v", stmt.constant, err)
+		}
+		plan := strings.Join(lines, "\n")
+		for _, index := range []string{
+			"idx_inbox_messages_search", "idx_sequence_steps_search", "idx_sequence_step_variants_search",
+			"idx_contacts_search", "idx_inbox_messages_from_email_search",
+		} {
+			if !strings.Contains(plan, index) {
+				t.Errorf("%s plan does not use %s:\n%s", stmt.constant, index, plan)
+			}
 		}
 	}
+}
+
+// paramArgs flattens a sqlc params struct into positional arguments in field
+// order — the order the generated function binds them in — so the EXPLAIN
+// above cannot silently bind a value to the wrong placeholder when sqlc
+// reorders the struct.
+func paramArgs(params any) []any {
+	v := reflect.ValueOf(params)
+	args := make([]any, v.NumField())
+	for i := range args {
+		args[i] = v.Field(i).Interface()
+	}
+	return args
 }
 
 // The migration's down path must actually reverse it, and up must re-apply

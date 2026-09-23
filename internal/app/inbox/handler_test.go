@@ -64,7 +64,7 @@ func do(t *testing.T, h *inbox.Handler, method, target, body, authz string) *htt
 	root := chi.NewRouter()
 	// nil throttle: these tests assert routing/authz/status mapping, not rate
 	// limiting (which has its own tests over the real Redis-backed limiter).
-	root.Mount("/inbox", h.Routes(nil))
+	root.Mount("/inbox", h.Routes(inbox.RouteThrottles{}))
 	w := httptest.NewRecorder()
 	auth.RequireAuth(auth.NewJWTVerifier(testSecret))(root).ServeHTTP(w, r)
 	return w

@@ -10,6 +10,9 @@ import (
 func TestHighlightSegments(t *testing.T) {
 	m := func(s string) HighlightSegment { return HighlightSegment{Text: s, Match: true} }
 	p := func(s string) HighlightSegment { return HighlightSegment{Text: s} }
+	// Cases are written with [ and ] standing for the start/stop markers, which
+	// are invisible private-use code points.
+	markers := strings.NewReplacer("[", highlightStart, "]", highlightStop)
 	cases := []struct {
 		name   string
 		marked string
@@ -17,17 +20,17 @@ func TestHighlightSegments(t *testing.T) {
 	}{
 		{"empty", "", nil},
 		{"no match", "plain text", []HighlightSegment{p("plain text")}},
-		{"one match mid-text", "our pricing is fair", []HighlightSegment{p("our "), m("pricing"), p(" is fair")}},
-		{"match at both ends", "a b c", []HighlightSegment{m("a"), p(" b "), m("c")}},
-		{"adjacent matches", "net thirty", []HighlightSegment{m("net"), p(" "), m("thirty")}},
-		{"empty match dropped", "xy", []HighlightSegment{p("x"), p("y")}},
-		{"unterminated match keeps its text", "x tail", []HighlightSegment{p("x "), m("tail")}},
-		{"stray stop marker stripped", "xy", []HighlightSegment{p("xy")}},
-		{"nested start stripped", "ab", []HighlightSegment{m("ab")}},
+		{"one match mid-text", "our [pricing] is fair", []HighlightSegment{p("our "), m("pricing"), p(" is fair")}},
+		{"match at both ends", "[a] b [c]", []HighlightSegment{m("a"), p(" b "), m("c")}},
+		{"adjacent matches", "[net] [thirty]", []HighlightSegment{m("net"), p(" "), m("thirty")}},
+		{"empty match dropped", "x[]y", []HighlightSegment{p("x"), p("y")}},
+		{"unterminated match keeps its text", "x [tail", []HighlightSegment{p("x "), m("tail")}},
+		{"stray stop marker stripped", "x]y", []HighlightSegment{p("xy")}},
+		{"nested start stripped", "[a[b]", []HighlightSegment{m("ab")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := highlightSegments(tc.marked)
+			got := highlightSegments(markers.Replace(tc.marked))
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("highlightSegments(%q) = %#v, want %#v", tc.marked, got, tc.want)
 			}

@@ -2800,7 +2800,7 @@ export type ListInboxThreadsApiArg = {
   replyClass?: string;
   /** Case-insensitive substring search against the thread's subject or its linked contact's email. LIKE metacharacters (% and _) are matched literally, not as wildcards. */
   q?: string;
-  /** Keyset cursor. Must be set together with before_id, or not at all. */
+  /** Keyset cursor. Must be set together with before_id, or not at all. Use the previous page's last item's last_message_at exactly as returned (it carries sub-second precision); any RFC3339 value, with or without a fractional part, is accepted. */
   beforeLastMessageAt?: string;
   /** Keyset cursor. Must be set together with before_last_message_at, or not at all. */
   beforeId?: string;
@@ -4786,6 +4786,7 @@ export type InboxThreadSummary = {
   /** The workspace reply label resolved from last_reply_class for display, or null when the key no longer matches a label (readers degrade to the raw last_reply_class key). */
   reply_label: InboxReplyLabelRef | null;
   unread: boolean;
+  /** RFC3339 with fractional seconds to microsecond precision (e.g. 2026-09-01T12:00:00.250007Z; trailing zeros are dropped). Pass it back VERBATIM as listInboxThreads' before_last_message_at — reformatting it to whole seconds would skip threads that share that second. */
   last_message_at: string;
 };
 export type InboxThreadPage = {
@@ -4808,9 +4809,9 @@ export type InboxSearchSnippet = {
 };
 export type InboxSearchHit = {
   thread: InboxThreadSummary;
-  /** Which leg(s) of the thread matched, always non-empty and in this order: `inbound` (the contact's replies), `outbound` (anything sent on the thread — campaign steps and manual replies). */
-  matched_legs: ("inbound" | "outbound")[];
-  /** The newest matching message on the thread, highlighted. Null only if it could not be re-derived for a matched thread, which should not happen; render the thread without a snippet rather than dropping it. */
+  /** Why the thread matched, always non-empty and in this order: `inbound` (text in the contact's replies), `outbound` (text in anything sent on the thread — campaign steps and manual replies), `contact` (the query is a substring of the thread's contact's email, or of the From address of one of its inbound messages). */
+  matched_legs: ("inbound" | "outbound" | "contact")[];
+  /** The newest message whose text matched, highlighted. For a thread matched only by address (`matched_legs` is just `contact`), the thread's newest message on either leg, with no highlighted run. Null only for a thread with no message at all; render the thread without a snippet rather than dropping it. */
   snippet: InboxSearchSnippet | null;
 };
 export type InboxSearchPage = {

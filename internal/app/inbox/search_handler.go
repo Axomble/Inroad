@@ -40,10 +40,13 @@ type searchPageResponse struct {
 	NextCursor *string             `json:"next_cursor"`
 }
 
-// The leg names matched_legs reports, in this fixed order.
+// The names matched_legs reports, in this fixed order. inbound/outbound are
+// the legs whose TEXT matched; contact means the query matched an address —
+// the thread's contact's email or an inbound message's From address.
 const (
 	legInbound  = "inbound"
 	legOutbound = "outbound"
+	legContact  = "contact"
 )
 
 // search handles GET /inbox/search.
@@ -109,12 +112,15 @@ func toSearchPageResponse(page SearchPage) searchPageResponse {
 }
 
 func toSearchHitResponse(hit SearchHit) searchHitResponse {
-	legs := make([]string, 0, 2)
+	legs := make([]string, 0, 3)
 	if hit.MatchedInbound {
 		legs = append(legs, legInbound)
 	}
 	if hit.MatchedOutbound {
 		legs = append(legs, legOutbound)
+	}
+	if hit.MatchedAddress {
+		legs = append(legs, legContact)
 	}
 	out := searchHitResponse{Thread: toThreadSummaryResponse(hit.Thread), MatchedLegs: legs}
 	if s := hit.Snippet; s != nil {

@@ -1,6 +1,19 @@
 package inbox
 
-import "time"
+import (
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// NewPgStoreWithSearchTimeout is NewPgStore with the search statement_timeout
+// overridden, so an integration test can drive the timeout path without
+// seeding enough data to make a real search slow.
+func NewPgStoreWithSearchTimeout(pool *pgxpool.Pool, timeout time.Duration) *PgStore {
+	s := NewPgStore(pool)
+	s.searchTimeout = timeout
+	return s
+}
 
 // This file exposes internals to the package's external test package
 // (inbox_test), the standard Go seam for testing an unexported unit without

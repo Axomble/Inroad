@@ -3057,7 +3057,11 @@ paths:
         - name: before_last_message_at
           in: query
           required: false
-          description: Keyset cursor. Must be set together with before_id, or not at all.
+          description: >-
+            Keyset cursor. Must be set together with before_id, or not at all.
+            Use the previous page's last item's last_message_at exactly as
+            returned (it carries sub-second precision); any RFC3339 value,
+            with or without a fractional part, is accepted.
           schema: { type: string, format: date-time }
         - name: before_id
           in: query
@@ -3130,6 +3134,13 @@ paths:
         with English stemming ("meetings" finds "meeting").
 
 
+        A query of 3 or more characters ALSO matches, case-insensitively as a
+        substring, the thread's contact's email and the From address of its
+        inbound messages — so typing "jo@acme.com" or "acme.com" finds the
+        thread even when neither appears in any message text. Such hits report
+        `contact` in matched_legs.
+
+
         Results are ordered newest first (last_message_at, then id), like
         listInboxThreads — not by relevance. Page forward with next_cursor.
 
@@ -3140,9 +3151,14 @@ paths:
         INCLUDED unless scope is `snoozed` (which restricts to them).
 
 
-        A query with no searchable words (only stop words such as "the", or only
-        punctuation) is not an error; it matches nothing and returns an empty
-        page.
+        Search work is bounded. A query must contain at least one word to look
+        for: one made only of common words ("the"), punctuation, or exclusions
+        ("-foo", "foo OR -bar") is a 400. A query matching more than 10,000
+        messages, campaign steps, contact emails or inbound From addresses in
+        the workspace (each counted separately) is a 422 — refused
+        rather than answered from an arbitrary subset; add words to narrow it.
+        A search the server cancels for running too long is a 503. The endpoint
+        is rate-limited per IP and per workspace (429 with Retry-After).
       parameters:
         - name: q
           in: query
@@ -3199,8 +3215,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InboxSearchPage' }
-        '400': { description: "Missing, blank, over-long or malformed q; a malformed or foreign cursor; or a malformed filter (as listInboxThreads)" }
+        '400': { description: "Missing, blank, over-long or malformed q; a q with no word to look for (only common words, punctuation or exclusions); a malformed or foreign cursor; or a malformed filter (as listInboxThreads)" }
         '401': { description: Unauthorized }
+        '422': { description: "The query matches more than 10,000 messages, campaign steps, contact emails or inbound From addresses; narrow it" }
+        '429': { description: "Rate limited, per IP or per workspace; see Retry-After" }
+        '503': { description: "The search ran past the server's time limit and was cancelled; a more specific query will likely succeed" }
   /inbox/overview:
     get:
       operationId: getInboxOverview
@@ -7239,7 +7258,14 @@ components:
             display, or null when the key no longer matches a label (readers
             degrade to the raw last_reply_class key).
         unread: { type: boolean }
-        last_message_at: { type: string, format: date-time }
+        last_message_at:
+          type: string
+          format: date-time
+          description: >-
+            RFC3339 with fractional seconds to microsecond precision (e.g.
+            2026-09-01T12:00:00.250007Z; trailing zeros are dropped). Pass it back
+            VERBATIM as listInboxThreads' before_last_message_at — reformatting it
+            to whole seconds would skip threads that share that second.
     InboxReplyLabelRef:
       type: object
       required: [key, label, color]
@@ -7284,18 +7310,22 @@ components:
         matched_legs:
           type: array
           description: >-
-            Which leg(s) of the thread matched, always non-empty and in this
-            order: `inbound` (the contact's replies), `outbound` (anything sent
-            on the thread — campaign steps and manual replies).
-          items: { type: string, enum: [inbound, outbound] }
+            Why the thread matched, always non-empty and in this order:
+            `inbound` (text in the contact's replies), `outbound` (text in
+            anything sent on the thread — campaign steps and manual replies),
+            `contact` (the query is a substring of the thread's contact's email,
+            or of the From address of one of its inbound messages).
+          items: { type: string, enum: [inbound, outbound, contact] }
         snippet:
           type: object
           allOf: [{ $ref: '#/components/schemas/InboxSearchSnippet' }]
           nullable: true
           description: >-
-            The newest matching message on the thread, highlighted. Null only if
-            it could not be re-derived for a matched thread, which should not
-            happen; render the thread without a snippet rather than dropping it.
+            The newest message whose text matched, highlighted. For a thread
+            matched only by address (`matched_legs` is just `contact`), the
+            thread's newest message on either leg, with no highlighted run. Null
+            only for a thread with no message at all; render the thread without
+            a snippet rather than dropping it.
     InboxSearchSnippet:
       type: object
       required: [direction, occurred_at, subject, body]

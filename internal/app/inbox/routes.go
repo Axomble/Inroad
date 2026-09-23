@@ -25,10 +25,10 @@ import (
 // belongs behind the same non-OAuth-grantable authority as the send itself: a
 // read-only third-party integration must not be able to burn tokens.
 //
-// draftThrottle rate-limits that spend (per-IP and per-workspace). It is
-// nil-safe so a test can mount the router without a Redis-backed limiter;
-// cmd/inroad always passes one.
-func (h *Handler) Routes(draftThrottle func(http.Handler) http.Handler) http.Handler {
+// throttles.DraftReply rate-limits that spend (per-IP and per-workspace).
+// Every throttle is nil-safe so a test can mount the router without a
+// Redis-backed limiter; cmd/inroad always passes both.
+func (h *Handler) Routes(throttles RouteThrottles) http.Handler {
 	r := chi.NewRouter()
 	read := auth.RequireScope(auth.ScopeInboxRead)
 	write := auth.RequireScope(auth.ScopeInboxWrite)
@@ -37,13 +37,12 @@ func (h *Handler) Routes(draftThrottle func(http.Handler) http.Handler) http.Han
 	r.With(read).Get("/threads", h.list)
 	r.With(read).Get("/threads/{id}", h.get)
 	// Full-text search reads exactly what the list and reader already expose,
-	// so it is inbox:read like them.
-	r.With(read).Get("/search", h.search)
+	// so it is inbox:read like them. It is throttled where the list is not
+	// because each call does bounded-but-real text matching work over content
+	// external senders control; see security.md's inbox-search invariant.
+	r.With(withThrottle(read, throttles.Search)...).Get("/search", h.search)
 	r.With(send).Post("/threads/{id}/reply", h.reply)
-	draft := []func(http.Handler) http.Handler{send}
-	if draftThrottle != nil {
-		draft = append(draft, draftThrottle)
-	}
+	draft := withThrottle(send, throttles.DraftReply)
 	r.With(draft...).Post("/threads/{id}/draft-reply", h.draftReply)
 	r.With(write).Put("/threads/{id}/read", h.setRead)
 	// Snoozing is inbox:write, not inbox:send: it changes triage state and
@@ -83,4 +82,24 @@ func (h *Handler) Routes(draftThrottle func(http.Handler) http.Handler) http.Han
 	r.With(read).Get("/composes", h.listPendingComposes)
 	r.With(send).Delete("/composes/{pendingId}", h.cancelPendingCompose)
 	return r
+}
+
+// RouteThrottles are the rate limits the inbox router applies, each nil-safe
+// (nil means unthrottled). An options struct rather than positional parameters
+// so a new one cannot be passed in the wrong slot.
+type RouteThrottles struct {
+	// DraftReply bounds AI drafting spend.
+	DraftReply func(http.Handler) http.Handler
+	// Search bounds full-text search work, per IP and per workspace.
+	Search func(http.Handler) http.Handler
+}
+
+// withThrottle is the middleware chain for a route: its scope check, then its
+// throttle when one is configured. The scope check runs first so a caller
+// without the scope is refused without spending a throttle token.
+func withThrottle(scope, throttle func(http.Handler) http.Handler) []func(http.Handler) http.Handler {
+	if throttle == nil {
+		return []func(http.Handler) http.Handler{scope}
+	}
+	return []func(http.Handler) http.Handler{scope, throttle}
 }

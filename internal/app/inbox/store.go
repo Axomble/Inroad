@@ -253,6 +253,9 @@ func NormalizeLimit(requested int32) int32 {
 type PgStore struct {
 	pool *pgxpool.Pool
 	q    *gen.Queries
+	// searchTimeout overrides DefaultSearchTimeout; zero means the default.
+	// Only tests set it (see export_test.go), to drive the timeout path.
+	searchTimeout time.Duration
 }
 
 // NewPgStore builds a PgStore over pool.
