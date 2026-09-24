@@ -27,6 +27,15 @@ func (h *Handler) Register(r chi.Router) {
 	r.With(write).Put("/{id}/steps/{stepId}", h.Update)
 	r.With(write).Delete("/{id}/steps/{stepId}", h.Delete)
 
+	// Conditional branching. The graph read is the whole campaign's routing in
+	// one response; a branch is written per step, nested under the step it
+	// routes out of so the ownership check has the step id without trusting the
+	// body. Writes take campaigns:write and, like variant writes, are allowed on
+	// a running campaign — see Service.SetBranch for the mid-flight contract.
+	r.With(read).Get("/{id}/graph", h.Graph)
+	r.With(write).Put("/{id}/steps/{stepId}/branch", h.SetBranch)
+	r.With(write).Delete("/{id}/steps/{stepId}/branch", h.DeleteBranch)
+
 	// A/B variants. Nested under the step they belong to: a variant has no
 	// meaning apart from its step, and the nesting is what makes the step id
 	// available for the ownership check without trusting the body.

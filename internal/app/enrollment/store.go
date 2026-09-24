@@ -33,6 +33,14 @@ type Store interface {
 	SetDue(ctx context.Context, ws, id uuid.UUID, nextDueAt time.Time) error
 	// SetThreadRoot stores step 1's Message-ID once (while still empty).
 	SetThreadRoot(ctx context.Context, ws, id uuid.UUID, messageID string) error
+	// Finish completes an active enrollment WITHOUT a send (a branch routed it
+	// to the end of its path): current_step and last_sent_at are left alone.
+	// Guarded on status='active' like Complete.
+	Finish(ctx context.Context, ws, id uuid.UUID) error
+	// AwaitCondition re-stamps next_due_at for an active enrollment whose next
+	// move waits on a branch condition, and records that the wait is a
+	// condition's (awaiting_condition_step = current_step).
+	AwaitCondition(ctx context.Context, ws, id uuid.UUID, recheckAt time.Time) error
 	CountByStatus(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error)
 }
 
@@ -71,6 +79,14 @@ func (s *PgStore) SetDue(ctx context.Context, ws, id uuid.UUID, nextDueAt time.T
 }
 func (s *PgStore) SetThreadRoot(ctx context.Context, ws, id uuid.UUID, messageID string) error {
 	return s.q.SetThreadRoot(ctx, gen.SetThreadRootParams{ID: id, WorkspaceID: ws, ThreadRootID: messageID})
+}
+func (s *PgStore) Finish(ctx context.Context, ws, id uuid.UUID) error {
+	return s.q.FinishEnrollment(ctx, gen.FinishEnrollmentParams{ID: id, WorkspaceID: ws})
+}
+func (s *PgStore) AwaitCondition(ctx context.Context, ws, id uuid.UUID, recheckAt time.Time) error {
+	return s.q.AwaitEnrollmentCondition(ctx, gen.AwaitEnrollmentConditionParams{
+		ID: id, WorkspaceID: ws, NextDueAt: tsz(recheckAt),
+	})
 }
 func (s *PgStore) CountByStatus(ctx context.Context, ws, campaignID uuid.UUID) (map[string]int64, error) {
 	rows, err := s.q.CountEnrollmentsByStatus(ctx, gen.CountEnrollmentsByStatusParams{CampaignID: campaignID, WorkspaceID: ws})

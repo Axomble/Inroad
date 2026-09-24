@@ -2269,21 +2269,51 @@ write history that never happened.
     at least one dot) rather than stripping characters: a name carrying CRLF
     would be SMTP command injection. Anything that does not validate yields `""`
     and go-mail's default is kept.
+## Conditional branching (sequence step routing)
+86. **A branch predicate reads the stored HUMAN verdict, and nothing else.**
+    `opened`/`clicked` conditions (`FirstHumanTrackingEventAt`,
+    `internal/platform/db/queries/stepbranch.sql`) filter
+    `kind = ... AND NOT is_machine` on the cursor step's OWN deterministic send
+    id, the same definition `CountHumanOpens` reports, so a branch and the open
+    rate cannot disagree about a contact and a scanner's prefetch cannot fire an
+    "if opened" branch. Two cautions carry over from invariant 63: a `human`
+    verdict is only "not obviously a machine", so a branch whose wrong side is
+    expensive should prefer the negative path; and rows recorded before the
+    classification migration are all marked human, so a branch evaluated over old
+    history can over-fire. A reply condition counts inbound `inbox_messages` by
+    `created_at` (when WE ingested it), never the sender-controlled `Date`
+    header, and excludes automated labels unless one is named explicitly.
+
+    **Reply evidence is thread-scoped, not sender-verified.** A reply counts
+    because the inbox poller matched it to one of this campaign's sends by its
+    In-Reply-To/References headers and stored it on the enrollment's campaign +
+    contact thread — the same matching MarkReplied uses. Nothing proves the
+    CONTACT wrote it: anyone who knows a real Message-ID of a send can place a
+    message in that thread (the within-workspace spoofing gap listed under
+    Deferred). The blast radius is the same as that gap's and no wider: it can
+    route one enrollment of the workspace down a branch it could already be
+    routed down, and it cannot reach another tenant, suppress anything, or make
+    a stopping label's reply do anything but stop.
+
+    **Tenancy.** Every branch read and write is `workspace_id`-pinned, and every
+    step reference (source and both exits) is a composite FK on
+    `(id, campaign_id)` with `(campaign_id, workspace_id)` pinned to `campaigns`,
+    so a branch pointing into another campaign or tenant is unrepresentable even
+    for a write that skips the service. Graph writes (branch upsert/delete, step
+    delete, reorder) run under a per-campaign `FOR NO KEY UPDATE` lock that
+    matches zero rows for a foreign workspace (404) and re-validate acyclicity
+    inside the transaction. The send path has a runtime loop backstop that ends
+    the path rather than recovering-forward forever.
+
+    **A branch never overrides reply-label automation.** A reply whose label
+    stops the enrollment still stops it; compliance dispatch (invariants 20, 45)
+    is untouched. A branch only routes enrollments the labels leave active, and
+    the save path refuses a reply branch that names a stopping label
+    (`reply_label_stops_sequence`), since it could never fire. A paused, draft
+    or done campaign's enrollments are not routed at all: the not-running gate
+    runs BEFORE routing, so a hold never finishes or parks an enrollment.
 
 ## Deferred (documented, not yet built)
-- **Conditional branching on a sequence step must gate on HUMAN events only**
-  (invariant 63). This is written down BEFORE the feature exists because getting
-  it wrong is silent: a scanner's prefetch would fire an "if opened" branch and
-  send the contact the wrong follow-up, with nothing in the UI to show that a bot
-  rewrote a real sequence. A branch predicate must read the stored verdict —
-  `... AND kind = 'open' AND NOT is_machine`, the same filter `CountHumanOpens`
-  uses — and must never re-derive its own definition of an open, or the branch
-  and the reported open rate will disagree about the same contact. Two further
-  cautions: a `human` verdict is "not obviously a machine", so a branch whose
-  wrong side is expensive or irreversible should prefer the negative path; and
-  because the verdict is computed once at write time, rows recorded before that
-  migration are all marked human and a branch reading old history will
-  over-fire.
 - Datacenter/cloud IP ranges as a refreshed table (AWS/GCP/Azure publish
   machine-readable lists; Apple's MPP relay egress likewise). `botfilter`'s
   compiled-in range list covers only what is knowable from the address itself,

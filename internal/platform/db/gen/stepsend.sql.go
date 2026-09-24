@@ -102,6 +102,7 @@ func (q *Queries) ClaimStepSend(ctx context.Context, arg ClaimStepSendParams) (C
 const getStepEnrollmentBundle = `-- name: GetStepEnrollmentBundle :one
 SELECT e.id AS enrollment_id, e.workspace_id, e.contact_id, e.current_step,
        e.status, e.thread_root_id, e.next_due_at, e.mailbox_id AS enrollment_mailbox_id,
+       e.last_sent_at, e.awaiting_condition_step,
        cam.id AS campaign_id, cam.rotation_mode, cam.tracking_enabled, cam.timezone,
        cam.daily_limit, cam.max_new_leads_per_day, cam.status AS campaign_status,
        ct.email AS to_email, ct.first_name, ct.last_name, ct.company, ct.custom_fields,
@@ -122,41 +123,43 @@ type GetStepEnrollmentBundleParams struct {
 }
 
 type GetStepEnrollmentBundleRow struct {
-	EnrollmentID        uuid.UUID          `json:"enrollment_id"`
-	WorkspaceID         uuid.UUID          `json:"workspace_id"`
-	ContactID           uuid.UUID          `json:"contact_id"`
-	CurrentStep         int32              `json:"current_step"`
-	Status              string             `json:"status"`
-	ThreadRootID        string             `json:"thread_root_id"`
-	NextDueAt           pgtype.Timestamptz `json:"next_due_at"`
-	EnrollmentMailboxID pgtype.UUID        `json:"enrollment_mailbox_id"`
-	CampaignID          uuid.UUID          `json:"campaign_id"`
-	RotationMode        string             `json:"rotation_mode"`
-	TrackingEnabled     bool               `json:"tracking_enabled"`
-	Timezone            string             `json:"timezone"`
-	DailyLimit          *int32             `json:"daily_limit"`
-	MaxNewLeadsPerDay   *int32             `json:"max_new_leads_per_day"`
-	CampaignStatus      string             `json:"campaign_status"`
-	ToEmail             string             `json:"to_email"`
-	FirstName           string             `json:"first_name"`
-	LastName            string             `json:"last_name"`
-	Company             string             `json:"company"`
-	CustomFields        []byte             `json:"custom_fields"`
-	MailboxID           uuid.UUID          `json:"mailbox_id"`
-	Provider            string             `json:"provider"`
-	FromEmail           string             `json:"from_email"`
-	FromName            string             `json:"from_name"`
-	SmtpHost            string             `json:"smtp_host"`
-	SmtpPort            int32              `json:"smtp_port"`
-	SmtpUsername        string             `json:"smtp_username"`
-	SecretCiphertext    string             `json:"secret_ciphertext"`
-	AllowPlaintext      bool               `json:"allow_plaintext"`
-	DailyCap            int32              `json:"daily_cap"`
-	MinIntervalSeconds  int32              `json:"min_interval_seconds"`
-	RampEnabled         bool               `json:"ramp_enabled"`
-	RampStartCap        int32              `json:"ramp_start_cap"`
-	RampDays            int32              `json:"ramp_days"`
-	MailboxCreatedAt    pgtype.Timestamptz `json:"mailbox_created_at"`
+	EnrollmentID          uuid.UUID          `json:"enrollment_id"`
+	WorkspaceID           uuid.UUID          `json:"workspace_id"`
+	ContactID             uuid.UUID          `json:"contact_id"`
+	CurrentStep           int32              `json:"current_step"`
+	Status                string             `json:"status"`
+	ThreadRootID          string             `json:"thread_root_id"`
+	NextDueAt             pgtype.Timestamptz `json:"next_due_at"`
+	EnrollmentMailboxID   pgtype.UUID        `json:"enrollment_mailbox_id"`
+	LastSentAt            pgtype.Timestamptz `json:"last_sent_at"`
+	AwaitingConditionStep *int32             `json:"awaiting_condition_step"`
+	CampaignID            uuid.UUID          `json:"campaign_id"`
+	RotationMode          string             `json:"rotation_mode"`
+	TrackingEnabled       bool               `json:"tracking_enabled"`
+	Timezone              string             `json:"timezone"`
+	DailyLimit            *int32             `json:"daily_limit"`
+	MaxNewLeadsPerDay     *int32             `json:"max_new_leads_per_day"`
+	CampaignStatus        string             `json:"campaign_status"`
+	ToEmail               string             `json:"to_email"`
+	FirstName             string             `json:"first_name"`
+	LastName              string             `json:"last_name"`
+	Company               string             `json:"company"`
+	CustomFields          []byte             `json:"custom_fields"`
+	MailboxID             uuid.UUID          `json:"mailbox_id"`
+	Provider              string             `json:"provider"`
+	FromEmail             string             `json:"from_email"`
+	FromName              string             `json:"from_name"`
+	SmtpHost              string             `json:"smtp_host"`
+	SmtpPort              int32              `json:"smtp_port"`
+	SmtpUsername          string             `json:"smtp_username"`
+	SecretCiphertext      string             `json:"secret_ciphertext"`
+	AllowPlaintext        bool               `json:"allow_plaintext"`
+	DailyCap              int32              `json:"daily_cap"`
+	MinIntervalSeconds    int32              `json:"min_interval_seconds"`
+	RampEnabled           bool               `json:"ramp_enabled"`
+	RampStartCap          int32              `json:"ramp_start_cap"`
+	RampDays              int32              `json:"ramp_days"`
+	MailboxCreatedAt      pgtype.Timestamptz `json:"mailbox_created_at"`
 }
 
 // Everything needed to build one step-send job, workspace-pinned. Joins the
@@ -188,6 +191,8 @@ func (q *Queries) GetStepEnrollmentBundle(ctx context.Context, arg GetStepEnroll
 		&i.ThreadRootID,
 		&i.NextDueAt,
 		&i.EnrollmentMailboxID,
+		&i.LastSentAt,
+		&i.AwaitingConditionStep,
 		&i.CampaignID,
 		&i.RotationMode,
 		&i.TrackingEnabled,
@@ -221,14 +226,15 @@ func (q *Queries) GetStepEnrollmentBundle(ctx context.Context, arg GetStepEnroll
 
 const latestSentForContact = `-- name: LatestSentForContact :one
 SELECT message_id, references_header FROM sends
-WHERE campaign_id = $1 AND contact_id = $2 AND status = 'sent'
-ORDER BY step_order DESC
+WHERE campaign_id = $1 AND contact_id = $2 AND workspace_id = $3 AND status = 'sent'
+ORDER BY sent_at DESC NULLS LAST, step_order DESC
 LIMIT 1
 `
 
 type LatestSentForContactParams struct {
-	CampaignID uuid.UUID `json:"campaign_id"`
-	ContactID  uuid.UUID `json:"contact_id"`
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	ContactID   uuid.UUID `json:"contact_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
 }
 
 type LatestSentForContactRow struct {
@@ -238,8 +244,18 @@ type LatestSentForContactRow struct {
 
 // The most recent successfully-sent step for a (campaign, contact), used to
 // thread the next step (In-Reply-To = its message_id; References = its chain).
+//
+// "Most recent" is by sent_at, with step_order only as the tie-break. On a linear
+// sequence the two orders are the same (steps send in step_order), but a branched
+// path need not visit steps in step_order — 1 → 3 → 2 is a valid path — and
+// threading onto the highest-numbered step would reply to a message that is not
+// the latest one the contact received.
+//
+// Workspace-pinned like every other tenant read, even though (campaign_id,
+// contact_id) already came from a workspace-scoped bundle: the pin costs nothing
+// and keeps this from depending on its caller's discipline.
 func (q *Queries) LatestSentForContact(ctx context.Context, arg LatestSentForContactParams) (LatestSentForContactRow, error) {
-	row := q.db.QueryRow(ctx, latestSentForContact, arg.CampaignID, arg.ContactID)
+	row := q.db.QueryRow(ctx, latestSentForContact, arg.CampaignID, arg.ContactID, arg.WorkspaceID)
 	var i LatestSentForContactRow
 	err := row.Scan(&i.MessageID, &i.ReferencesHeader)
 	return i, err
