@@ -3,6 +3,9 @@ package mail
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -333,6 +336,41 @@ func TestGraphResyncRequired(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := graphResyncRequired(strings.NewReader(tc.body)); got != tc.want {
 				t.Fatalf("graphResyncRequired(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// A Graph status the poller must ACT on has to arrive as DATA, not as a
+// sentence. 401 (a revoked token) and 503 (come back later) want opposite
+// handling from the inbox poll backoff — straight to the cap versus the
+// widening ladder — and the only thing that can tell them apart is the status
+// carried on *APIError. Until this, the delta path reported both as
+// fmt.Errorf("unexpected status %d"), which classified as unknown.
+//
+// graphDelta is called directly rather than through Fetch because Fetch
+// host-pins the cursor to graph.microsoft.com before dialing it (docs/security.md
+// invariant 13), which an httptest server cannot satisfy — and must not be able to.
+func TestGraphDeltaStatusIsCarriedAsDataNotProse(t *testing.T) {
+	for _, status := range []int{401, 403, 429, 500, 503} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			_, _, _, err := graphDelta(t.Context(), srv.Client(), "s3cret-token", srv.URL)
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("graphDelta returned %v (%T), want an *APIError", err, err)
+			}
+			if apiErr.Status != status {
+				t.Errorf("status = %d, want %d", apiErr.Status, status)
+			}
+			// The error text must not echo the bearer or the provider's body:
+			// Graph puts request content in its error bodies (see the APIError doc).
+			if strings.Contains(apiErr.Error(), "s3cret-token") {
+				t.Errorf("the error carries the bearer token: %q", apiErr.Error())
 			}
 		})
 	}
