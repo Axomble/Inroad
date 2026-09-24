@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"net/smtp"
 	"time"
 
 	"github.com/emersion/go-imap/client"
@@ -31,64 +30,42 @@ func NewNetTester(allowPrivate bool) *NetTester {
 // zero value), so a hung IMAP server can never block a caller forever.
 const defaultIMAPTimeout = 30 * time.Second
 
-// TestSMTP dials the SMTP server, negotiates TLS, and authenticates — without
-// sending any mail. TLS is enforced by default (security Invariant 6): port 465
-// uses implicit TLS, every other port requires STARTTLS — cleartext auth is
-// permitted ONLY when cfg.AllowPlaintext is explicitly set.
+// TestSMTP dials the SMTP server, greets it, negotiates TLS, and authenticates —
+// without sending any mail. TLS is enforced by default (security Invariant 6):
+// port 465 uses implicit TLS, every other port requires STARTTLS — cleartext
+// auth is permitted ONLY when cfg.AllowPlaintext is explicitly set.
+//
+// It dials through newSMTPClient, the SAME client NetSender.Send uses, so a
+// passing connection test means a send would get as far as DATA. That was not
+// true before: this ran on stdlib net/smtp with smtp.PlainAuth and skipped AUTH
+// entirely when the username was empty, while the sender spoke gomail and always
+// authenticated. A relay that needs no AUTH therefore tested clean and failed
+// every send, and a server offering only AUTH LOGIN failed BOTH — but only one
+// of them where an operator could see it.
+//
+// ctx cancels the dial and everything after it (DialWithContext), which matters
+// because this runs on an HTTP request: a caller who has disconnected should not
+// leave us holding a conversation with a stranger's server for the full timeout.
 func (t *NetTester) TestSMTP(ctx context.Context, cfg SMTPConfig) error {
 	addr, err := vetAddr(ctx, cfg.Host, cfg.Port, allowedSMTPPorts, t.AllowPrivate)
 	if err != nil {
 		return err
 	}
 
-	// DialContext rather than a bare timeout: this runs on an HTTP request, and a
-	// caller who has disconnected should not leave us holding a half-open dial to a
-	// stranger's server for the full t.Timeout. The timeout stays as the ceiling for
-	// a caller who is still waiting.
+	// The connect-test is a control-plane dial (cmd/inroad), not a worker egress
+	// dial, so it binds no source address.
 	dialer := &net.Dialer{Timeout: t.Timeout}
-	conn, derr := dialSMTPTransport(ctx, addr, dialer)
-	if derr != nil {
-		return fmt.Errorf("smtp dial: %w", derr)
-	}
-	if cfg.Port == 465 {
-		conn, derr = smtpImplicitTLS(ctx, conn, cfg.Host)
-		if derr != nil {
-			return fmt.Errorf("smtp dial: %w", derr)
-		}
-	}
-	// Every byte after the dial gets a deadline we chose, refreshed per read and
-	// per write (see newDeadlineConn). net/smtp has no context-aware API and no
-	// per-command timeout of its own, so without this a server that completes the
-	// TCP handshake and then stalls on the greeting, EHLO, STARTTLS or AUTH held
-	// an API request — this runs on one — until the client gave up. The dial
-	// timeout never covered any of that.
-	conn = newDeadlineConn(conn, t.Timeout, defaultSMTPTimeout)
-
-	c, err := smtp.NewClient(conn, cfg.Host)
+	smtpClient, err := newSMTPClient(cfg, t.Timeout, smtpHELO(cfg, ""), smtpDialFunc(addr, dialer))
 	if err != nil {
-		// NewClient reads the server greeting, so it can fail on a connection that
-		// opened fine. Closing here rather than leaking the socket until GC.
-		_ = conn.Close()
-		return fmt.Errorf("smtp client: %w", err)
+		return err
 	}
-	defer c.Close()
-
-	if cfg.Port != 465 && !cfg.AllowPlaintext {
-		if ok, _ := c.Extension("STARTTLS"); ok {
-			if err := c.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
-				return fmt.Errorf("smtp starttls: %w", err)
-			}
-		} else {
-			return fmt.Errorf("smtp server does not advertise STARTTLS but TLS is required (set allow_plaintext to override)")
-		}
+	if err := smtpClient.DialWithContext(ctx); err != nil {
+		return fmt.Errorf("smtp connect: %w", err)
 	}
-
-	if cfg.Username != "" {
-		if err := c.Auth(smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
-		}
+	if err := smtpClient.Close(); err != nil {
+		return fmt.Errorf("smtp quit: %w", err)
 	}
-	return c.Quit()
+	return nil
 }
 
 // TestIMAP dials the IMAP server, negotiates TLS, and logs in, then logs out.

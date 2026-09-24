@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/emersion/go-imap/utf7"
 )
 
 // A scriptable in-process IMAP server.
@@ -92,6 +94,9 @@ type fakeIMAP struct {
 
 	mu       sync.Mutex
 	commands []string
+	// selected is the last mailbox the client SELECTed or EXAMINEd, which is how
+	// a junk-folder test says which folder the resolution chose.
+	selected string
 	// authenticated records whether any connection reached the authenticated
 	// state, so a test can assert the negotiation SUCCEEDED rather than merely
 	// that a particular command was sent.
@@ -187,6 +192,35 @@ func (s *fakeIMAP) inboxName() string {
 		return "INBOX"
 	}
 	return s.script.Inbox
+}
+
+// selectable reports whether name can be SELECTed: the inbox, or any listed
+// mailbox that is not a \Noselect placeholder. Every selectable mailbox serves
+// the same Messages — these tests are about WHICH folder is chosen, not about
+// per-folder contents.
+func (s *fakeIMAP) selectable(name string) bool {
+	if strings.EqualFold(name, s.inboxName()) {
+		return true
+	}
+	for _, m := range s.script.Mailboxes {
+		if !strings.EqualFold(m.Name, name) {
+			continue
+		}
+		for _, a := range m.Attrs {
+			if strings.EqualFold(a, "\\Noselect") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// selectedMailbox returns the last mailbox the client SELECTed or EXAMINEd.
+func (s *fakeIMAP) selectedMailbox() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.selected
 }
 
 // serve runs one connection to completion.
@@ -416,17 +450,46 @@ func (s *fakeIMAP) credentialsOK(user, pass string) bool {
 
 func (c *imapSession) list(tag string) {
 	for _, m := range c.srv.script.Mailboxes {
-		c.send(fmt.Sprintf("* LIST (%s) \"/\" %q", strings.Join(m.Attrs, " "), m.Name))
+		c.send(fmt.Sprintf("* LIST (%s) \"/\" %q", strings.Join(m.Attrs, " "), toUTF7(m.Name)))
 	}
 	c.send(tag + " OK LIST completed")
 }
 
+// toUTF7 encodes a mailbox name the way IMAP4rev1 requires (modified UTF-7,
+// RFC 3501 §5.1.3). Scripts are written in plain UTF-8 — a localized folder
+// name is the point of several tests — and a real server would never put those
+// bytes on the wire raw, so the fake must not either.
+func toUTF7(name string) string {
+	encoded, err := utf7.Encoding.NewEncoder().String(name)
+	if err != nil {
+		return name
+	}
+	return encoded
+}
+
+// fromUTF7 is the inverse, for command arguments the client sends.
+func fromUTF7(name string) string {
+	decoded, err := utf7.Encoding.NewDecoder().String(name)
+	if err != nil {
+		return name
+	}
+	return decoded
+}
+
 func (c *imapSession) selectMailbox(tag, args string, readOnly bool) {
 	fields := imapFields(args)
-	if len(fields) == 0 || !strings.EqualFold(fields[0], c.srv.inboxName()) {
+	if len(fields) == 0 {
+		c.send(tag + " BAD missing mailbox name")
+		return
+	}
+	name := fromUTF7(fields[0])
+	if !c.srv.selectable(name) {
 		c.send(tag + " NO [NONEXISTENT] mailbox does not exist")
 		return
 	}
+	c.srv.mu.Lock()
+	c.srv.selected = name
+	c.srv.mu.Unlock()
 	uidValidity := c.srv.script.UIDValidity
 	if uidValidity == 0 {
 		uidValidity = 1

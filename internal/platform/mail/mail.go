@@ -23,6 +23,15 @@ type SMTPConfig struct {
 	Username       string
 	Password       string
 	AllowPlaintext bool
+	// EHLODomain is the fully qualified name to greet the server with. It exists
+	// for the CONNECTION TEST, which has no message and therefore no From address
+	// to derive one from; a send derives it from the envelope sender instead
+	// (smtpHELO). Empty keeps go-mail's os.Hostname() default.
+	//
+	// It is a domain, not a host: what receivers check is that the greeting is a
+	// fully qualified name belonging to the sender, and heloDomain validates it
+	// as a DNS name before it reaches the wire.
+	EHLODomain string
 }
 
 // IMAPConfig holds the inbound (reply/bounce polling) settings for a mailbox.

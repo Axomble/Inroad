@@ -61,9 +61,19 @@ func NewNetSender(allowPrivate bool) *NetSender {
 // DNS-rebinding window between validation and connection: the underlying
 // gomail client never re-resolves the hostname.
 //
-// ctx bounds the SSRF-vetting DNS lookup only (see vetAddr/dnsLookupTimeout);
-// the dial and send below still run under gomail's own WithTimeout, since
-// gomail's DialAndSend has no context-aware entry point to hand ctx to.
+// ctx bounds the whole exchange, not just the SSRF-vetting DNS lookup: the dial,
+// the greeting, AUTH and DATA all run under DialAndSendWithContext, with gomail's
+// WithTimeout as the ceiling. The comment here used to say gomail had no
+// context-aware entry point; DialAndSendWithContext has existed since well
+// before the version in this module graph, and using DialAndSend meant an
+// abandoned request or a shutting-down worker waited out the full timeout
+// against a stalled server.
+//
+// The EHLO name is the envelope sender's DOMAIN (smtpHELO), not the machine's
+// hostname. go-mail defaults to os.Hostname(), which in a container is a random
+// hex id — and an unqualified, unrelated HELO is what Postfix's
+// reject_non_fqdn_helo_hostname and most commercial filters act on, so the same
+// message that delivers from a laptop is filtered from a deployment.
 func (s *NetSender) Send(ctx context.Context, cfg SMTPConfig, msg Message) (string, error) {
 	addr, err := vetAddr(ctx, cfg.Host, cfg.Port, allowedSMTPPorts, s.AllowPrivate)
 	if err != nil {
@@ -77,40 +87,16 @@ func (s *NetSender) Send(ctx context.Context, cfg SMTPConfig, msg Message) (stri
 
 	dialer := &net.Dialer{Timeout: s.Timeout}
 	if s.LocalAddr != nil {
-		// Bind the source address only; addr (below) is the already-vetted
-		// DESTINATION, so this narrows egress without touching the SSRF vet.
+		// Bind the source address only; addr is the already-vetted DESTINATION,
+		// so this narrows egress without touching the SSRF vet.
 		dialer.LocalAddr = s.LocalAddr
 	}
-	dialFn := func(ctx context.Context, _, _ string) (net.Conn, error) {
-		// Ignore gomail's address argument (built from cfg.Host); always dial the
-		// pre-vetted ip:port instead so hostname re-resolution can't slip in.
-		return dialSMTPTransport(ctx, addr, dialer)
-	}
 
-	opts := []gomail.Option{
-		gomail.WithPort(cfg.Port),
-		gomail.WithUsername(cfg.Username),
-		gomail.WithPassword(cfg.Password),
-		gomail.WithSMTPAuth(gomail.SMTPAuthPlain),
-		gomail.WithTimeout(s.Timeout),
-		gomail.WithDialContextFunc(dialFn),
-	}
-	switch {
-	case cfg.Port == 465:
-		opts = append(opts, gomail.WithSSLPort(false))
-	case cfg.AllowPlaintext:
-		// Explicit, deliberate cleartext opt-out (rare internal relay).
-		opts = append(opts, gomail.WithTLSPolicy(gomail.NoTLS))
-	default:
-		// Secure default: STARTTLS required on 25/587/2525.
-		opts = append(opts, gomail.WithTLSPolicy(gomail.TLSMandatory))
-	}
-
-	client, err := gomail.NewClient(cfg.Host, opts...)
+	client, err := newSMTPClient(cfg, s.Timeout, smtpHELO(cfg, msg.FromEmail), smtpDialFunc(addr, dialer))
 	if err != nil {
-		return "", fmt.Errorf("smtp client: %w", err)
+		return "", err
 	}
-	if err := client.DialAndSend(m); err != nil {
+	if err := client.DialAndSendWithContext(ctx, m); err != nil {
 		return "", fmt.Errorf("send: %w", err)
 	}
 	return m.GetMessageID(), nil

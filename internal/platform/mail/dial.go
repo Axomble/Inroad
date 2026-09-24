@@ -66,30 +66,13 @@ func netDialIMAPTransport(ctx context.Context, addr string, cfg IMAPConfig, dial
 // reason. Everything dialIMAPTransport's SECURITY note says applies verbatim:
 // addr is vetAddr's verdict, reached only after the vet passed.
 //
-// Unlike the IMAP hook this is PLAIN TCP only, because its two callers already
-// own the TLS step and would otherwise double-wrap: the sender hands the conn to
-// gomail, which applies implicit TLS on 465 and STARTTLS elsewhere from its own
-// policy, and TestSMTP wraps 465 itself (see smtpImplicitTLS).
+// Unlike the IMAP hook this is PLAIN TCP only, because its single caller —
+// newSMTPClient's dial func — hands the conn to gomail, which applies implicit
+// TLS on 465 and STARTTLS elsewhere from its own policy and would otherwise
+// double-wrap it.
 var dialSMTPTransport = netDialSMTPTransport
 
 // netDialSMTPTransport is the production dialSMTPTransport.
 func netDialSMTPTransport(ctx context.Context, addr string, dialer *net.Dialer) (net.Conn, error) {
 	return dialer.DialContext(ctx, "tcp", addr)
-}
-
-// smtpImplicitTLS wraps a plain conn in implicit TLS for port 465, where the
-// server expects a handshake before its greeting. serverName stays the caller's
-// hostname even though the conn went to a resolved IP, so the certificate is
-// checked against the name the user typed rather than the address.
-func smtpImplicitTLS(ctx context.Context, conn net.Conn, serverName string) (net.Conn, error) {
-	tlsConn := tls.Client(conn, &tls.Config{ServerName: serverName})
-	// HandshakeContext, not Handshake: a handshake against a server that accepts
-	// the TCP connection and then says nothing is exactly the stall this package
-	// must not sit through, and it is the caller's ctx (plus the conn deadline
-	// TestSMTP sets) that ends it.
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return tlsConn, nil
 }

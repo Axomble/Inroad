@@ -5,26 +5,28 @@ import (
 	"time"
 )
 
-// defaultSMTPTimeout bounds an SMTP conversation's per-response wait when the
-// caller left Timeout unset (its zero value). It mirrors defaultIMAPTimeout's
-// role for dialIMAP, and is the same 30s NewNetSender already picks.
-const defaultSMTPTimeout = 30 * time.Second
-
 // deadlineConn gives a net.Conn a PER-RESPONSE deadline: every Read and every
 // Write re-arms the socket deadline to now+timeout, so the bound is "this server
 // went quiet for longer than timeout", not "the whole conversation took longer
 // than timeout". A slow-but-progressing server is never cut off mid-exchange; a
 // server that accepts the connection and then says nothing is.
 //
-// This is the SMTP counterpart of go-imap's Client.Timeout, which dialIMAP
-// already sets and which does exactly this for IMAP commands. net/smtp and
-// gomail have no equivalent: net/smtp takes no context and no timeout at all, so
-// before this the only bound on a connected-then-silent SMTP server was the
-// caller eventually going away — and on TestSMTP the caller is an HTTP request.
+// It exists for the IMAP path (dialIMAP), where go-imap's own Client.Timeout
+// cannot cover the whole session: client.New READS THE GREETING, and Timeout
+// cannot be set until New returns. go-imap's DialWithDialer works around that
+// with a one-shot conn deadline; dialIMAP hand-rolls the dial to get a context
+// and so has to arm the conn itself. Re-arming per read/write additionally
+// covers the STARTTLS handshake, which neither mechanism bounded.
 //
-// It deliberately does NOT re-arm on a partial read: Read/Write are called per
-// syscall, so each one that makes progress extends the allowance, which is the
-// intended "still talking to me" semantic.
+// The SMTP side needs no equivalent: gomail sets a conn deadline at dial and
+// refreshes it per phase, and its dial is context-aware.
+//
+// It deliberately does NOT re-arm on a partial read only: Read and Write are
+// called per syscall, so each one that makes progress extends the allowance,
+// which is the intended "still talking to me" semantic. That does impose an IDLE
+// limit — a connection left open with no traffic for longer than timeout dies —
+// which is safe here because every IMAP session this package opens runs a short
+// burst of commands and logs out. Nothing uses IDLE.
 type deadlineConn struct {
 	net.Conn
 	timeout time.Duration
@@ -32,7 +34,7 @@ type deadlineConn struct {
 
 // newDeadlineConn wraps conn so each read/write must complete within timeout,
 // falling back to fallback when timeout is non-positive (an unset caller
-// Timeout). It arms the deadline immediately so the first response — the SMTP
+// Timeout). It arms the deadline immediately so the first response — the
 // greeting, which no dial timeout covers — is bounded too.
 func newDeadlineConn(conn net.Conn, timeout, fallback time.Duration) net.Conn {
 	if timeout <= 0 {
