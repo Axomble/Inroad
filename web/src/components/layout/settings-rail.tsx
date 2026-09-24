@@ -1,4 +1,4 @@
-import { AlertTriangle, KeyRound, ListPlus, Plug, Server, Settings, ShieldCheck, Sparkles, Tags, Webhook, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, KeyRound, ListPlus, Plug, ScrollText, Server, Settings, ShieldCheck, Sparkles, Tags, Webhook, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { NavLink } from '@/components/shared/nav-link'
 import { useHasRole } from '@/hooks/use-has-role'
@@ -66,6 +66,9 @@ const SETTINGS_NAV: SettingsItem[] = [
   // egress IPs, which are deployment infrastructure no delegated credential may
   // read. Admin here, like the four rows above it.
   { label: 'Fleet', to: '/app/settings/fleet', icon: Server, minRole: 'admin' },
+  // auditlog/handler.go's Routes() wraps its router in auth.RequireRole("admin"):
+  // the log names who signed in, from which IP, and every failed attempt.
+  { label: 'Audit log', to: '/app/settings/audit-log', icon: ScrollText, minRole: 'admin' },
 ]
 
 export function SettingsRail() {
