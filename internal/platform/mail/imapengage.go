@@ -76,8 +76,8 @@ func (e *NetEngager) withFolder(ctx context.Context, cfg IMAPConfig, folder stri
 	}
 	defer func() { _ = c.Logout() }()
 
-	if err := c.Login(cfg.Username, cfg.Password); err != nil {
-		return fmt.Errorf("imap login: %w", err)
+	if err := authenticateIMAP(c, cfg); err != nil {
+		return err
 	}
 	if _, err := c.Select(folder, false); err != nil { // read-write: STORE/MOVE need it
 		return fmt.Errorf("imap select %q: %w", folder, err)

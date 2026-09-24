@@ -97,8 +97,8 @@ func (r *NetInboxReader) FetchJunk(ctx context.Context, cfg IMAPConfig, maxN int
 		return nil, "", err
 	}
 	defer func() { _ = c.Logout() }()
-	if err := c.Login(cfg.Username, cfg.Password); err != nil {
-		return nil, "", fmt.Errorf("imap login: %w", err)
+	if err := authenticateIMAP(c, cfg); err != nil {
+		return nil, "", err
 	}
 
 	folder, ok, err := r.resolveJunkFolder(c)

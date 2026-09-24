@@ -49,6 +49,10 @@ type imapScript struct {
 	// "NO [PRIVACYREQUIRED] plaintext login is not available". Empty means
 	// "check the credentials".
 	LoginCommandReply string
+	// RefuseMechanisms are ADVERTISED in Caps but always answered NO — the server
+	// that offers a mechanism its accounts cannot actually use, which is the shape
+	// that would break a working mailbox if negotiation had no fallback.
+	RefuseMechanisms []string
 	// UsernameChallenge makes AUTH=LOGIN send the base64 "Username:" prompt that
 	// real servers send, instead of the empty continuation that go-sasl's own
 	// LOGIN client is the only thing that copes with.
@@ -284,6 +288,12 @@ func (c *imapSession) authenticate(tag, args string) {
 	if !c.srv.hasCap("AUTH=" + mech) {
 		c.send(tag + " NO unsupported authentication mechanism")
 		return
+	}
+	for _, refused := range c.srv.script.RefuseMechanisms {
+		if strings.EqualFold(refused, mech) {
+			c.send(tag + " NO [AUTHENTICATIONFAILED] mechanism not available for this account")
+			return
+		}
 	}
 	var user, pass string
 	var err error

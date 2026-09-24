@@ -49,9 +49,9 @@ func (r *NetInboxReader) selectInboxReadOnly(ctx context.Context, cfg IMAPConfig
 		return nil, nil, err
 	}
 
-	if err := c.Login(cfg.Username, cfg.Password); err != nil {
+	if err := authenticateIMAP(c, cfg); err != nil {
 		_ = c.Logout()
-		return nil, nil, fmt.Errorf("imap login: %w", err)
+		return nil, nil, err
 	}
 
 	mbox, err := c.Select("INBOX", true) // read-only

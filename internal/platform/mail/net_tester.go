@@ -107,10 +107,7 @@ func (t *NetTester) TestIMAP(ctx context.Context, cfg IMAPConfig) error {
 	}
 	defer func() { _ = c.Logout() }()
 
-	if err := c.Login(cfg.Username, cfg.Password); err != nil {
-		return fmt.Errorf("imap login: %w", err)
-	}
-	return nil
+	return authenticateIMAP(c, cfg)
 }
 
 // dialIMAP connects to addr (an already-vetted "ip:port" string — see vetAddr)
