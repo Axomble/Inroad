@@ -84,7 +84,7 @@ func (s *NetSender) Send(ctx context.Context, cfg SMTPConfig, msg Message) (stri
 	dialFn := func(ctx context.Context, _, _ string) (net.Conn, error) {
 		// Ignore gomail's address argument (built from cfg.Host); always dial the
 		// pre-vetted ip:port instead so hostname re-resolution can't slip in.
-		return dialer.DialContext(ctx, "tcp", addr)
+		return dialSMTPTransport(ctx, addr, dialer)
 	}
 
 	opts := []gomail.Option{

@@ -46,17 +46,23 @@ func (t *NetTester) TestSMTP(ctx context.Context, cfg SMTPConfig) error {
 	// stranger's server for the full t.Timeout. The timeout stays as the ceiling for
 	// a caller who is still waiting.
 	dialer := &net.Dialer{Timeout: t.Timeout}
-	var conn net.Conn
-	var derr error
-	if cfg.Port == 465 {
-		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: cfg.Host}}
-		conn, derr = tlsDialer.DialContext(ctx, "tcp", addr)
-	} else {
-		conn, derr = dialer.DialContext(ctx, "tcp", addr)
-	}
+	conn, derr := dialSMTPTransport(ctx, addr, dialer)
 	if derr != nil {
 		return fmt.Errorf("smtp dial: %w", derr)
 	}
+	if cfg.Port == 465 {
+		conn, derr = smtpImplicitTLS(ctx, conn, cfg.Host)
+		if derr != nil {
+			return fmt.Errorf("smtp dial: %w", derr)
+		}
+	}
+	// Every byte after the dial gets a deadline we chose, refreshed per read and
+	// per write (see newDeadlineConn). net/smtp has no context-aware API and no
+	// per-command timeout of its own, so without this a server that completes the
+	// TCP handshake and then stalls on the greeting, EHLO, STARTTLS or AUTH held
+	// an API request — this runs on one — until the client gave up. The dial
+	// timeout never covered any of that.
+	conn = newDeadlineConn(conn, t.Timeout, defaultSMTPTimeout)
 
 	c, err := smtp.NewClient(conn, cfg.Host)
 	if err != nil {
@@ -114,9 +120,9 @@ func (t *NetTester) TestIMAP(ctx context.Context, cfg IMAPConfig) error {
 // still checks against the hostname the caller asked for. Shared by TestIMAP
 // and NetInboxReader.Fetch so both go through one SSRF-guarded dial path.
 //
-// ctx cancels the DIAL and the greeting read. It does not cancel later commands:
-// go-imap's Client has no context-aware API, so once connected, Client.Timeout is
-// what bounds SELECT/FETCH/LOGIN. That is the honest division — connecting is the
+// ctx cancels the DIAL. It does not cancel later commands: go-imap's Client has
+// no context-aware API, so once connected it is the per-response deadline below
+// that bounds SELECT/FETCH/LOGIN. That is the honest division — connecting is the
 // part that hangs on an unreachable or black-holed host, and it is the part a
 // worker shutdown or an abandoned HTTP request needs back.
 //
@@ -125,12 +131,20 @@ func (t *NetTester) TestIMAP(ctx context.Context, cfg IMAPConfig) error {
 // is the same dial they perform (net or tls, then client.New reads the greeting),
 // with DialContext in place of Dial.
 //
-// timeout bounds both the initial dial+greeting (via a net.Dialer deadline)
-// and every subsequent IMAP command — STARTTLS, LOGIN, SELECT, FETCH, ... —
-// via go-imap's per-command deadline (Client.Timeout), so a hung server can
-// never block the caller indefinitely. A timeout <= 0 falls back to
-// defaultIMAPTimeout. Client.Timeout is set BEFORE STARTTLS, which the old
-// DialWithDialer path could not do: the upgrade handshake itself was unbounded.
+// timeout is the PER-RESPONSE bound on everything after the dial — the greeting,
+// STARTTLS, LOGIN/AUTHENTICATE, SELECT, FETCH — via newDeadlineConn, plus
+// go-imap's own per-command Client.Timeout. A timeout <= 0 falls back to
+// defaultIMAPTimeout.
+//
+// The wrapper is not redundant with Client.Timeout, and the gap it closes was
+// real: client.New READS THE GREETING, and Client.Timeout cannot be set until New
+// returns. go-imap's own DialWithDialer works around that by putting the dialer's
+// timeout on the conn as a one-shot deadline before calling New; hand-rolling the
+// dial to get a context dropped that workaround, so a server that completed the
+// TCP handshake and then said nothing held the caller until it hung up —
+// TestIMAPServerThatAcceptsThenGoesSilentIsBounded waited 30 seconds against a
+// 750ms timeout. Re-arming per read/write also covers the STARTTLS handshake,
+// which neither mechanism bounded.
 //
 // localAddr optionally binds the SOURCE address of the dial (the worker egress
 // IP, spec §15); nil uses the OS default route. addr is the already-vetted
@@ -144,19 +158,11 @@ func dialIMAP(ctx context.Context, addr string, cfg IMAPConfig, timeout time.Dur
 		dialer.LocalAddr = localAddr
 	}
 
-	var conn net.Conn
-	var err error
-	if cfg.Port == 143 {
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
-	} else {
-		// ServerName stays cfg.Host even though addr is the resolved IP, so
-		// certificate validation still checks the hostname the caller asked for.
-		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: cfg.Host}}
-		conn, err = tlsDialer.DialContext(ctx, "tcp", addr)
-	}
+	conn, err := dialIMAPTransport(ctx, addr, cfg, dialer)
 	if err != nil {
 		return nil, fmt.Errorf("imap dial: %w", err)
 	}
+	conn = newDeadlineConn(conn, timeout, defaultIMAPTimeout)
 
 	c, err := client.New(conn)
 	if err != nil {
