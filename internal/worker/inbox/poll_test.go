@@ -85,6 +85,9 @@ type stubCore struct {
 	cursorSet      bool
 	cursorUID      uint32
 	cursorValidity uint32
+	// cursorErr fails the cursor write — a CONTROL-PLANE failure, as opposed to
+	// a provider one, which the poll backoff must not count against the mailbox.
+	cursorErr error
 
 	cursorStringSet bool
 	cursorString    string
@@ -119,7 +122,7 @@ func (s *stubCore) GetInboxPollJob(context.Context, string, string) (coreapi.Inb
 func (s *stubCore) SetInboxCursor(_ context.Context, _, _ string, uid, validity uint32) error {
 	s.cursorSet = true
 	s.cursorUID, s.cursorValidity = uid, validity
-	return nil
+	return s.cursorErr
 }
 
 func (s *stubCore) SetInboxCursorString(_ context.Context, _, _, cursor string) error {

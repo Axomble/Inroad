@@ -101,6 +101,11 @@ func (f *fakeInboundWriter) SetInboxCursorString(context.Context, string, string
 	return nil
 }
 
+func (f *fakeInboundWriter) RecordInboxPollFailure(context.Context, string, string, []time.Duration) (coreapi.InboxPollBackoff, error) {
+	f.calls++
+	return coreapi.InboxPollBackoff{}, nil
+}
+
 func (f *fakeInboundWriter) StoreInboundMessage(context.Context, coreapi.InboxMessageInput) error {
 	f.calls++
 	return nil

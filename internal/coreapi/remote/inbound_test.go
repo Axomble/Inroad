@@ -38,6 +38,7 @@ type fakeInbound struct {
 	found   bool
 	send    coreapi.WarmupSendRef
 	matched bool
+	backoff coreapi.InboxPollBackoff
 }
 
 func (f *fakeInbound) record(args ...string) { f.calls++; f.gotArgs = args }
@@ -51,6 +52,12 @@ func (f *fakeInbound) SetInboxCursor(_ context.Context, mailboxID, workspaceID s
 func (f *fakeInbound) SetInboxCursorString(_ context.Context, mailboxID, workspaceID, cursor string) error {
 	f.record(mailboxID, workspaceID, cursor)
 	return f.err
+}
+
+func (f *fakeInbound) RecordInboxPollFailure(_ context.Context, mailboxID, workspaceID string, ladder []time.Duration) (coreapi.InboxPollBackoff, error) {
+	f.record(mailboxID, workspaceID)
+	f.got = ladder
+	return f.backoff, f.err
 }
 
 func (f *fakeInbound) StoreInboundMessage(_ context.Context, in coreapi.InboxMessageInput) error {
@@ -164,6 +171,9 @@ func TestEverySlice4MethodRoundTrips(t *testing.T) {
 		plan:    coreapi.WarmupEngagePlan{ReceiptID: receipt, DoMarkRead: true, EngageAfter: 90 * time.Second},
 		label:   coreapi.ReplyLabel{Key: "positive", StopsEnrollment: true},
 		send:    coreapi.WarmupSendRef{WarmupSendID: send},
+		backoff: coreapi.InboxPollBackoff{
+			Failures: 3, RetryAfter: time.Now().Add(12 * time.Minute).UTC().Truncate(time.Millisecond),
+		},
 	}
 	fl := &fakeFleet{queue: "w:box-1"}
 	jobs := &fakeJobs{due: time.Now().Add(time.Hour).UTC().Truncate(time.Millisecond), sendNow: true}
@@ -185,6 +195,39 @@ func TestEverySlice4MethodRoundTrips(t *testing.T) {
 		}
 		if got := inbound.gotArgs[2]; got != "history:1234" {
 			t.Errorf("cursor = %q, want %q", got, "history:1234")
+		}
+	})
+
+	t.Run("RecordInboxPollFailure", func(t *testing.T) {
+		ladder := []time.Duration{3 * time.Minute, 6 * time.Minute, time.Hour}
+		out, err := c.RecordInboxPollFailure(ctx, mailbox, ws, ladder)
+		if err != nil {
+			t.Fatalf("RecordInboxPollFailure: %v", err)
+		}
+		// The ladder crosses as SECONDS, so a transport that lost the unit would
+		// hand the control plane 180 nanoseconds and back a failing mailbox off
+		// by nothing at all.
+		got, ok := inbound.got.([]time.Duration)
+		if !ok {
+			t.Fatalf("handler got %T, want []time.Duration", inbound.got)
+		}
+		if len(got) != len(ladder) || got[0] != 3*time.Minute || got[2] != time.Hour {
+			t.Errorf("ladder = %v, want %v", got, ladder)
+		}
+		if out.Failures != inbound.backoff.Failures || !out.RetryAfter.Equal(inbound.backoff.RetryAfter) {
+			t.Errorf("backoff = %+v, want %+v", out, inbound.backoff)
+		}
+	})
+
+	t.Run("RecordInboxPollFailure refuses a ladder that could not bound a retry", func(t *testing.T) {
+		before := inbound.calls
+		for _, bad := range [][]time.Duration{nil, {}, {3 * time.Minute, 0}, {-time.Minute}} {
+			if _, err := c.RecordInboxPollFailure(ctx, mailbox, ws, bad); !errors.Is(err, coreapi.ErrInvalidBackoffLadder) {
+				t.Errorf("ladder %v: err = %v, want ErrInvalidBackoffLadder", bad, err)
+			}
+		}
+		if inbound.calls != before {
+			t.Error("an invalid ladder reached the control plane")
 		}
 	})
 
@@ -735,7 +778,7 @@ func TestSlice4RoutesRequireTheFleetToken(t *testing.T) {
 
 func slice4Paths() []string {
 	return []string{
-		PathInboxCursorUID, PathInboxCursorString, PathInboxMessageStore,
+		PathInboxCursorUID, PathInboxCursorString, PathInboxPollFailure, PathInboxMessageStore,
 		PathCRMReplyCapture, PathComplaintIngest, PathReplyLabelResolve,
 		PathWarmupReceipt, PathWarmupSendByMessageID, PathWarmupTokenFailure,
 		PathWarmupHardBounce, PathWarmupNextDue,
