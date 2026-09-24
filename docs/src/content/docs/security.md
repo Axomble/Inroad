@@ -426,7 +426,7 @@ limit / abuse control here is tracked in the Deferred list below.
     `perf_integration_test.go`.
 
 ## Inbox full-text search
-82. **Inbox search is workspace-pinned on every table and bounded by
+83. **Inbox search is workspace-pinned on every table and bounded by
     construction.** `GET /inbox/search` (`internal/app/inbox/search.go`,
     `queries/inboxsearch.sql`) is the inbox's counterpart to invariants 33–36,
     and its inputs are more hostile than a contact list: inbound bodies are
