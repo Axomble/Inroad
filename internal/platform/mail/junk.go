@@ -19,19 +19,71 @@ import (
 // §7). Callers test it with errors.Is.
 var ErrNoJunkFolder = errors.New("mail: no junk/spam folder resolved")
 
-// junkFolderCandidates are the common junk/spam mailbox names tried, in order,
-// when a server does NOT advertise the RFC 6154 SPECIAL-USE \Junk attribute.
-// Matching is case-insensitive (junkFolderMatches). This is deliberately
-// best-effort: IMAP has no mandated junk-folder name, so a server using an
-// exotic name yields ErrNoJunkFolder and warmup placement detection falls back
-// to INBOX-only rather than failing the poll.
+// junkFolderCandidates are the junk/spam mailbox names tried, in order, when a
+// server does NOT advertise the RFC 6154 SPECIAL-USE \Junk attribute. Matching
+// is whole-name and case-insensitive (strings.EqualFold, which folds Unicode).
+//
+// The junk folder is the one mailbox name IMAP genuinely localizes, and until
+// this list did, every non-English mailbox on a server without special-use
+// silently lost the whole spam-placement signal: FetchJunk returned
+// ErrNoJunkFolder, the poller logged it and scanned INBOX only, and warmup
+// reported a clean inbox rate for a mailbox whose mail was going to spam. That
+// is worse than an error, because it reads as good news.
+//
+// Names are the defaults shipped by Outlook/Exchange, Dovecot, Roundcube and
+// the major webmail locales. Matching stays whole-name rather than substring on
+// purpose: "Trash", "Papierkorb" and "Corbeille" are not junk folders, and this
+// resolution also decides where Rescue MOVES a message out of.
+//
+// It remains best-effort. IMAP mandates no junk-folder name, so a server using
+// something else still yields ErrNoJunkFolder and INBOX-only detection rather
+// than failing the poll.
 var junkFolderCandidates = []string{
+	// English / provider defaults.
 	"Junk",
 	"Spam",
 	"Junk E-mail",
 	"Junk Email",
+	"Junk-E-Mail",
 	"[Gmail]/Spam",
 	"Bulk Mail",
+	"Bulk Email",
+	// German.
+	"Spamverdacht",
+	"Werbung",
+	// French.
+	"Courrier indésirable",
+	"Indésirables",
+	"Pourriel",
+	// Spanish.
+	"Correo no deseado",
+	"Correo basura",
+	// Portuguese.
+	"Lixo Eletrônico",
+	"Lixo Electrónico",
+	// Italian.
+	"Posta indesiderata",
+	// Dutch.
+	"Ongewenste e-mail",
+	"Ongewenst",
+	// Nordic.
+	"Skräppost",
+	"Uønsket mail",
+	"Søppelpost",
+	"Roskaposti",
+	// Central and eastern Europe.
+	"Wiadomości-śmieci",
+	"Nevyžádaná pošta",
+	"Levélszemét",
+	"Спам",
+	// Turkish, Greek.
+	"İstenmeyen",
+	"Gereksiz E-Posta",
+	"Ανεπιθύμητα",
+	// CJK.
+	"迷惑メール",
+	"垃圾邮件",
+	"스팸",
 }
 
 // pickJunkFolder chooses the mailbox to scan for spam-placed warmup mail from a
@@ -97,8 +149,8 @@ func (r *NetInboxReader) FetchJunk(ctx context.Context, cfg IMAPConfig, maxN int
 		return nil, "", err
 	}
 	defer func() { _ = c.Logout() }()
-	if err := c.Login(cfg.Username, cfg.Password); err != nil {
-		return nil, "", fmt.Errorf("imap login: %w", err)
+	if err := authenticateIMAP(c, cfg); err != nil {
+		return nil, "", err
 	}
 
 	folder, ok, err := r.resolveJunkFolder(c)

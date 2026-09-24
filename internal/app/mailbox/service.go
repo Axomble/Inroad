@@ -201,6 +201,11 @@ func (s *Service) ConnectSMTP(ctx context.Context, workspaceID uuid.UUID, in Con
 		Username:       in.SMTPUsername,
 		Password:       in.Secret,
 		AllowPlaintext: in.AllowPlaintext,
+		// Greet as the mailbox's own domain, which is what this mailbox's SENDS
+		// will greet as (mail.smtpHELO derives it from the envelope sender). A
+		// connection test that greets as the API container's hostname can pass
+		// against a server that would reject every message the mailbox sends.
+		EHLODomain: in.Email,
 	}); err != nil {
 		return MailboxSafe{}, fmt.Errorf("%w: smtp: %w", ErrConnectionTestFailed, err)
 	}

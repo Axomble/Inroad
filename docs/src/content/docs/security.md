@@ -2220,6 +2220,56 @@ write history that never happened.
       `coreapi` (the worker holds no database access of its own). A malformed
       or out-of-range value stops the process at startup.
 
+## IMAP/SMTP compatibility hardening
+83. **The mail transport seams move the socket, never the policy.**
+    `mail.dialIMAPTransport` and `mail.dialSMTPTransport`
+    (`internal/platform/mail/dial.go`) are package-level function variables the
+    mail tests replace to reach an in-process IMAP/SMTP server. They exist
+    because every IMAP/SMTP compatibility bug is a "works against my provider,
+    fails against yours" bug that cannot be demonstrated against a real
+    provider, and because `vetAddr` correctly refuses `127.0.0.1`.
+
+    They are *not* an SSRF bypass, and the structure is the same one invariant
+    22 describes for source binding: `vetAddr` runs FIRST — port allowlist, DNS
+    resolution, every returned IP checked — and the `addr` passed to the hook is
+    its verdict. A hook can choose which socket carries an already-approved
+    destination; it cannot make a blocked destination approved, because the call
+    never gets that far. `TestTransportSeamDoesNotBypassTheSSRFGuard` asserts
+    exactly that with the fake server installed: loopback, `169.254.169.254`,
+    RFC1918 and an off-allowlist port all still fail with `ErrHostNotPermitted`.
+    Production assigns these variables nowhere; only `_test.go` files do.
+84. **IMAP and SMTP authentication negotiate a mechanism, and a failed
+    negotiation never carries the credential.** `mail.authenticateIMAP` picks
+    the most preferred mechanism the server ADVERTISES (CRAM-MD5 → LOGIN →
+    PLAIN) and falls back to the `LOGIN` command; the SMTP side hands go-mail
+    the same preference list. Two properties matter for security rather than
+    compatibility:
+
+    - **At most two authentication attempts per connection.** Walking every
+      mechanism would turn one wrong password into four rejected sign-ins per
+      poll every three minutes — an account-lockout and provider-throttle
+      generator.
+    - **No error, log line or wrapped message contains the password or anything
+      derived from it** (the CRAM-MD5 digest, the LOGIN prompt replies, the
+      PLAIN payload). Server text is propagated; our own inputs are not.
+      `TestIMAPAuthFailureNeverCarriesTheCredential` checks every mechanism.
+
+    Mechanism ORDER is a compatibility choice, not a security one: every IMAP
+    connection is already TLS (implicit on 993, mandatory STARTTLS on 143 — see
+    invariant 6), so the channel protects the credential whichever mechanism
+    carries it. On the SMTP side the go-mail `-NOENC` variants — the only way a
+    credential goes out in the clear — are offered ONLY when the mailbox has set
+    the explicit `allow_plaintext` opt-out.
+85. **The EHLO name is validated as a DNS name before it reaches the wire.**
+    Sends greet as the envelope sender's domain and connection tests as the
+    mailbox's (`mail.smtpHELO`), because go-mail otherwise greets as
+    `os.Hostname()` — a container id, which receivers penalise. That value is
+    workspace-controlled and go-mail writes it verbatim, so `mail.heloDomain`
+    validates the RESULT (letters, digits, hyphen, dot; label and length limits;
+    at least one dot) rather than stripping characters: a name carrying CRLF
+    would be SMTP command injection. Anything that does not validate yields `""`
+    and go-mail's default is kept.
+
 ## Deferred (documented, not yet built)
 - **Conditional branching on a sequence step must gate on HUMAN events only**
   (invariant 63). This is written down BEFORE the feature exists because getting
