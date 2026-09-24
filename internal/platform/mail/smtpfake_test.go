@@ -38,6 +38,9 @@ type smtpScript struct {
 	// RefuseEHLO answers EHLO with 502, forcing the client back to HELO — the
 	// pre-ESMTP server shape.
 	RefuseEHLO bool
+	// SilentAfterConnect accepts the connection and never sends the greeting —
+	// the black-holed server no dial timeout covers.
+	SilentAfterConnect bool
 }
 
 // fakeSMTP is a running smtpScript.
@@ -136,6 +139,12 @@ func (s *fakeSMTP) sawCommand(verb string) bool {
 func (s *fakeSMTP) serve(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
+	if s.script.SilentAfterConnect {
+		// Hold the socket open and say nothing; the client must give up first.
+		// Bounded so a failing test cannot leak the goroutine.
+		time.Sleep(15 * time.Second)
+		return
+	}
 	sess := &smtpSession{srv: s, r: bufio.NewReader(conn), w: conn}
 	sess.send("220 fake.invalid ESMTP ready")
 	for {

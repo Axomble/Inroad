@@ -127,6 +127,40 @@ func TestSMTPUnauthenticatedRelaySendsAndTestsAlike(t *testing.T) {
 	}
 }
 
+// The SMTP counterpart of TestIMAPServerThatAcceptsThenGoesSilentIsBounded: a
+// server that completes the TCP handshake and then never greets. go-mail sets a
+// conn deadline immediately after dialing and refreshes it per phase, so both
+// the send and the connection test are already bounded here — this test exists
+// to keep that true, and to make the guarantee explicit for the path that runs
+// on an HTTP request. Unlike the IMAP side, it found no bug.
+func TestSMTPServerThatAcceptsThenGoesSilentIsBounded(t *testing.T) {
+	startFakeSMTP(t, smtpScript{SilentAfterConnect: true})
+
+	t.Run("send", func(t *testing.T) {
+		s := &NetSender{Timeout: 750 * time.Millisecond}
+		start := time.Now()
+		_, err := s.Send(t.Context(), fakeSMTPConfig("u", "p"), testMessage())
+		if err == nil {
+			t.Fatal("a silent server returned no error")
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("took %v against a 750ms timeout", elapsed)
+		}
+	})
+
+	t.Run("connection test", func(t *testing.T) {
+		tester := &NetTester{Timeout: 750 * time.Millisecond}
+		start := time.Now()
+		err := tester.TestSMTP(t.Context(), fakeSMTPConfig("u", "p"))
+		if err == nil {
+			t.Fatal("a silent server returned no error")
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("took %v against a 750ms timeout", elapsed)
+		}
+	})
+}
+
 // heloDomain is the pure half, including the part that matters most: EHLO's
 // argument comes from a workspace-controlled address, and go-mail passes it to
 // the wire verbatim. A name carrying CRLF would be SMTP command injection, so
