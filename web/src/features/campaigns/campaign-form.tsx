@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import { useForm } from 'react-hook-form'
+import { Controller, useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
@@ -7,9 +7,12 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
+import { RichTextEditor, SubjectEditor } from '@/components/shared/rich-text-editor'
+import { unknownTokens } from '@/components/shared/rich-text/merge-tags'
 import { httpStatus } from '@/lib/rtk-error'
 import { useCreateCampaignMutation } from './api'
+import { useMergeFields } from './merge-fields'
+import { UnknownMergeFieldsNotice } from './unknown-merge-fields'
 // Cross-feature query-hook imports are allowed for read-only reference data
 // (see features/campaigns/api.ts). Cross-feature UI imports remain forbidden.
 import { useListMailboxesQuery } from '@/features/mailboxes/api'
@@ -21,6 +24,7 @@ const schema = z.object({
   list_id: z.string().uuid('Select a list'),
   subject: z.string().min(1, 'Required'),
   body_text: z.string().optional(),
+  body_html: z.string().optional(),
 })
 type Values = z.infer<typeof schema>
 
@@ -39,18 +43,31 @@ export function CampaignForm({ onDone, onCancel }: { onDone: () => void; onCance
   const nameId = useId()
   const mailboxId = useId()
   const listId = useId()
-  const subjectId = useId()
-  const bodyId = useId()
+  const subjectLabelId = useId()
+  const bodyLabelId = useId()
+  const bodyHintId = useId()
+  const unknownId = useId()
+  const mergeFields = useMergeFields()
 
   const {
     register,
+    control,
+    setValue,
     handleSubmit,
     formState: { errors },
-  } = useForm<Values>({ resolver: zodResolver(schema) })
+  } = useForm<Values>({ resolver: zodResolver(schema), defaultValues: { subject: '', body_text: '', body_html: '' } })
+  const copy = useWatch({ control, name: ['subject', 'body_text', 'body_html'] })
+  const unknown = unknownTokens(
+    copy.map((template) => template ?? ''),
+    mergeFields.classify,
+  )
 
   const activeMailboxes = mailboxes.filter((m) => m.status === 'active')
 
   async function onSubmit(values: Values) {
+    // The campaign's copy becomes its first step, so the step form's rule
+    // applies: a placeholder nothing fills in is not saved.
+    if (unknown.length > 0) return
     const result = await create({ createCampaignRequest: values })
     if ('data' in result && result.data) onDone()
   }
@@ -98,23 +115,44 @@ export function CampaignForm({ onDone, onCancel }: { onDone: () => void; onCance
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor={subjectId}>Subject</Label>
-          <Input id={subjectId} placeholder="Quick question, {{first_name}}" aria-invalid={!!errors.subject} {...register('subject')} />
+          <Label id={subjectLabelId}>Subject</Label>
+          <Controller
+            control={control}
+            name="subject"
+            render={({ field }) => (
+              <SubjectEditor
+                labelledBy={subjectLabelId}
+                initialText={field.value}
+                placeholder="Quick question, {{first_name}}"
+                invalid={!!errors.subject}
+                variables={mergeFields.variables}
+                classifyVariable={mergeFields.classify}
+                onChange={field.onChange}
+              />
+            )}
+          />
           {errors.subject && <span className="text-xs text-danger">{errors.subject.message}</span>}
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor={bodyId}>Body</Label>
-          <Textarea
-            id={bodyId}
-            rows={6}
+          <Label id={bodyLabelId}>Body</Label>
+          <RichTextEditor
+            labelledBy={bodyLabelId}
+            describedBy={bodyHintId}
             placeholder={'Hi {{first_name}},\n\n…'}
-            {...register('body_text')}
+            variables={mergeFields.variables}
+            classifyVariable={mergeFields.classify}
+            onChange={(body) => {
+              setValue('body_text', body.text)
+              setValue('body_html', body.html)
+            }}
           />
-          <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">
-            {'{{first_name}}'} and {'{{email}}'} are personalized per contact
+          <span id={bodyHintId} className="font-mono text-[10px] uppercase tracking-[0.12em] text-faint">
+            Type {'{{'} to insert a merge field
           </span>
         </div>
+
+        <UnknownMergeFieldsNotice id={unknownId} names={unknown} />
 
         {error && (
           <p role="alert" className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">

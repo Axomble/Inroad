@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest'
+import { beforeAll, beforeEach, afterEach, describe, expect, test, vi } from 'vitest'
 import { renderWithProviders } from '@/test/render-with-providers'
+import { replaceText, warmRichTextEditors } from '@/test/rich-text'
 import type { SequenceStep, StepVariant } from '../api'
 import { splitShares } from '../variant-error'
 import { VariantsDialog } from '../variants-dialog'
@@ -51,11 +52,17 @@ async function lastBody(mock: ReturnType<typeof vi.fn>, method: string): Promise
   return input instanceof Request ? await input.clone().json() : undefined
 }
 
+beforeAll(async () => {
+  await warmRichTextEditors()
+}, 30_000)
+
 beforeEach(() => {
   listResponder = () => new Response(JSON.stringify([VARIANT_B]), { status: 200, headers: jsonHeaders })
   writeResponder = () => new Response(JSON.stringify(VARIANT_B), { status: 200, headers: jsonHeaders })
 
   fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input)
+    if (url.endsWith('/custom-fields')) return new Response('[]', { status: 200, headers: jsonHeaders })
     if (methodOf(input, init) === 'GET') return listResponder()
     return writeResponder()
   })
@@ -160,4 +167,47 @@ test('a load failure offers a retry rather than an empty split', async () => {
 
   expect(await screen.findByText(/couldn’t load this step’s variants/i)).toBeInTheDocument()
   expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+})
+
+test('a variant loads its copy into the editors and saves edits as text + html', async () => {
+  render()
+  const body = await screen.findByRole('textbox', { name: 'Variant B body' })
+  expect(await screen.findByRole('textbox', { name: 'Variant B subject' })).toHaveTextContent('a different angle')
+
+  replaceText(body, 'Yo {{company}}')
+  fireEvent.click(screen.getByRole('button', { name: 'Save variant' }))
+
+  await waitFor(async () =>
+    expect(await lastBody(fetchMock, 'PUT')).toMatchObject({
+      subject: 'a different angle',
+      body_text: 'Yo {{company}}',
+      body_html: '',
+    }),
+  )
+})
+
+test('a variant with an unknown merge field is flagged and not saved', async () => {
+  render()
+  const body = await screen.findByRole('textbox', { name: 'Variant B body' })
+  replaceText(body, 'Hey {{frist_name}}')
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('{{frist_name}}')
+  fireEvent.click(screen.getByRole('button', { name: 'Save variant' }))
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(await lastBody(fetchMock, 'PUT')).toBeUndefined()
+})
+
+test('a variant whose HTML the editor can’t hold opens raw and an untouched save sends it back unchanged', async () => {
+  const html = '<table style="width:100%"><tr><td>Hey {{first_name}}</td></tr></table>'
+  listResponder = () =>
+    new Response(JSON.stringify([{ ...VARIANT_B, body_html: html }]), { status: 200, headers: jsonHeaders })
+  render()
+
+  expect(await screen.findByRole('textbox', { name: 'Variant B body HTML' })).toHaveValue(html)
+  expect(screen.getByRole('status')).toHaveTextContent('can’t keep: inline styles and tables')
+  fireEvent.click(screen.getByRole('button', { name: 'Save variant' }))
+
+  await waitFor(async () =>
+    expect(await lastBody(fetchMock, 'PUT')).toMatchObject({ body_html: html, body_text: 'Hey {{first_name}}' }),
+  )
 })
