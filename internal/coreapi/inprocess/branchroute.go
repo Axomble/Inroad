@@ -347,7 +347,7 @@ func (c client) stepSendCreatedAt(ctx context.Context, ws uuid.UUID, b gen.GetSt
 //
 // Opens and clicks are keyed on the cursor step's OWN deterministic send id, so
 // they are "opened THIS step", never an earlier one; they count HUMAN events
-// only (invariant 84). Replies span both legs of the conversation: the step went
+// only (invariant 86). Replies span both legs of the conversation: the step went
 // out as a sends row, but the answer lives in inbox_messages, matched on the
 // enrollment's campaign and contact rather than on any one send.
 func (c client) firstEvidence(ctx context.Context, ws uuid.UUID, b gen.GetStepEnrollmentBundleRow,

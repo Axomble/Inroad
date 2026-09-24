@@ -173,7 +173,7 @@ func TestBranchOpenedRoutesYes(t *testing.T) {
 }
 
 // A MACHINE open (a proxy prefetch) is not an open: the branch keeps waiting,
-// and when the window closes it routes NO (docs/security.md invariant 84).
+// and when the window closes it routes NO (docs/security.md invariant 86).
 func TestBranchMachineOpenDoesNotCount(t *testing.T) {
 	f, done := seedBranchCampaign(t)
 	defer done()
