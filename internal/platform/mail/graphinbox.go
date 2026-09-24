@@ -284,7 +284,7 @@ func graphJunkList(ctx context.Context, hc *http.Client, accessToken string, max
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("graph: junk list: unexpected status %d", resp.StatusCode)
+		return nil, &APIError{Provider: "m365", Op: "junk list", Status: resp.StatusCode}
 	}
 	var body struct {
 		Value []struct {
@@ -345,8 +345,14 @@ func graphDelta(ctx context.Context, hc *http.Client, accessToken, u string) ([]
 		return nil, "", "", errGraphDeltaExpired
 	case resp.StatusCode == http.StatusBadRequest && graphResyncRequired(resp.Body):
 		return nil, "", "", errGraphDeltaExpired
+	// *APIError rather than fmt.Errorf("unexpected status %d"), for the reason
+	// APIError's own doc gives about the SEND path: a status recoverable only by
+	// parsing English is a status nothing downstream can act on. The poller does
+	// act on it now — 401 is a revoked token and backs off straight to the cap,
+	// 429/5xx is "come back later" and takes the widening ladder — and it could
+	// not tell them apart through a sentence.
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
-		return nil, "", "", fmt.Errorf("graph: delta: unexpected status %d", resp.StatusCode)
+		return nil, "", "", &APIError{Provider: "m365", Op: "inbox delta", Status: resp.StatusCode}
 	}
 	var body struct {
 		Value     []deltaMsg `json:"value"`
@@ -406,7 +412,7 @@ func graphGetRaw(ctx context.Context, hc *http.Client, accessToken, id string) (
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("graph: raw: unexpected status %d", resp.StatusCode)
+		return nil, &APIError{Provider: "m365", Op: "message raw", Status: resp.StatusCode}
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
