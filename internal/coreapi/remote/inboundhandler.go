@@ -2,8 +2,11 @@ package remote
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/inroad/inroad/internal/coreapi"
 )
 
 // The control plane's side of the INBOUND MAIL path (slice 4).
@@ -64,6 +67,39 @@ func (h *handler) setInboxCursorString(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, ackResponse{})
+}
+
+// recordInboxPollFailure records one failed poll and schedules the next attempt.
+//
+// The ladder is validated HERE as well as at the client, because this is a
+// process boundary: the client's check protects a developer from a mistake, and
+// this one protects the database from an unbounded or degenerate array arriving
+// from a host the control plane does not compile.
+func (h *handler) recordInboxPollFailure(w http.ResponseWriter, r *http.Request) {
+	var in inboxPollFailureRequest
+	if !decode(w, r, &in) {
+		return
+	}
+	ws, mailbox, ok := parsePair(w, in.WorkspaceID, "mailbox_id", in.MailboxID)
+	if !ok {
+		return
+	}
+	ladder := make([]time.Duration, len(in.BackoffSeconds))
+	for i, s := range in.BackoffSeconds {
+		ladder[i] = time.Duration(s * float64(time.Second))
+	}
+	if coreapi.ValidateBackoffLadder(ladder) != nil {
+		// The reason is not echoed: it is derived from caller input, and this
+		// route's replies stay as fixed as every other one here.
+		respond(w, http.StatusBadRequest, errorResponse{Error: "invalid backoff_seconds"})
+		return
+	}
+	out, err := h.inbound.RecordInboxPollFailure(r.Context(), mailbox.String(), ws.String(), ladder)
+	if err != nil {
+		h.fail(w, failWrite, "inbox poll failure", err, "workspace_id", ws, "mailbox_id", mailbox)
+		return
+	}
+	respond(w, http.StatusOK, inboxPollFailureResponse{Failures: out.Failures, RetryAfter: out.RetryAfter})
 }
 
 // storeInboundMessage writes one matched inbound message onto its thread.

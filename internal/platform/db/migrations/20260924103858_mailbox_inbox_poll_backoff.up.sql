@@ -1,0 +1,32 @@
+-- Widening backoff for an unreachable mail server, WITHOUT deactivating the
+-- mailbox.
+--
+-- Today a mailbox whose IMAP server is down is re-fanned-out by inbox:sweep
+-- every 3 minutes forever: ~60 dial+auth attempts and ~20 dead-letter rows per
+-- mailbox per hour. That reconnect hammering is itself what provokes the per-IP
+-- sign-in throttles and rate limits the fleet architecture exists to avoid, and
+-- it buries real failures in dead-letter noise.
+--
+-- These two columns suppress SCHEDULING only. They are read by exactly one
+-- query, ListActiveMailboxes (the inbox poll fan-out). They are deliberately
+-- NOT read by MailboxExists or ReserveMailboxSendSlot, so a backed-off mailbox
+-- still SENDS, and `status` is never written by the poller: writing
+-- status='error' would gate both of those and cost the user their mailbox,
+-- which is the opposite of what "without deactivating the mailbox" asks for.
+--
+-- No index. ListActiveMailboxes is a full scan of the mailboxes table with or
+-- without this predicate (there is no index on status either); the table holds
+-- one row per connected mailbox, and an index that only ever narrows an already
+-- sequential scan would be write amplification for nothing.
+ALTER TABLE mailboxes
+    -- Consecutive failed poll attempts. Reset to 0 by every successful poll
+    -- (folded into SetInboxCursor / SetInboxCursorString, so a success costs no
+    -- extra round trip) and by any operator status change (pause/resume, which
+    -- is therefore the manual "try it again now" gesture).
+    ADD COLUMN IF NOT EXISTS inbox_poll_failures INTEGER NOT NULL DEFAULT 0,
+    -- The earliest time the poll fan-out may consider this mailbox again.
+    -- NULL means "eligible now", which is what every existing row gets and what
+    -- a successful poll restores. Computed from the DATABASE clock (now() plus
+    -- the rung), never the worker's, because it is compared against the
+    -- database clock in ListActiveMailboxes.
+    ADD COLUMN IF NOT EXISTS inbox_poll_retry_after TIMESTAMPTZ;

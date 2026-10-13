@@ -21,10 +21,11 @@ import (
 //
 // # What this exists to catch
 //
-// Eighteen capabilities are reached by COMMA-OK TYPE ASSERTION on whatever
+// Nineteen capabilities are reached by COMMA-OK TYPE ASSERTION on whatever
 // value the composition root put in Deps.Core — six in handlers.go, three in
 // inbox.RegisterPerMessage, six feature-detected per message inside
-// PollHandler, and three in cmd/worker. A type assertion is invisible to the
+// PollHandler, one resolved once at PollHandler's wiring (the poll backoff),
+// and three in cmd/worker. A type assertion is invisible to the
 // compiler. When one stops matching, nothing fails to build: the registrar
 // logs (or does not) and skips, the process starts, reports healthy, consumes
 // its queues, and silently does less than it did yesterday.
@@ -124,6 +125,8 @@ func TestBothCoreAPIImplementationsCarryEveryOptionalCapability(t *testing.T) {
 					assertsAs[coreapi.WarmupSendLookupClient](impl.core)},
 				{"coreapi.DeliverabilityComplaintClient", "inbox/poll.go, per message", "a mail-borne abuse report is never ingested and never suppresses",
 					assertsAs[coreapi.DeliverabilityComplaintClient](impl.core)},
+				{"inbox.PollBackoffCore", "inbox/poll.go, resolved once at wiring", "an unreachable mail server is re-dialed every sweep interval forever (inbox_poll_backoff_unavailable)",
+					assertsAs[inbox.PollBackoffCore](impl.core)},
 				{"coreapi.DeadLetterClient", "cmd/worker/main.go", "an exhausted task vanishes instead of reaching task_dead_letters",
 					assertsAs[coreapi.DeadLetterClient](impl.core)},
 				{"coreapi.ProviderSignalClient", "cmd/worker/main.go", "per-worker provider verdicts are collected and never reported",

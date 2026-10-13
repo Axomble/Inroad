@@ -44,7 +44,7 @@ INSERT INTO mailboxes (
     $13, $14,
     $15, $16, $17
 )
-RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext
+RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext, inbox_poll_failures, inbox_poll_retry_after
 `
 
 type CreateMailboxParams struct {
@@ -115,6 +115,8 @@ func (q *Queries) CreateMailbox(ctx context.Context, arg CreateMailboxParams) (M
 		&i.InboxUidValidity,
 		&i.InboxCursor,
 		&i.AllowPlaintext,
+		&i.InboxPollFailures,
+		&i.InboxPollRetryAfter,
 	)
 	return i, err
 }
@@ -137,7 +139,7 @@ func (q *Queries) DeleteMailbox(ctx context.Context, arg DeleteMailboxParams) (i
 }
 
 const getMailbox = `-- name: GetMailbox :one
-SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext FROM mailboxes WHERE id = $1 AND workspace_id = $2
+SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext, inbox_poll_failures, inbox_poll_retry_after FROM mailboxes WHERE id = $1 AND workspace_id = $2
 `
 
 type GetMailboxParams struct {
@@ -175,12 +177,16 @@ func (q *Queries) GetMailbox(ctx context.Context, arg GetMailboxParams) (Mailbox
 		&i.InboxUidValidity,
 		&i.InboxCursor,
 		&i.AllowPlaintext,
+		&i.InboxPollFailures,
+		&i.InboxPollRetryAfter,
 	)
 	return i, err
 }
 
 const listActiveMailboxes = `-- name: ListActiveMailboxes :many
-SELECT id, workspace_id FROM mailboxes WHERE status = 'active'
+SELECT id, workspace_id FROM mailboxes
+WHERE status = 'active'
+  AND (inbox_poll_retry_after IS NULL OR inbox_poll_retry_after <= now())
 `
 
 type ListActiveMailboxesRow struct {
@@ -190,6 +196,14 @@ type ListActiveMailboxesRow struct {
 
 // Mailboxes eligible for inbox polling (reply/bounce detection). The poller
 // iterates these and calls GetMailbox per id to get IMAP config + cursor.
+//
+// inbox_poll_retry_after is the poll backoff, and this is the ONLY query that
+// reads it. A mailbox whose server is unreachable is skipped for this tick
+// rather than dialed again; it is still 'active', so MailboxExists still says
+// yes and it still SENDS. The backoff is capped (see
+// internal/worker/inbox.DefaultPollBackoff), so the worst case is a mailbox
+// polled hourly instead of every three minutes — it recovers on its own the
+// first time the server answers.
 func (q *Queries) ListActiveMailboxes(ctx context.Context) ([]ListActiveMailboxesRow, error) {
 	rows, err := q.db.Query(ctx, listActiveMailboxes)
 	if err != nil {
@@ -211,7 +225,7 @@ func (q *Queries) ListActiveMailboxes(ctx context.Context) ([]ListActiveMailboxe
 }
 
 const listMailboxes = `-- name: ListMailboxes :many
-SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext FROM mailboxes WHERE workspace_id = $1 ORDER BY created_at DESC
+SELECT id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext, inbox_poll_failures, inbox_poll_retry_after FROM mailboxes WHERE workspace_id = $1 ORDER BY created_at DESC
 `
 
 func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]Mailbox, error) {
@@ -250,6 +264,8 @@ func (q *Queries) ListMailboxes(ctx context.Context, workspaceID uuid.UUID) ([]M
 			&i.InboxUidValidity,
 			&i.InboxCursor,
 			&i.AllowPlaintext,
+			&i.InboxPollFailures,
+			&i.InboxPollRetryAfter,
 		); err != nil {
 			return nil, err
 		}
@@ -270,6 +286,55 @@ func (q *Queries) MailboxExists(ctx context.Context, id uuid.UUID) (bool, error)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const recordInboxPollFailure = `-- name: RecordInboxPollFailure :one
+UPDATE mailboxes
+SET inbox_poll_failures = inbox_poll_failures + 1,
+    inbox_poll_retry_after = now() + make_interval(secs =>
+        ($1::double precision[])[
+            LEAST(inbox_poll_failures + 1, array_length($1::double precision[], 1))
+        ])
+WHERE id = $2 AND workspace_id = $3
+RETURNING inbox_poll_failures, inbox_poll_retry_after
+`
+
+type RecordInboxPollFailureParams struct {
+	BackoffSeconds []float64 `json:"backoff_seconds"`
+	ID             uuid.UUID `json:"id"`
+	WorkspaceID    uuid.UUID `json:"workspace_id"`
+}
+
+type RecordInboxPollFailureRow struct {
+	InboxPollFailures   int32              `json:"inbox_poll_failures"`
+	InboxPollRetryAfter pgtype.Timestamptz `json:"inbox_poll_retry_after"`
+}
+
+// Records one failed poll and schedules the next attempt, atomically.
+//
+// @backoff_seconds is the LADDER, passed in as data: rung N is the delay after
+// the Nth consecutive failure, and the last rung is the cap (the clamp below is
+// what makes it one). The schedule therefore lives in Go — see
+// internal/worker/inbox.DefaultPollBackoff — and this statement knows only how
+// to index it. A one-rung ladder is how the caller says "this failure cannot
+// fix itself, go straight to the cap".
+//
+// The delay is added to the DATABASE clock, not the worker's, because
+// ListActiveMailboxes compares it against the database clock; a few ms of
+// host skew would otherwise decide whether a mailbox is due.
+//
+// Old-value semantics: inside SET, `inbox_poll_failures` is the value BEFORE
+// this statement, so `inbox_poll_failures + 1` is the new count and the 1-based
+// ladder index at the same time.
+//
+// Not gated on status: a mailbox paused mid-outage still records the failure it
+// just had. It is not polled while paused (ListActiveMailboxes filters on
+// status), and resuming clears the counter anyway (UpdateMailboxStatus).
+func (q *Queries) RecordInboxPollFailure(ctx context.Context, arg RecordInboxPollFailureParams) (RecordInboxPollFailureRow, error) {
+	row := q.db.QueryRow(ctx, recordInboxPollFailure, arg.BackoffSeconds, arg.ID, arg.WorkspaceID)
+	var i RecordInboxPollFailureRow
+	err := row.Scan(&i.InboxPollFailures, &i.InboxPollRetryAfter)
+	return i, err
 }
 
 const reserveMailboxSendSlot = `-- name: ReserveMailboxSendSlot :one
@@ -297,7 +362,8 @@ func (q *Queries) ReserveMailboxSendSlot(ctx context.Context, arg ReserveMailbox
 }
 
 const setInboxCursor = `-- name: SetInboxCursor :exec
-UPDATE mailboxes SET inbox_last_seen_uid = $3, inbox_uid_validity = $4, last_poll_at = now()
+UPDATE mailboxes SET inbox_last_seen_uid = $3, inbox_uid_validity = $4, last_poll_at = now(),
+    inbox_poll_failures = 0, inbox_poll_retry_after = NULL
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -317,6 +383,11 @@ type SetInboxCursorParams struct {
 // many times it polled successfully, while Gmail and M365 mailboxes stamped it
 // correctly. That made "never polled" indistinguishable from "polling fine" for
 // exactly the transport with no provider dashboard to check instead.
+//
+// The poll backoff is cleared HERE rather than by a second call, for the same
+// reason last_poll_at is stamped here: reaching this statement IS the proof the
+// mailbox answered, and a separate "clear the failures" round trip could fail
+// on its own and leave a healthy mailbox parked on the cap.
 func (q *Queries) SetInboxCursor(ctx context.Context, arg SetInboxCursorParams) error {
 	_, err := q.db.Exec(ctx, setInboxCursor,
 		arg.ID,
@@ -328,7 +399,8 @@ func (q *Queries) SetInboxCursor(ctx context.Context, arg SetInboxCursorParams) 
 }
 
 const setInboxCursorString = `-- name: SetInboxCursorString :exec
-UPDATE mailboxes SET inbox_cursor = $3, last_poll_at = now()
+UPDATE mailboxes SET inbox_cursor = $3, last_poll_at = now(),
+    inbox_poll_failures = 0, inbox_poll_retry_after = NULL
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -338,7 +410,8 @@ type SetInboxCursorStringParams struct {
 	InboxCursor string    `json:"inbox_cursor"`
 }
 
-// Persists an opaque provider cursor (Gmail historyId) after a poll pass.
+// Persists an opaque provider cursor (Gmail historyId) after a poll pass, and
+// clears the poll backoff for the reason SetInboxCursor gives above.
 func (q *Queries) SetInboxCursorString(ctx context.Context, arg SetInboxCursorStringParams) error {
 	_, err := q.db.Exec(ctx, setInboxCursorString, arg.ID, arg.WorkspaceID, arg.InboxCursor)
 	return err
@@ -364,9 +437,9 @@ func (q *Queries) UpdateMailboxSecret(ctx context.Context, arg UpdateMailboxSecr
 
 const updateMailboxStatus = `-- name: UpdateMailboxStatus :one
 UPDATE mailboxes
-SET status = $3, last_error = $4
+SET status = $3, last_error = $4, inbox_poll_failures = 0, inbox_poll_retry_after = NULL
 WHERE id = $1 AND workspace_id = $2
-RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext
+RETURNING id, workspace_id, provider, email, display_name, smtp_host, smtp_port, smtp_username, imap_host, imap_port, imap_username, secret_ciphertext, daily_cap, min_interval_seconds, ramp_enabled, ramp_start_cap, ramp_days, status, last_error, last_send_at, last_poll_at, created_at, inbox_last_seen_uid, inbox_uid_validity, inbox_cursor, allow_plaintext, inbox_poll_failures, inbox_poll_retry_after
 `
 
 type UpdateMailboxStatusParams struct {
@@ -376,6 +449,11 @@ type UpdateMailboxStatusParams struct {
 	LastError   string    `json:"last_error"`
 }
 
+// Pause/Resume. Clearing the inbox-poll backoff here makes pause→resume the
+// operator's "try it again now" gesture: a mailbox parked on the hour-long cap
+// because its password is wrong is otherwise up to an hour from noticing that
+// the password was fixed. Pause clearing it too is harmless — a paused mailbox
+// is not polled at all.
 func (q *Queries) UpdateMailboxStatus(ctx context.Context, arg UpdateMailboxStatusParams) (Mailbox, error) {
 	row := q.db.QueryRow(ctx, updateMailboxStatus,
 		arg.ID,
@@ -411,6 +489,8 @@ func (q *Queries) UpdateMailboxStatus(ctx context.Context, arg UpdateMailboxStat
 		&i.InboxUidValidity,
 		&i.InboxCursor,
 		&i.AllowPlaintext,
+		&i.InboxPollFailures,
+		&i.InboxPollRetryAfter,
 	)
 	return i, err
 }

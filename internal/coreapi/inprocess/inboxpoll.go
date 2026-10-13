@@ -128,6 +128,56 @@ func (c client) SetInboxCursorString(ctx context.Context, mailboxID, workspaceID
 	})
 }
 
+// RecordInboxPollFailure records one failed poll against a mailbox and returns
+// the schedule the database computed: the new consecutive-failure count and the
+// earliest time the poll fan-out will consider it again.
+//
+// It writes ONLY the two backoff columns. It deliberately does not touch
+// `status` — writing 'error' there would stop ListActiveMailboxes AND
+// MailboxExists, so a mailbox whose server was down for an hour would stop
+// SENDING too, which is exactly what "without deactivating the mailbox"
+// forbids. Suppressing scheduling is the whole mechanism.
+//
+// ladder is the schedule, passed down as data and indexed by the new failure
+// count with its last rung as the cap (see the query). It is validated here, at
+// the seam, rather than trusted: an empty ladder would leave retry_after NULL
+// and silently disable the backoff.
+//
+// workspaceID is pinned in the SQL WHERE, so a foreign id updates zero rows and
+// surfaces as pgx.ErrNoRows rather than parking another tenant's poller. A
+// mailbox deleted mid-poll takes the same path; the caller treats it as
+// "nothing to record" rather than as a reason to fail the task.
+func (c client) RecordInboxPollFailure(ctx context.Context, mailboxID, workspaceID string, ladder []time.Duration) (coreapi.InboxPollBackoff, error) {
+	if err := coreapi.ValidateBackoffLadder(ladder); err != nil {
+		return coreapi.InboxPollBackoff{}, err
+	}
+	id, err := uuid.Parse(mailboxID)
+	if err != nil {
+		return coreapi.InboxPollBackoff{}, err
+	}
+	ws, err := uuid.Parse(workspaceID)
+	if err != nil {
+		return coreapi.InboxPollBackoff{}, err
+	}
+	seconds := make([]float64, len(ladder))
+	for i, d := range ladder {
+		seconds[i] = d.Seconds()
+	}
+	row, err := c.q.RecordInboxPollFailure(ctx, gen.RecordInboxPollFailureParams{
+		BackoffSeconds: seconds, ID: id, WorkspaceID: ws,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return coreapi.InboxPollBackoff{}, coreapi.ErrCrossTenant
+		}
+		return coreapi.InboxPollBackoff{}, err
+	}
+	return coreapi.InboxPollBackoff{
+		Failures:   int(row.InboxPollFailures),
+		RetryAfter: row.InboxPollRetryAfter.Time,
+	}, nil
+}
+
 // localFindSendByMessageID matches an inbound reply/bounce's Message-ID back to the
 // send that caused it, workspace-scoped. Returns ErrNoMatch when nothing
 // matches (unknown Message-ID — e.g. a reply to a message this workspace

@@ -222,6 +222,17 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 			"impact", "warmup token failures and warmup DSNs will not be recorded, "+
 				"and warmup DSNs may be misclassified as campaign bounces")
 	}
+	// Resolved ONCE, for the same reason and with the same loud complaint: a
+	// core without it polls exactly as it did before the backoff existed, which
+	// means an unreachable server is re-dialed every three minutes forever.
+	backoff := pollBackoff{policy: DefaultPollBackoff}
+	if pbc, ok := core.(PollBackoffCore); ok {
+		backoff.core = pbc
+	} else {
+		slog.Error("inbox_poll_backoff_unavailable",
+			"impact", "a mailbox whose server is unreachable will be re-dialed every "+
+				"sweep interval instead of backing off")
+	}
 	return func(ctx context.Context, t *asynq.Task) error {
 		var p queue.InboxPollPayload
 		if err := json.Unmarshal(t.Payload(), &p); err != nil {
@@ -249,18 +260,23 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 		}
 
 		if job.Provider == "gmail" {
-			return pollAPI(ctx, core, gmail, classifier, hook, p, job, "gmail", gmailJunkScan(gmail))
+			return pollAPI(ctx, core, backoff, gmail, classifier, hook, p, job, "gmail", gmailJunkScan(gmail))
 		}
 		if job.Provider == "m365" {
-			return pollAPI(ctx, core, graph, classifier, hook, p, job, "m365", graphJunkScan(graph))
+			return pollAPI(ctx, core, backoff, graph, classifier, hook, p, job, "m365", graphJunkScan(graph))
 		}
 		defer zeroize(job.Password)
 
 		cfg := mail.IMAPConfig{Host: job.Host, Port: job.Port, Username: job.Username, Password: string(job.Password)}
 
+		// The two calls below are the only ones in this branch that dial the
+		// mailbox's server, so they are the only ones the backoff counts. A
+		// failure anywhere AFTER them (a message that will not process, a cursor
+		// that will not persist) is ours, not the provider's, and backing off
+		// polling for it would delay reply detection over a bug of our own.
 		uidValidity, uidNext, err := reader.CurrentState(ctx, cfg)
 		if err != nil {
-			return err
+			return backoff.note(ctx, p, job.Provider, err)
 		}
 
 		// Re-baseline on a first poll (never-polled mailbox, UIDValidity==0)
@@ -281,7 +297,7 @@ func PollHandler(core coreapi.Client, reader mail.InboxReader, gmail GmailFetche
 
 		msgs, _, err := reader.Fetch(ctx, cfg, job.LastSeenUID, fetchBatchSize)
 		if err != nil {
-			return err
+			return backoff.note(ctx, p, job.Provider, err)
 		}
 
 		var replies, bounces, skipped int
@@ -354,12 +370,16 @@ type apiFetcher interface {
 // untouched). The short-lived access token is zeroized after the pass, like the
 // IMAP password. Only the transport (reader), the "provider" log value, and the
 // junk scanner differ between gmail and m365, so both providers share this body.
-func pollAPI(ctx context.Context, core coreapi.Client, reader apiFetcher, classifier *replyclassify.Classifier, hook warmupHook, p queue.InboxPollPayload, job coreapi.InboxPollJob, provider string, junkScan apiJunkScan) error {
+func pollAPI(ctx context.Context, core coreapi.Client, backoff pollBackoff, reader apiFetcher, classifier *replyclassify.Classifier, hook warmupHook, p queue.InboxPollPayload, job coreapi.InboxPollJob, provider string, junkScan apiJunkScan) error {
 	defer zeroize(job.AccessToken)
 
+	// The one call here that reaches the provider, and so the one the backoff
+	// counts — see the IMAP branch's note. A 401 from Graph or Gmail is the API
+	// transport's refused credential and goes straight to the cap; a 429 or 5xx
+	// is "come back later", which is what the widening ladder is.
 	msgs, newCursor, err := reader.Fetch(ctx, string(job.AccessToken), job.Cursor, fetchBatchSize)
 	if err != nil {
-		return err
+		return backoff.note(ctx, p, provider, err)
 	}
 
 	var replies, bounces, skipped int

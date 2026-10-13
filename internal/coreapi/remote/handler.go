@@ -93,6 +93,7 @@ type JobReader interface {
 type InboundWriter interface {
 	SetInboxCursor(ctx context.Context, mailboxID, workspaceID string, lastSeenUID, uidValidity uint32) error
 	SetInboxCursorString(ctx context.Context, mailboxID, workspaceID, cursor string) error
+	RecordInboxPollFailure(ctx context.Context, mailboxID, workspaceID string, ladder []time.Duration) (coreapi.InboxPollBackoff, error)
 	StoreInboundMessage(ctx context.Context, in coreapi.InboxMessageInput) error
 	CaptureCRMReply(ctx context.Context, in coreapi.CRMReplyInput) error
 	IngestComplaint(ctx context.Context, in coreapi.ComplaintInput) error
@@ -311,6 +312,7 @@ func NewHandler(d Deps, token string, logger *slog.Logger) (http.Handler, error)
 		// The inbound-mail routes and the last job read (slice 4).
 		PathInboxCursorUID:        h.setInboxCursorUID,
 		PathInboxCursorString:     h.setInboxCursorString,
+		PathInboxPollFailure:      h.recordInboxPollFailure,
 		PathInboxMessageStore:     h.storeInboundMessage,
 		PathCRMReplyCapture:       h.captureCRMReply,
 		PathComplaintIngest:       h.ingestComplaint,

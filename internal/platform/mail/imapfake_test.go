@@ -145,6 +145,21 @@ func startFakeIMAP(t *testing.T, script imapScript) *fakeIMAP {
 	return s
 }
 
+// stopListening closes the listener while leaving the transport seam pointed at
+// its (now dead) address, so the next dial gets a REAL ECONNREFUSED from the
+// kernel.
+//
+// It is how "the mail server is down" is tested without mocking the reader: an
+// unreachable-server test that substitutes a failing io.Reader is a test of the
+// substitute. t.Cleanup closes the listener a second time, which is a no-op
+// error this harness already ignores.
+func (s *fakeIMAP) stopListening(t *testing.T) {
+	t.Helper()
+	if err := s.ln.Close(); err != nil {
+		t.Fatalf("closing the fake listener: %v", err)
+	}
+}
+
 // commandLog returns every command line the server received, in order, with the
 // client's tag stripped. Credentials are NOT stripped: asserting that a secret
 // did or did not cross the wire is one of the things this harness is for.

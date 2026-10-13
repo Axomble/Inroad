@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"time"
 
 	"github.com/inroad/inroad/internal/coreapi"
 )
@@ -100,6 +101,41 @@ func (c *Client) SetInboxCursorString(ctx context.Context, mailboxID, workspaceI
 	return c.post(ctx, c.outcomes, PathInboxCursorString, inboxCursorStringRequest{
 		WorkspaceID: workspaceID, MailboxID: mailboxID, Cursor: cursor,
 	}, &ackResponse{})
+}
+
+// RecordInboxPollFailure records one failed poll and returns the schedule the
+// control plane computed: the new consecutive-failure count and the earliest
+// time the poll fan-out will consider this mailbox again.
+//
+// FAIL OPEN, which is the opposite direction from the cursor writes above, and
+// deliberately so. If this call fails the mailbox simply keeps its old
+// eligibility and is polled again on the next sweep — today's behaviour. The
+// caller therefore treats an error here as something to log, never as a reason
+// to fail the poll task: a backoff that could turn a control-plane hiccup into a
+// mailbox that stops being polled would be the deactivation this whole change
+// exists to avoid.
+//
+// The ladder is validated before it leaves, so a programming error surfaces at
+// the caller rather than as a 400 from the control plane (which validates it
+// again — see the handler).
+func (c *Client) RecordInboxPollFailure(ctx context.Context, mailboxID, workspaceID string, ladder []time.Duration) (coreapi.InboxPollBackoff, error) {
+	if err := coreapi.ValidateBackoffLadder(ladder); err != nil {
+		return coreapi.InboxPollBackoff{}, err
+	}
+	if err := parseIDs(workspaceID, mailboxID); err != nil {
+		return coreapi.InboxPollBackoff{}, err
+	}
+	seconds := make([]float64, len(ladder))
+	for i, d := range ladder {
+		seconds[i] = d.Seconds()
+	}
+	var out inboxPollFailureResponse
+	if err := c.post(ctx, c.outcomes, PathInboxPollFailure, inboxPollFailureRequest{
+		WorkspaceID: workspaceID, MailboxID: mailboxID, BackoffSeconds: seconds,
+	}, &out); err != nil {
+		return coreapi.InboxPollBackoff{}, err
+	}
+	return coreapi.InboxPollBackoff{Failures: out.Failures, RetryAfter: out.RetryAfter}, nil
 }
 
 // StoreInboundMessage writes one matched inbound message onto its thread.

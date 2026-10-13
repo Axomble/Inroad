@@ -117,8 +117,13 @@ const (
 	// can only write the thread's history from what the poller hands it. The
 	// same rule follows: no route here logs a body, a subject, a recipient or an
 	// address, on either side.
-	PathInboxCursorUID        = PathPrefix + "inbox-poll/cursor-uid"
-	PathInboxCursorString     = PathPrefix + "inbox-poll/cursor-string"
+	PathInboxCursorUID    = PathPrefix + "inbox-poll/cursor-uid"
+	PathInboxCursorString = PathPrefix + "inbox-poll/cursor-string"
+	// PathInboxPollFailure is the poll's OTHER outcome: the mailbox's server
+	// would not answer. It belongs with the cursor routes because it is the same
+	// decision — "this poll pass is finished, here is what the fan-out should do
+	// next" — and because the cursor writes are what CLEAR what it records.
+	PathInboxPollFailure      = PathPrefix + "inbox-poll/failure"
 	PathInboxMessageStore     = PathPrefix + "inbox-message/store"
 	PathCRMReplyCapture       = PathPrefix + "crm-reply/capture"
 	PathComplaintIngest       = PathPrefix + "complaint/ingest"
@@ -712,6 +717,37 @@ type inboxCursorStringRequest struct {
 	WorkspaceID string `json:"workspace_id"`
 	MailboxID   string `json:"mailbox_id"`
 	Cursor      string `json:"cursor"`
+}
+
+// inboxPollFailureRequest records one failed poll and asks for the next attempt
+// to be scheduled.
+//
+// BackoffSeconds carries the LADDER as data — rung N is the delay after the Nth
+// consecutive failure, the last rung is the cap. The schedule is the worker's
+// (internal/worker/inbox.DefaultPollBackoff) on both transports, so a fleet host
+// and a single-process install back off identically; the control plane validates
+// it (coreapi.ValidateBackoffLadder) rather than trusting it, because an empty
+// ladder would leave retry_after NULL and silently disable the backoff.
+//
+// Seconds as float64 rather than a JSON-encoded time.Duration because this is a
+// wire format read by whatever a future worker is written in, and "180" is a
+// number every language agrees about while 180000000000 is a Go implementation
+// detail.
+//
+// It carries NO error text. The failure's classification stays on the worker,
+// which logs it; shipping a provider's error string here would put server
+// output into a control-plane log line for nothing.
+type inboxPollFailureRequest struct {
+	WorkspaceID    string    `json:"workspace_id"`
+	MailboxID      string    `json:"mailbox_id"`
+	BackoffSeconds []float64 `json:"backoff_seconds"`
+}
+
+// inboxPollFailureResponse is what the control plane decided: the new
+// consecutive-failure count and the DATABASE's retry time.
+type inboxPollFailureResponse struct {
+	Failures   int       `json:"failures"`
+	RetryAfter time.Time `json:"retry_after"`
 }
 
 // inboxMessageRequest carries one inbound message onto its thread.

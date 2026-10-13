@@ -36,6 +36,22 @@ const (
 	mechPlain   = "PLAIN"
 )
 
+// ErrAuthRejected marks a failure at the AUTHENTICATION step: the server
+// understood the command and refused the credential. It wraps rather than
+// replaces the server's own error, so the detail an operator needs is still
+// there and the sentinel is still testable.
+//
+// It exists because "the password is wrong" and "the server is down" want
+// opposite handling from the poller — see ClassifyConnectFailure, which reads
+// transport evidence BEFORE this sentinel precisely because a connection that
+// drops mid-LOGIN also fails here.
+//
+// No error wrapped by it carries the password: the digests, prompts and PLAIN
+// payload stay inside the sasl.Client implementations below, and the underlying
+// errors carry only what the server said (docs/security.md, credential
+// handling).
+var ErrAuthRejected = errors.New("mail: authentication rejected")
+
 // ErrNoIMAPAuthMechanism is returned when a server disables the LOGIN command
 // and advertises no SASL mechanism this package implements. It is a
 // configuration fact an operator can act on ("this server wants GSSAPI"), which
@@ -83,7 +99,7 @@ func authenticateIMAP(c *client.Client, cfg IMAPConfig) error {
 	if mechErr == nil {
 		return nil
 	}
-	mechErr = fmt.Errorf("imap authenticate %s: %w", mech, mechErr)
+	mechErr = fmt.Errorf("%w: imap authenticate %s: %w", ErrAuthRejected, mech, mechErr)
 	if loginDisabled {
 		return mechErr
 	}
@@ -115,7 +131,7 @@ func pickIMAPMechanism(c *client.Client) (string, error) {
 // and the fallback for a mechanism that fails.
 func loginIMAP(c *client.Client, cfg IMAPConfig) error {
 	if err := c.Login(cfg.Username, cfg.Password); err != nil {
-		return fmt.Errorf("imap login: %w", err)
+		return fmt.Errorf("%w: imap login: %w", ErrAuthRejected, err)
 	}
 	return nil
 }
