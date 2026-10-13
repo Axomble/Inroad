@@ -63,6 +63,10 @@ func (s *Service) Graph(ctx context.Context, ws, campaignID uuid.UUID) (Graph, e
 // inside the store's transaction, under the campaign's graph lock, against the
 // graph that is actually being committed — the only place a loop formed by two
 // concurrent edits can be caught.
+//
+// in.Expect, when set, is enforced by that same write (see
+// BranchStore.UpsertBranch). It is checked after validation, so a request that
+// is both stale and malformed is told it is malformed.
 func (s *Service) SetBranch(ctx context.Context, ws, campaignID uuid.UUID, in BranchInput) (gen.SequenceStepBranch, error) {
 	if err := s.requireCampaign(ctx, ws, campaignID); err != nil {
 		return gen.SequenceStepBranch{}, err
@@ -188,16 +192,17 @@ func (s *Service) checkTrackable(ctx context.Context, ws, campaignID uuid.UUID, 
 }
 
 // DeleteBranch removes the router on one step, returning it to linear
-// fall-through. Idempotent. Allowed live, for the reason SetBranch is; refused
-// with a CycleError when the restored fall-through would close a loop.
-func (s *Service) DeleteBranch(ctx context.Context, ws, campaignID, stepID uuid.UUID) error {
+// fall-through. Idempotent without a precondition. Allowed live, for the reason
+// SetBranch is; refused with a CycleError when the restored fall-through would
+// close a loop, and with a *BranchChangedError when expect no longer holds.
+func (s *Service) DeleteBranch(ctx context.Context, ws, campaignID, stepID uuid.UUID, expect BranchPrecondition) error {
 	if err := s.requireCampaign(ctx, ws, campaignID); err != nil {
 		return err
 	}
 	if _, err := s.stepInCampaign(ctx, ws, campaignID, stepID); err != nil {
 		return err
 	}
-	return s.branches.DeleteBranch(ctx, ws, campaignID, stepID, checkGraph)
+	return s.branches.DeleteBranch(ctx, ws, campaignID, stepID, expect, checkGraph)
 }
 
 // checkGraph is the one GraphCheck every graph-changing write commits under.

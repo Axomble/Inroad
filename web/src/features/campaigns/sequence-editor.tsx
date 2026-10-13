@@ -15,8 +15,10 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { SectionBar, EmptyBlock } from '@/components/layout/page'
 import { NoticeBanner } from '@/components/shared/notice-banner'
+import { QueryErrorBanner } from '@/components/shared/record-page'
 import { httpStatus } from '@/lib/rtk-error'
-import { useListStepsQuery, useDeleteStepMutation, type SequenceStep } from './api'
+import { useListStepsQuery, useDeleteStepMutation, useGetCampaignGraphQuery, type SequenceStep } from './api'
+import { cycleStepIds } from './branch-loop'
 import { StepCard, type StepWithId } from './step-card'
 import { VariantsDialog } from './variants-dialog'
 import { StepForm } from './step-form'
@@ -49,12 +51,22 @@ function hasId(step: SequenceStep): step is StepWithId {
  * list of step cards, both with add / edit / delete / reorder. The editor owns
  * what both views share — the query, the delete confirmation, the variants
  * dialog, the reorder banner, the canvas's side panel — so switching views
- * loses none of it. Structural edits (add, delete, reorder) are draft-only; content edit is available in any status (live-reference). Owns its
- * own loading / empty / error states so the parent mounts it unconditionally.
+ * loses none of it. Structural edits (add, delete, reorder) are draft-only;
+ * content edits and conditions are available in any status. Owns its own
+ * loading / empty / error states so the parent mounts it unconditionally.
  */
 export function SequenceEditor({ campaignId, status }: { campaignId: string; status: string | undefined }) {
   const isDraft = status === 'draft'
   const { data, isLoading, error, refetch } = useListStepsQuery({ id: campaignId })
+  // The routing (conditions). Its own query: the step list stays the source of
+  // content, and a failure here degrades the flow to the linear view instead
+  // of hiding the sequence.
+  //
+  // `refetchOnFocus`: another tab's condition edits arrive when this one is
+  // looked at again, not on the next manual reload. It narrows cross-tab
+  // last-writer-wins; it doesn't close it (see branch-overlay.ts).
+  const graphQuery = useGetCampaignGraphQuery({ id: campaignId }, { refetchOnFocus: true })
+  const hasBranches = graphQuery.data?.nodes.some((node) => node.branch !== null) ?? false
   // The step whose A/B variants are open, plus its 1-based position for the
   // dialog title. Held here rather than in the card so only one dialog can be
   // mounted at a time.
@@ -64,7 +76,17 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
   const [adding, setAdding] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<StepWithId | null>(null)
-  const [reorderError, setReorderError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  // The loop the server last refused (a branch write, a reorder, a delete),
+  // marked on the flow's nodes until the next attempt.
+  // Held with the step list and graph it was reported against, and shown only
+  // while those are still what's on screen: once either changes, the marks
+  // may point at a loop that no longer exists.
+  const [loopReport, setLoopReport] = useState<{ ids: string[]; steps: unknown; graph: unknown } | null>(null)
+  const loop =
+    loopReport && loopReport.steps === data && loopReport.graph === graphQuery.data ? loopReport.ids : null
+  const setLoop = (ids: string[] | null) =>
+    setLoopReport(ids ? { ids, steps: data, graph: graphQuery.data } : null)
   const [view, setView] = useState<SequenceView>('canvas')
   const [canvasPanel, setCanvasPanel] = useState<SequencePanel | null>(null)
 
@@ -104,10 +126,13 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
 
   async function confirmDelete() {
     if (!pendingDelete) return
+    setLoop(null)
     const result = await deleteStep({ id: campaignId, stepId: pendingDelete.id })
     // Close only on success; on error keep the dialog OPEN so the rendered
-    // delete error is visible and the user can retry.
-    if (!('error' in result)) setPendingDelete(null)
+    // delete error is visible and the user can retry. A delete re-links the
+    // fall-through, which can close a loop through a condition — mark it.
+    if ('error' in result) setLoop(cycleStepIds(result.error))
+    else setPendingDelete(null)
   }
 
   return (
@@ -141,7 +166,20 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
         )}
       </SectionBar>
 
-      {reorderError && <NoticeBanner notice={{ tone: 'error', text: reorderError }} />}
+      {notice && <NoticeBanner notice={{ tone: 'error', text: notice }} />}
+      {serverSteps.length > 0 && graphQuery.isError && (
+        <QueryErrorBanner
+          className="mx-5 my-3"
+          message="Couldn’t load this sequence’s conditions, so where each path goes may not be shown, and conditions — and dragging steps — are held until they load."
+          onRetry={() => void graphQuery.refetch()}
+          retrying={graphQuery.isFetching}
+        />
+      )}
+      {view === 'list' && hasBranches && (
+        <p role="note" className="border-b border-border px-5 py-2 text-xs text-muted-foreground">
+          This sequence has conditions. The list shows steps in order only — switch to Flow to see where each path goes.
+        </p>
+      )}
 
       {isDraft && adding && (
         <StepForm
@@ -168,18 +206,31 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
           }
         />
       ) : view === 'canvas' ? (
-        <Suspense fallback={<CanvasLoading />}>
-          <SequenceCanvas
-            campaignId={campaignId}
-            steps={serverSteps}
-            canModifyStructure={isDraft}
-            panel={canvasPanel}
-            onPanelChange={setCanvasPanel}
-            onDelete={requestDelete}
-            onVariants={setVariantsFor}
-            onReorderError={setReorderError}
-          />
-        </Suspense>
+        // Wait for the routing too, so a branched sequence never flashes its
+        // linear fall-back first.
+        graphQuery.isLoading ? (
+          <CanvasLoading />
+        ) : (
+          <Suspense fallback={<CanvasLoading />}>
+            <SequenceCanvas
+              campaignId={campaignId}
+              steps={serverSteps}
+              canModifyStructure={isDraft}
+              graph={graphQuery.data}
+              graphFailed={graphQuery.isError}
+              graphIsFetching={graphQuery.isFetching}
+              graphStartedAt={graphQuery.startedTimeStamp}
+              onRefreshRouting={() => void graphQuery.refetch()}
+              loopStepIds={loop}
+              onLoop={setLoop}
+              panel={canvasPanel}
+              onPanelChange={setCanvasPanel}
+              onDelete={requestDelete}
+              onVariants={setVariantsFor}
+              onNotice={setNotice}
+            />
+          </Suspense>
+        )
       ) : isDraft ? (
         <Suspense
           fallback={
@@ -202,7 +253,7 @@ export function SequenceEditor({ campaignId, status }: { campaignId: string; sta
             onEditDone={stopEditing}
             onDelete={requestDelete}
             onVariants={setVariantsFor}
-            onReorderError={setReorderError}
+            onReorderError={setNotice}
             refetch={refetch}
           />
         </Suspense>

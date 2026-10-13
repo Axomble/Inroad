@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { graphlib, layout } from '@dagrejs/dagre'
-import type { Edge, Node } from '@xyflow/react'
+import type { Node, XYPosition } from '@xyflow/react'
+import type { FlowEdgeType } from './flow-edge'
 import type { FlowNodeRegistry, FlowNodeSize } from './node-registry'
 
 /** The part of a registry layout needs; `handlesOf` is optional so a test can lay out bare boxes. */
@@ -15,46 +16,66 @@ export type FlowLayoutOptions = {
   rankSpacing?: number
 }
 
+export type FlowLayout<N extends Node> = { nodes: N[]; edges: FlowEdgeType[] }
+
 const DEFAULTS: Required<FlowLayoutOptions> = { direction: 'TB', nodeSpacing: 56, rankSpacing: 72 }
 
+// dagre writes each node's centre (`x`, `y`) back onto the label we give it,
+// and each edge's route (`points`) onto its label.
+type PlacedNode = FlowNodeSize & { x?: number; y?: number }
+type PlacedEdge = { points?: XYPosition[] }
+
 /**
- * Positions every node with dagre and returns new nodes; the inputs are not
- * touched. Positions are React Flow's top-left corner (dagre reports centres),
- * and each node gets its declared `width`/`height` (and handle geometry) so
- * React Flow renders it at the size the layout assumed instead of waiting to
- * measure it.
+ * Positions every node with dagre and returns new nodes and edges; the inputs
+ * are not touched. Positions are React Flow's top-left corner (dagre reports
+ * centres), and each node gets its declared `width`/`height` (and handle
+ * geometry) so React Flow renders it at the size the layout assumed instead of
+ * waiting to measure it.
  *
- * A node's children keep the order of its edges: emit a condition's "yes"
- * edge before its "no" edge and "yes" lands on the left. dagre's own crossing
- * minimisation would otherwise pick either side, so this is passed to it as an
- * explicit ordering constraint.
+ * An edge that skips a rank (a branch jumping from step 1 to step 3) gets
+ * dagre's bend points as `data.route`. Drawn straight, it would run behind the
+ * node in between and read as going there; dagre routes it through the gap
+ * beside that node instead.
+ *
+ * A node with several exits keeps them in the order of its edges: emit a
+ * condition's "yes" edge before its "no" edge and the yes path stays on the
+ * left all the way down. That order comes from dagre's INITIAL ordering — a
+ * depth-first walk that visits each node's edges in insertion order — which is
+ * kept as-is (`disableOptimalOrderHeuristic`). dagre 3's crossing-reduction
+ * sweeps are what would otherwise run, and they re-crossed a condition's exits
+ * (yes → a far step, no → the next one); its `constraints` option can't
+ * prevent that, because it only orders nodes within one rank and a skipping
+ * exit has no node there (and with the sweeps off, dagre never reads
+ * constraints at all). The flows drawn here are near-trees, where the walk
+ * order is already crossing-free; the layout tests pin that for two
+ * conditions, a converging path and a backward jump.
  */
 export function layoutFlow<N extends Node>(
   nodes: readonly N[],
-  edges: readonly Edge[],
+  edges: readonly FlowEdgeType[],
   { sizeOf, handlesOf }: FlowNodeShapes,
   options: FlowLayoutOptions = {},
-): N[] {
+): FlowLayout<N> {
   // `??` per field, not an object spread: an explicit `undefined` must fall back
   // to the default rather than override it.
   const direction = options.direction ?? DEFAULTS.direction
   const nodeSpacing = options.nodeSpacing ?? DEFAULTS.nodeSpacing
   const rankSpacing = options.rankSpacing ?? DEFAULTS.rankSpacing
-  // dagre writes each node's centre (`x`, `y`) back onto the label we give it.
-  const graph = new graphlib.Graph<object, FlowNodeSize & { x?: number; y?: number }, object>()
+  // A multigraph, so two edges between the same pair (a condition whose Yes and
+  // No both go to one step) are laid out — and routed — separately.
+  const graph = new graphlib.Graph<object, PlacedNode, PlacedEdge>({ multigraph: true })
   graph.setGraph({ rankdir: direction, nodesep: nodeSpacing, ranksep: rankSpacing })
   graph.setDefaultEdgeLabel(() => ({}))
 
   for (const node of nodes) graph.setNode(node.id, { ...sizeOf(node.type) })
-  for (const edge of edges) {
-    // An edge to a node that isn't in the graph would make dagre invent an
-    // unsized node for it; drop it here rather than lay out a phantom.
-    if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) graph.setEdge(edge.source, edge.target)
-  }
+  // An edge to a node that isn't in the graph would make dagre invent an
+  // unsized node for it; leave it out rather than lay out a phantom.
+  const placeable = edges.filter((edge) => graph.hasNode(edge.source) && graph.hasNode(edge.target))
+  for (const edge of placeable) graph.setEdge(edge.source, edge.target, {}, edge.id)
 
-  layout(graph, { constraints: siblingOrder(edges, graph.hasNode.bind(graph)) })
+  layout(graph, { disableOptimalOrderHeuristic: true })
 
-  return nodes.map((node) => {
+  const laidNodes = nodes.map((node) => {
     const { width, height } = sizeOf(node.type)
     const placed = graph.node(node.id)
     return {
@@ -65,34 +86,24 @@ export function layoutFlow<N extends Node>(
       position: { x: (placed.x ?? 0) - width / 2, y: (placed.y ?? 0) - height / 2 },
     }
   })
-}
-
-/** Left-to-right constraints between consecutive children of each node. */
-function siblingOrder(edges: readonly Edge[], exists: (id: string) => boolean): { left: string; right: string }[] {
-  const children = new Map<string, string[]>()
-  for (const edge of edges) {
-    if (!exists(edge.source) || !exists(edge.target)) continue
-    const list = children.get(edge.source) ?? []
-    list.push(edge.target)
-    children.set(edge.source, list)
-  }
-  const constraints: { left: string; right: string }[] = []
-  for (const targets of children.values()) {
-    targets.reduce((left, right) => {
-      constraints.push({ left, right })
-      return right
-    })
-  }
-  return constraints
+  const laidEdges = edges.map((edge) => {
+    const points = graph.edge({ v: edge.source, w: edge.target, name: edge.id })?.points ?? []
+    // Three points is dagre's route for adjacent ranks (leave, middle, arrive):
+    // nothing is in the way, and the edge's own orthogonal path is cleaner.
+    // Anything longer passed through dummy nodes between the ranks.
+    if (points.length <= 3) return edge
+    return { ...edge, data: { ...edge.data, route: points.slice(1, -1) } }
+  })
+  return { nodes: laidNodes, edges: laidEdges }
 }
 
 /** `layoutFlow`, recomputed only when the graph itself changes. */
 export function useFlowLayout<N extends Node>(
   nodes: readonly N[],
-  edges: readonly Edge[],
+  edges: readonly FlowEdgeType[],
   shapes: FlowNodeShapes,
   options?: FlowLayoutOptions,
-): N[] {
+): FlowLayout<N> {
   const direction = options?.direction
   const nodeSpacing = options?.nodeSpacing
   const rankSpacing = options?.rankSpacing

@@ -1,0 +1,2 @@
+DROP TRIGGER sequence_step_branches_advance_updated_at ON sequence_step_branches;
+DROP FUNCTION sequence_step_branches_advance_updated_at();

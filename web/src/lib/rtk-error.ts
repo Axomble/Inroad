@@ -58,6 +58,29 @@ export function isEmailNotVerified(err: unknown): boolean {
 }
 
 /**
+ * One field of the API's error envelope, unvalidated — the caller narrows it.
+ * `undefined` for a non-HTTP error or a body that isn't an object. The one seam
+ * for reading an error body, so features never cast `error.data` themselves.
+ */
+export function errorField(err: unknown, field: string): unknown {
+  if (!isFetchBaseQueryError(err)) return undefined
+  const { data } = err
+  if (typeof data !== 'object' || data === null || !Object.hasOwn(data, field)) return undefined
+  return (data as Record<string, unknown>)[field]
+}
+
+/**
+ * The machine `code` in the API's error envelope (`{"error": msg, "code": …}`),
+ * or `undefined` when the error carries none. `serverDetail` deliberately drops
+ * machine codes from prose; this is the seam that reads them when a caller
+ * needs to react to *which* failure it was (e.g. a branch write's `cycle`).
+ */
+export function errorCode(err: unknown): string | undefined {
+  const code = errorField(err, 'code')
+  return typeof code === 'string' && code !== '' ? code : undefined
+}
+
+/**
  * An RTK error once the base query has folded a `Retry-After` delay onto it.
  *
  * The header lives on the raw `Response`, which `fetchBaseQuery` stashes on the

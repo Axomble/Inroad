@@ -22,6 +22,16 @@ export type { CampaignEnrollment } from '@/store/api'
 // Step shapes are generated too; re-export so the sequence editor derives its
 // form/card types from the contract rather than hand-duplicating them.
 export type { SequenceStep, StepRequest } from '@/store/api'
+// Branching shapes: the graph is the campaign's routing, a branch the router
+// attached to one step. Re-exported so the canvas derives from the contract.
+export type {
+  BranchValidationError,
+  CampaignGraph,
+  CampaignGraphNode,
+  StepBranch,
+  StepBranchCondition,
+  StepBranchRequest,
+} from '@/store/api'
 // A/B variant shapes come from the contract too, so the editor's draft state
 // is typed by the same definition the API validates against.
 export type { StepVariant, StepVariantRequest } from '@/store/api'
@@ -58,7 +68,7 @@ export type { CampaignDeliverability, CampaignGuardrails, CampaignPauseEvent } f
 export type { CampaignPreflight, CampaignPreflightCheck, TestSendRequest, TestSendResponse } from '@/store/api'
 
 const campaignApi = api.enhanceEndpoints({
-  addTagTypes: ['Campaign', 'Step', 'Schedule', 'SenderPool', 'Guardrails', 'Variant'],
+  addTagTypes: ['Campaign', 'Step', 'Graph', 'Schedule', 'SenderPool', 'Guardrails', 'Variant'],
   endpoints: {
     listCampaigns: {
       providesTags: (result) =>
@@ -154,17 +164,43 @@ const campaignApi = api.enhanceEndpoints({
         { type: 'Step', id: arg.id },
       ],
     },
+    // Structural step writes also invalidate the graph: a create or reorder
+    // moves fall-through edges, and a delete nulls the branch exits that
+    // pointed at the removed step (ON DELETE SET NULL). A content edit changes
+    // neither, so `updateStep` leaves the graph alone.
     createStep: {
-      invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Step', id: arg.id },
+        { type: 'Graph', id: arg.id },
+      ],
     },
     updateStep: {
       invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
     },
     deleteStep: {
-      invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Step', id: arg.id },
+        { type: 'Graph', id: arg.id },
+      ],
     },
     reorderSteps: {
-      invalidatesTags: (_result, _error, arg) => [{ type: 'Step', id: arg.id }],
+      invalidatesTags: (_result, _error, arg) => [
+        { type: 'Step', id: arg.id },
+        { type: 'Graph', id: arg.id },
+      ],
+    },
+    // --- Branching ---------------------------------------------------------
+    //
+    // A branch write changes routing only — never a step's content — so it
+    // invalidates the graph and not the step list.
+    getCampaignGraph: {
+      providesTags: (_result, _error, arg) => [{ type: 'Graph', id: arg.id }],
+    },
+    setStepBranch: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Graph', id: arg.id }],
+    },
+    deleteStepBranch: {
+      invalidatesTags: (_result, _error, arg) => [{ type: 'Graph', id: arg.id }],
     },
     // The sending schedule gets its own tag rather than reusing `Campaign`: a
     // schedule save shouldn't refetch metrics and steps, and a campaign mutation
@@ -211,6 +247,9 @@ export const {
   useUpdateStepMutation,
   useDeleteStepMutation,
   useReorderStepsMutation,
+  useGetCampaignGraphQuery,
+  useSetStepBranchMutation,
+  useDeleteStepBranchMutation,
   useListStepVariantsQuery,
   useCreateStepVariantMutation,
   useUpdateStepVariantMutation,

@@ -48,6 +48,34 @@ func (q *Queries) DeleteBranch(ctx context.Context, arg DeleteBranchParams) erro
 	return err
 }
 
+const deleteBranchIfUnchanged = `-- name: DeleteBranchIfUnchanged :execrows
+DELETE FROM sequence_step_branches
+WHERE step_id = $1 AND campaign_id = $2 AND workspace_id = $3
+  AND updated_at = $4::timestamptz
+`
+
+type DeleteBranchIfUnchangedParams struct {
+	StepID            uuid.UUID          `json:"step_id"`
+	CampaignID        uuid.UUID          `json:"campaign_id"`
+	WorkspaceID       uuid.UUID          `json:"workspace_id"`
+	ExpectedUpdatedAt pgtype.Timestamptz `json:"expected_updated_at"`
+}
+
+// Remove a step's router only if its updated_at still equals the value the
+// client last read. Zero rows means it changed or was already removed.
+func (q *Queries) DeleteBranchIfUnchanged(ctx context.Context, arg DeleteBranchIfUnchangedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteBranchIfUnchanged,
+		arg.StepID,
+		arg.CampaignID,
+		arg.WorkspaceID,
+		arg.ExpectedUpdatedAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const firstHumanTrackingEventAt = `-- name: FirstHumanTrackingEventAt :one
 SELECT created_at FROM tracking_events
 WHERE send_id = $1 AND workspace_id = $2 AND kind = $3 AND NOT is_machine
@@ -127,6 +155,88 @@ func (q *Queries) FirstInboundReplyAt(ctx context.Context, arg FirstInboundReply
 	var created_at pgtype.Timestamptz
 	err := row.Scan(&created_at)
 	return created_at, err
+}
+
+const getBranch = `-- name: GetBranch :one
+SELECT step_id, workspace_id, campaign_id, condition, within_days, reply_label_key, yes_step_id, no_step_id, created_at, updated_at FROM sequence_step_branches
+WHERE step_id = $1 AND campaign_id = $2 AND workspace_id = $3
+`
+
+type GetBranchParams struct {
+	StepID      uuid.UUID `json:"step_id"`
+	CampaignID  uuid.UUID `json:"campaign_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+}
+
+// One step's router, workspace- and campaign-pinned. Read inside a refused
+// precondition's transaction, so the 409 carries the branch that won.
+func (q *Queries) GetBranch(ctx context.Context, arg GetBranchParams) (SequenceStepBranch, error) {
+	row := q.db.QueryRow(ctx, getBranch, arg.StepID, arg.CampaignID, arg.WorkspaceID)
+	var i SequenceStepBranch
+	err := row.Scan(
+		&i.StepID,
+		&i.WorkspaceID,
+		&i.CampaignID,
+		&i.Condition,
+		&i.WithinDays,
+		&i.ReplyLabelKey,
+		&i.YesStepID,
+		&i.NoStepID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const insertBranchIfAbsent = `-- name: InsertBranchIfAbsent :one
+INSERT INTO sequence_step_branches (step_id, workspace_id, campaign_id, condition, within_days,
+                                    reply_label_key, yes_step_id, no_step_id)
+VALUES ($1, $2, $3, $4, $5, $6,
+        $7, $8)
+ON CONFLICT (step_id) DO NOTHING
+RETURNING step_id, workspace_id, campaign_id, condition, within_days, reply_label_key, yes_step_id, no_step_id, created_at, updated_at
+`
+
+type InsertBranchIfAbsentParams struct {
+	StepID        uuid.UUID   `json:"step_id"`
+	WorkspaceID   uuid.UUID   `json:"workspace_id"`
+	CampaignID    uuid.UUID   `json:"campaign_id"`
+	Condition     string      `json:"condition"`
+	WithinDays    *int32      `json:"within_days"`
+	ReplyLabelKey *string     `json:"reply_label_key"`
+	YesStepID     pgtype.UUID `json:"yes_step_id"`
+	NoStepID      pgtype.UUID `json:"no_step_id"`
+}
+
+// Create the router on one step only if the step has none: the "expect no
+// branch" precondition. No row returned means one already exists (the caller
+// reads it with GetBranch to report it). Atomic on its own via the primary key,
+// so two concurrent creates cannot both succeed even without the graph lock.
+func (q *Queries) InsertBranchIfAbsent(ctx context.Context, arg InsertBranchIfAbsentParams) (SequenceStepBranch, error) {
+	row := q.db.QueryRow(ctx, insertBranchIfAbsent,
+		arg.StepID,
+		arg.WorkspaceID,
+		arg.CampaignID,
+		arg.Condition,
+		arg.WithinDays,
+		arg.ReplyLabelKey,
+		arg.YesStepID,
+		arg.NoStepID,
+	)
+	var i SequenceStepBranch
+	err := row.Scan(
+		&i.StepID,
+		&i.WorkspaceID,
+		&i.CampaignID,
+		&i.Condition,
+		&i.WithinDays,
+		&i.ReplyLabelKey,
+		&i.YesStepID,
+		&i.NoStepID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const listBranchesByCampaign = `-- name: ListBranchesByCampaign :many
@@ -237,6 +347,62 @@ func (q *Queries) StepSendCreatedAt(ctx context.Context, arg StepSendCreatedAtPa
 	return created_at, err
 }
 
+const updateBranchIfUnchanged = `-- name: UpdateBranchIfUnchanged :one
+UPDATE sequence_step_branches
+SET condition = $1, within_days = $2,
+    reply_label_key = $3, yes_step_id = $4,
+    no_step_id = $5
+WHERE step_id = $6 AND workspace_id = $7
+  AND campaign_id = $8
+  AND updated_at = $9::timestamptz
+RETURNING step_id, workspace_id, campaign_id, condition, within_days, reply_label_key, yes_step_id, no_step_id, created_at, updated_at
+`
+
+type UpdateBranchIfUnchangedParams struct {
+	Condition         string             `json:"condition"`
+	WithinDays        *int32             `json:"within_days"`
+	ReplyLabelKey     *string            `json:"reply_label_key"`
+	YesStepID         pgtype.UUID        `json:"yes_step_id"`
+	NoStepID          pgtype.UUID        `json:"no_step_id"`
+	StepID            uuid.UUID          `json:"step_id"`
+	WorkspaceID       uuid.UUID          `json:"workspace_id"`
+	CampaignID        uuid.UUID          `json:"campaign_id"`
+	ExpectedUpdatedAt pgtype.Timestamptz `json:"expected_updated_at"`
+}
+
+// Replace the router on one step only if its updated_at still equals the value
+// the client last read: the "expect this version" precondition. No row returned
+// means the branch changed or is gone. Compared at full (microsecond) precision;
+// the trigger guarantees every write moves the value. Pinned on workspace_id and
+// campaign_id.
+func (q *Queries) UpdateBranchIfUnchanged(ctx context.Context, arg UpdateBranchIfUnchangedParams) (SequenceStepBranch, error) {
+	row := q.db.QueryRow(ctx, updateBranchIfUnchanged,
+		arg.Condition,
+		arg.WithinDays,
+		arg.ReplyLabelKey,
+		arg.YesStepID,
+		arg.NoStepID,
+		arg.StepID,
+		arg.WorkspaceID,
+		arg.CampaignID,
+		arg.ExpectedUpdatedAt,
+	)
+	var i SequenceStepBranch
+	err := row.Scan(
+		&i.StepID,
+		&i.WorkspaceID,
+		&i.CampaignID,
+		&i.Condition,
+		&i.WithinDays,
+		&i.ReplyLabelKey,
+		&i.YesStepID,
+		&i.NoStepID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const upsertBranch = `-- name: UpsertBranch :one
 INSERT INTO sequence_step_branches (step_id, workspace_id, campaign_id, condition, within_days,
                                     reply_label_key, yes_step_id, no_step_id)
@@ -245,7 +411,7 @@ VALUES ($1, $2, $3, $4, $5, $6,
 ON CONFLICT (step_id) DO UPDATE
 SET condition = EXCLUDED.condition, within_days = EXCLUDED.within_days,
     reply_label_key = EXCLUDED.reply_label_key, yes_step_id = EXCLUDED.yes_step_id,
-    no_step_id = EXCLUDED.no_step_id, updated_at = now()
+    no_step_id = EXCLUDED.no_step_id
 WHERE sequence_step_branches.workspace_id = EXCLUDED.workspace_id
   AND sequence_step_branches.campaign_id = EXCLUDED.campaign_id
 RETURNING step_id, workspace_id, campaign_id, condition, within_days, reply_label_key, yes_step_id, no_step_id, created_at, updated_at
@@ -267,7 +433,10 @@ type UpsertBranchParams struct {
 // (source or target) that is not in that campaign, so a foreign id cannot be
 // smuggled in even if the service's own check were skipped. The ON CONFLICT
 // update is pinned on workspace_id as well: a step id belonging to another tenant
-// updates nothing and returns no row.
+// updates nothing and returns no row. updated_at is not written here: a trigger
+// advances it on every insert and update (migration
+// 20260923161044_step_branch_updated_at_advances), because it is the branch's
+// concurrency token.
 func (q *Queries) UpsertBranch(ctx context.Context, arg UpsertBranchParams) (SequenceStepBranch, error) {
 	row := q.db.QueryRow(ctx, upsertBranch,
 		arg.StepID,

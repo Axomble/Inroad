@@ -70,6 +70,7 @@ beforeEach(() => {
       // return BARE ARRAYS, and `listCampaigns`'s `providesTags` calls
       // `result.map`, so an object stub there throws inside RTK Query itself.
       if (url.includes('/steps')) return jsonResponse([])
+      if (url.includes('/graph')) return jsonResponse({ campaign_id: CAMPAIGN_ID, entry_step_id: null, nodes: [] })
       if (url.includes('/schedule')) return jsonResponse({ days: [], timezone: 'UTC' })
       if (url.includes('/senders')) return jsonResponse({ mailbox_ids: [], rotation: 'round_robin' })
       if (url.includes('/mailboxes')) return jsonResponse([])
