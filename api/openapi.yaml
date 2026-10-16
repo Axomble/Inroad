@@ -2316,6 +2316,16 @@ paths:
         a step - including a loop closed by another step's linear fall-through -
         and with 422 (code unknown_target) when an exit names a step outside
         this campaign.
+
+
+        Optimistic concurrency. Without expected_updated_at the write replaces
+        whatever branch the step has (last writer wins). With it, the write
+        applies only if the step is still as the client last saw it - null
+        means "the step has no branch" (create-only), a timestamp means "the
+        branch's updated_at is still exactly this". Otherwise nothing is written
+        and the response is 409 (code branch_changed) carrying the branch as it
+        is now in current (null if the step has none). The precondition is
+        checked after the body is validated.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/StepBranchRequest' } } }
@@ -2327,6 +2337,9 @@ paths:
         '401': { description: Unauthorized }
         '403': { description: "Insufficient scope (campaigns:write)" }
         '404': { description: Campaign or step not found }
+        '409':
+          description: "expected_updated_at no longer holds - the branch was created, replaced or removed since it was read (code branch_changed, with current)"
+          content: { application/json: { schema: { $ref: '#/components/schemas/BranchValidationError' } } }
         '422':
           description: "The graph refuses the edit (codes cycle, unknown_target)"
           content: { application/json: { schema: { $ref: '#/components/schemas/BranchValidationError' } } }
@@ -2336,15 +2349,32 @@ paths:
       security: [{ bearerAuth: [] }]
       description: >-
         Remove the step's branch, returning it to linear fall-through (the next
-        step by step_order). Idempotent. Allowed on a running campaign; a contact
-        waiting on the removed condition proceeds to the fall-through step, which
-        still waits out its own delay_seconds from this step's send. Refused with
-        422 (code cycle) if the restored fall-through would close a loop.
+        step by step_order). Idempotent without expected_updated_at. Allowed on a
+        running campaign; a contact waiting on the removed condition proceeds to
+        the fall-through step, which still waits out its own delay_seconds from
+        this step's send. Refused with 422 (code cycle) if the restored
+        fall-through would close a loop.
+
+
+        With expected_updated_at the branch is removed only if its updated_at
+        is still exactly that value; otherwise 409 (code branch_changed) with
+        the branch as it is now in current - null when someone else already
+        removed it, which a client may treat as done.
+      parameters:
+        - name: expected_updated_at
+          in: query
+          required: false
+          description: "The branch's updated_at exactly as this API returned it (URL-encoded). Omit for an unconditional delete."
+          schema: { type: string, format: date-time }
       responses:
         '204': { description: Removed (or there was none) }
+        '400': { description: "expected_updated_at is not a timestamp this API could have returned" }
         '401': { description: Unauthorized }
         '403': { description: "Insufficient scope (campaigns:write)" }
         '404': { description: Campaign or step not found }
+        '409':
+          description: "expected_updated_at no longer holds (code branch_changed, with current)"
+          content: { application/json: { schema: { $ref: '#/components/schemas/BranchValidationError' } } }
         '422':
           description: The restored fall-through would close a loop (code cycle)
           content: { application/json: { schema: { $ref: '#/components/schemas/BranchValidationError' } } }
@@ -5172,7 +5202,7 @@ components:
         reply_label_key: { type: string, nullable: true, description: "replied / not_replied only: count only replies classified with this reply label key (always a label that does not stop the sequence)" }
         yes_step_id: { type: string, format: uuid, nullable: true, description: "Where a true condition (or always) goes; null ends the path" }
         no_step_id: { type: string, format: uuid, nullable: true, description: "Where a false condition goes; null ends the path; always null for always" }
-        updated_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time, description: "When the branch last changed, at microsecond precision. Also its concurrency token - send it back verbatim as expected_updated_at (re-formatting through a millisecond clock such as a JS Date loses digits and never matches). Advances on every change, including an exit nulled because its target step was deleted." }
     StepBranchRequest:
       type: object
       required: [condition]
@@ -5182,6 +5212,7 @@ components:
         reply_label_key: { type: string, nullable: true, description: "Optional, replied / not_replied only. Must name a reply label key in the workspace whose stops_enrollment is false (a stopping label ends the sequence before any branch runs). Empty string is treated as null." }
         yes_step_id: { type: string, format: uuid, nullable: true, description: "A step of the same campaign, not this step; null or absent ends the path" }
         no_step_id: { type: string, format: uuid, nullable: true, description: "As yes_step_id; must be null or absent for always" }
+        expected_updated_at: { type: string, format: date-time, nullable: true, description: "Optional precondition. Absent - no check (last writer wins). null - apply only if the step has no branch. A timestamp - apply only if the branch's updated_at is still exactly this (the StepBranch.updated_at value verbatim). A failed check is 409 code branch_changed." }
     CampaignGraphNode:
       type: object
       required: [step_id, step_order, default_next_step_id, branch]
@@ -5208,11 +5239,16 @@ components:
         error: { type: string, description: Human-readable message }
         code:
           type: string
-          enum: [invalid_condition, invalid_within_days, invalid_reply_label, reply_label_stops_sequence, tracking_required, no_exit_not_allowed, unknown_step, unknown_target, cycle]
+          enum: [invalid_condition, invalid_within_days, invalid_reply_label, reply_label_stops_sequence, tracking_required, no_exit_not_allowed, unknown_step, unknown_target, cycle, branch_changed]
         step_ids:
           type: array
           items: { type: string, format: uuid }
           description: "code cycle only: the steps on the loop, in path order"
+        current:
+          allOf: [{ $ref: '#/components/schemas/StepBranch' }]
+          type: object
+          nullable: true
+          description: "code branch_changed only, and always present then: the step's branch as it is now, or null if it has none"
     CreateCampaignRequest:
       type: object
       required: [name, mailbox_id, list_id, subject]
