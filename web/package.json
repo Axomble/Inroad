@@ -75,7 +75,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "jsdom": "~30.0.1",
-    "oxlint": "1.88.0",
+    "oxlint": "1.85.0",
     "tailwindcss": "^4.3.3",
     "ts-node": "^10.9.2",
     "typescript": "~7.0.2",
