@@ -259,6 +259,7 @@ broken — are in [docs/security.md](docs/security.md).
 | [docs/self-hosting.md](docs/self-hosting.md) | Deploying, env vars, and connecting Gmail / M365 (OAuth setup, scopes, redirect URIs) |
 | [api/openapi.yaml](api/openapi.yaml) | The REST contract. The SPA's typed client is generated from it |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Dev loop, native setup, tests, and what a good PR looks like |
+| [ROADMAP.md](ROADMAP.md) | What is shipped, what is next and why, and the standing hazards worth knowing |
 
 The same docs ship as a browsable site (`docs/`, Astro/Starlight). The dev stack serves it on
 <http://localhost:4321>.

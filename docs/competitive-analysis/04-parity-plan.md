@@ -157,7 +157,18 @@ to recover if they lock themselves out.
 
 Re-score `01-feature-matrix.md` at the end of each sprint.
 
-### The immediate list, in order (as of 2026-09-08 @ `d4f5720`)
+> **Superseded 2026-10-20 — see [`ROADMAP.md`](../../ROADMAP.md).** Every item in
+> the list below has since shipped: the webhook UI, the blob seam's filesystem
+> implementation and factory, the warmup header-loss fallback, and contact
+> export. It is kept for the record rather than deleted, because the sequencing
+> argument it makes is still the right one; only its contents are spent.
+>
+> The ordered plan now lives in `ROADMAP.md`, which is reconciled against the
+> tree. **This file remains the backlog — what is missing — not the schedule.**
+> Keeping the schedule in two places is what let five shipped features read as
+> outstanding here for a month.
+
+### ~~The immediate list, in order (as of 2026-09-08 @ `d4f5720`)~~ — spent
 
 Small enough to finish before the next re-score, and each one closes a row
 rather than starting a surface:
